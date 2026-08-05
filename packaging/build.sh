@@ -87,12 +87,12 @@ for target in "${TARGETS[@]}"; do
   echo ""
   echo "▶ Building $GOOS/$GOARCH → $(basename "$OUTPUT")"
 
-  GOOS="$GOOS" GOARCH="$GOARCH" CGO_ENABLED=0 \
+  (cd "$AGENT_DIR" && GOOS="$GOOS" GOARCH="$GOARCH" CGO_ENABLED=0 \
     go build \
       -ldflags "$LDFLAGS" \
       -trimpath \
       -o "$OUTPUT" \
-      "$AGENT_DIR"
+      .)
 
   # Compute and store SHA-256 checksum alongside the binary
   if command -v shasum &>/dev/null; then

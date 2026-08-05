@@ -3,6 +3,9 @@ package collector
 import (
 	"fmt"
 	"math"
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/distatus/battery"
@@ -135,14 +138,40 @@ func (h *HardwareStats) Collect() (map[string]interface{}, error) {
 	// ── Battery ───────────────────────────────────────────────
 	batt := BatteryStat{Available: false}
 	batteries, battErr := battery.GetAll()
-	if battErr == nil && len(batteries) > 0 {
+	// battery.GetAll() returns a battery.Errors ([]error) value, which is
+	// a non-nil slice even when every individual battery read succeeds with
+	// only partial errors (ErrPartial). A direct `battErr == nil` check always
+	// fails on Linux when some sysfs fields are missing (e.g. charge_full on
+	// some ThinkPads). Instead, treat any non-ErrFatal result as usable data.
+	battUsable := false
+	if battErr == nil {
+		battUsable = true
+	} else if errs, ok := battErr.(battery.Errors); ok {
+		// Errors is []error — usable if at least one entry is nil or ErrPartial
+		// (meaning the battery struct was populated even if some fields failed).
+		for _, e := range errs {
+			if e == nil {
+				battUsable = true
+				break
+			}
+			if _, isPartial := e.(battery.ErrPartial); isPartial {
+				battUsable = true
+				break
+			}
+		}
+	}
+	if battUsable && len(batteries) > 0 {
 		b := batteries[0] // use first battery (covers most laptops)
 		batt.Available = true
 
 		// Percent: Current / Full * 100
-		// b.Current and b.Full are in mWh; ratio gives %
+		// b.Current and b.Full are in mWh; ratio gives %.
+		// Fall back to reading capacity% directly from sysfs when Full == 0
+		// (some kernels/firmware report 0 for charge_full).
 		if b.Full > 0 {
 			batt.Percent = round2(b.Current / b.Full * 100)
+		} else {
+			batt.Percent = round2(readSysfsBatteryCapacity())
 		}
 
 		// State string and derived flags.
@@ -201,4 +230,35 @@ func toGB(bytes uint64) float64 {
 // round2 rounds v to 2 decimal places.
 func round2(v float64) float64 {
 	return math.Round(v*100) / 100
+}
+
+// readSysfsBatteryCapacity is a direct sysfs fallback for when the distatus/battery
+// library cannot compute a percentage (e.g. charge_full returns "no such device"
+// on some ThinkPads / older kernels). Reads /sys/class/power_supply/BAT*/capacity
+// which is a simple integer 0-100 written by the kernel's power-supply core and
+// is always available when a battery is present.
+func readSysfsBatteryCapacity() float64 {
+	const sysfsBase = "/sys/class/power_supply"
+	entries, err := os.ReadDir(sysfsBase)
+	if err != nil {
+		return 0
+	}
+	for _, e := range entries {
+		path := sysfsBase + "/" + e.Name()
+		// Only look at battery nodes.
+		typeBytes, err := os.ReadFile(path + "/type")
+		if err != nil || strings.TrimSpace(string(typeBytes)) != "Battery" {
+			continue
+		}
+		capBytes, err := os.ReadFile(path + "/capacity")
+		if err != nil {
+			continue
+		}
+		val, err := strconv.ParseFloat(strings.TrimSpace(string(capBytes)), 64)
+		if err != nil {
+			continue
+		}
+		return val // 0-100
+	}
+	return 0
 }

