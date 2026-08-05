@@ -1,0 +1,63 @@
+# =============================================================================
+# DevicePulse Agent — Active Window Tracker (per-user session service)
+#
+# This companion service runs as the logged-in user inside their graphical
+# session. It handles ONLY active window tracking, which requires access to:
+#   - $DISPLAY / $WAYLAND_DISPLAY (X11 socket or Wayland compositor)
+#   - D-Bus session bus (for Wayland/GNOME and Wayland/KDE paths)
+#   - $SWAYSOCK (for Sway/wlroots)
+#
+# These are all per-user session resources that root cannot access.
+#
+# Install location: /usr/lib/systemd/user/devicepulse-agent-window.service
+# Enabled per-user via:
+#   systemctl --user enable --now devicepulse-agent-window
+# Or enabled globally for all users via:
+#   systemctl --global enable devicepulse-agent-window
+#
+# The main system service (devicepulse-agent.service) collects all other
+# telemetry as root. This service patches in active window data by writing
+# to a shared socket or by running in ACTIVE_WINDOW_ONLY mode.
+# =============================================================================
+
+[Unit]
+Description=DevicePulse Agent — Active Window Tracker
+Documentation=https://github.com/your-org/DevicePulse
+# Only start after the graphical session is ready.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/devicepulse-agent
+
+# ── Run mode ─────────────────────────────────────────────────────────────────
+# DEVICEPULSE_MODE=window_only tells the agent to collect ONLY active window
+# data and report it. All other collectors are disabled to avoid duplicate
+# telemetry with the root service.
+Environment=DEVICEPULSE_MODE=window_only
+
+# Data dir: same shared directory as the root service so both services
+# write to the same SQLite queue. The root service creates and owns this
+# directory (mode 0777 to allow user writes).
+Environment=DEVICEPULSE_DATA_DIR=/var/lib/devicepulse
+
+# Pass through the display session environment variables.
+# systemd user services inherit these automatically from the login session
+# when started via PAM/logind (systemd >= 219).
+# If not inherited, set them explicitly here:
+#   Environment=DISPLAY=:0
+#   Environment=WAYLAND_DISPLAY=wayland-0
+#   Environment=XDG_SESSION_TYPE=wayland
+# Uncomment the next line if your distro doesn't pass them automatically:
+# EnvironmentFile=/run/user/%i/environment
+
+Restart=on-failure
+RestartSec=5s
+
+# Low-privilege: user service has no extra rights beyond the logged-in user.
+NoNewPrivileges=true
+
+[Install]
+# WantedBy=default.target starts it after login for all user sessions.
+WantedBy=default.target

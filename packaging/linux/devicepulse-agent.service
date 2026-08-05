@@ -1,0 +1,39 @@
+[Unit]
+Description=DevicePulse Agent (system telemetry)
+Documentation=https://github.com/your-org/DevicePulse
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/devicepulse-agent
+WorkingDirectory=/var/lib/devicepulse
+
+# ── Run as root for full system access ───────────────────────────────────────
+# Root access is required for:
+#   - Browser history in any user's home directory
+#   - /proc reads for all processes (not just own)
+#   - /sys/bus/usb/devices without restrictions
+#   - /var/lib/dpkg, pacman, RPM databases
+#   - Network port enumeration via /proc/net
+# NOTE: Active window tracking (X11/Wayland) is handled by the per-user
+#       service unit devicepulse-agent-user.service, because display sessions
+#       are owned by the logged-in user, not root.
+User=root
+Group=root
+
+# Data directory
+Environment=DEVICEPULSE_DATA_DIR=/var/lib/devicepulse
+
+Restart=on-failure
+RestartSec=10s
+
+# Hardening: limit what root can do even though we need elevated access.
+# We keep NoNewPrivileges which prevents gaining further capabilities
+# (e.g. via setuid binaries). We do NOT set ProtectSystem since we need
+# broad read access across the filesystem.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

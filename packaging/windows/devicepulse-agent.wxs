@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  DevicePulse Agent — WiX Toolset installer definition
+  Requires: WiX Toolset v3 (candle.exe + light.exe)
+  Built by: packaging/windows/build_msi.sh (or build_msi.bat on Windows)
+
+  What this installer does:
+    - Installs devicepulse-agent.exe to C:\Program Files\DevicePulse\Agent\
+    - Creates a Windows Service (auto-start, runs as LocalSystem)
+    - Starts the service after installation
+    - Stops and removes the service on uninstall
+    - Adds an entry in Add/Remove Programs
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+
+  <Product
+    Id="*"
+    Name="DevicePulse Agent"
+    Language="1033"
+    Version="$(var.Version)"
+    Manufacturer="DevicePulse"
+    UpgradeCode="3F8A1B2C-4D5E-6F7A-8B9C-0D1E2F3A4B5C">
+
+    <Package
+      InstallerVersion="500"
+      Compressed="yes"
+      InstallScope="perMachine"
+      Description="DevicePulse Agent $(var.Version)"
+      Comments="Endpoint telemetry agent for DevicePulse" />
+
+    <!-- Embed all files in the MSI -->
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- ── Upgrade handling ─────────────────────────────────────────────── -->
+    <!-- Automatically removes the older version when a newer one is installed -->
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of DevicePulse Agent is already installed."
+      Schedule="afterInstallInitialize" />
+
+    <!-- ── Directory structure ─────────────────────────────────────────── -->
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="DEVICEPULSEDIR" Name="DevicePulse">
+          <Directory Id="INSTALLDIR" Name="Agent" />
+        </Directory>
+      </Directory>
+
+      <!-- Data directory: C:\ProgramData\DevicePulse\ -->
+      <Directory Id="CommonAppDataFolder">
+        <Directory Id="DATAROOTDIR" Name="DevicePulse">
+          <Directory Id="DATADIR" Name="Agent" />
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <!-- ── Components ──────────────────────────────────────────────────── -->
+    <ComponentGroup Id="AgentComponents" Directory="INSTALLDIR">
+
+      <!-- Agent binary -->
+      <Component Id="AgentBinary" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
+        <File
+          Id="AgentExe"
+          Source="$(var.BinaryPath)"
+          Name="devicepulse-agent.exe"
+          KeyPath="yes" />
+
+        <!-- Windows Service definition -->
+        <ServiceInstall
+          Id="AgentService"
+          Name="DevicePulseAgent"
+          DisplayName="DevicePulse Agent"
+          Description="Streams endpoint telemetry to the DevicePulse API."
+          Type="ownProcess"
+          Start="auto"
+          ErrorControl="normal"
+          Account="LocalSystem"
+          Arguments=""
+          Interactive="no" />
+
+        <!-- Start service after install, stop on uninstall -->
+        <ServiceControl
+          Id="AgentServiceControl"
+          Name="DevicePulseAgent"
+          Start="install"
+          Stop="both"
+          Remove="uninstall"
+          Wait="yes" />      </Component>
+
+      <!-- Data directory: C:\ProgramData\DevicePulse\Agent
+           LocalSystem (SYSTEM account) has full control by default over
+           ProgramData subdirectories. We explicitly grant it here for clarity
+           and also grant NETWORK SERVICE read/write in case the service
+           account is changed later. -->
+      <Component Id="DataDirectory" Guid="B2C3D4E5-F6A7-8901-BCDE-F12345678901">
+        <CreateFolder Directory="DATADIR">
+          <util:PermissionEx
+            User="SYSTEM"
+            GenericAll="yes" />
+          <!-- Administrators can inspect logs and registration.json -->
+          <util:PermissionEx
+            User="Administrators"
+            GenericRead="yes"
+            GenericWrite="yes" />
+        </CreateFolder>
+        <KeyPath Id="DataDirKey" />
+      </Component>
+
+    </ComponentGroup>
+
+    <!-- ── Features ────────────────────────────────────────────────────── -->
+    <Feature Id="MainFeature" Title="DevicePulse Agent" Level="1">
+      <ComponentGroupRef Id="AgentComponents" />
+    </Feature>
+
+    <!-- ── UI ──────────────────────────────────────────────────────────── -->
+    <!-- Minimal UI: just a progress bar, no wizard pages -->
+    <UIRef Id="WixUI_Minimal" />
+
+    <!-- ── Add/Remove Programs metadata ───────────────────────────────── -->
+    <Property Id="ARPCOMMENTS" Value="DevicePulse endpoint telemetry agent" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/your-org/DevicePulse" />
+    <Property Id="ARPURLINFOABOUT" Value="https://devicepulse.io" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+
+  </Product>
+</Wix>
