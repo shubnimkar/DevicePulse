@@ -155,23 +155,6 @@ interface Device {
   data?: DeviceData;
 }
 
-interface AlertRule {
-  id?: string;
-  device_id: string;
-  metric: string;
-  condition: string;
-  threshold: number;
-}
-
-interface AlertFiring {
-  device_id: string;
-  metric: string;
-  value: number;
-  threshold: number;
-  condition: string;
-  fired_at: string;
-}
-
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 // authHeaders returns request init options with the dashboard read token set.
@@ -394,7 +377,7 @@ function HardwareSection({ hw }: { hw?: HardwareStats }) {
 // ─── Services Section ─────────────────────────────────────────────────────────
 
 function ServicesSection({ data }: { data?: { services: ServiceEntry[] | null; source?: string } }) {
-  const [filter, setFilter] = useState<'all' | 'running' | 'stopped'>('running');
+  const [filter, setFilter] = useState<'all' | 'running' | 'stopped'>('all');
   const services = data?.services ?? [];
   if (!services.length) return <div className="no-data">No service data yet.</div>;
 
@@ -680,121 +663,6 @@ function ActiveWindowSection({ data, cachedSummaries }: { data?: ActiveWindowDat
   );
 }
 
-// ─── Alert Panel ──────────────────────────────────────────────────────────────
-
-function AlertPanel({
-  devices,
-  rules,
-  firings,
-  onAddRule,
-  onDeleteRule,
-}: {
-  devices: Device[];
-  rules: AlertRule[];
-  firings: AlertFiring[];
-  onAddRule: (r: Omit<AlertRule, 'id'>) => void;
-  onDeleteRule: (id: string) => void;
-}) {
-  const [form, setForm] = useState<Omit<AlertRule, 'id'>>({
-    device_id: '*',
-    metric: 'cpu_percent',
-    condition: 'gt',
-    threshold: 80,
-  });
-
-  return (
-    <div className="alert-panel">
-      <h3>Alert Rules</h3>
-      <p className="policy-desc">Trigger alerts when a metric crosses a threshold.</p>
-
-      {/* New Rule Form */}
-      <div className="alert-form">
-        <select
-          value={form.device_id}
-          onChange={e => setForm(f => ({ ...f, device_id: e.target.value }))}
-          className="alert-select"
-        >
-          <option value="*">All Devices</option>
-          {devices.map(d => (
-            <option key={d.device_id} value={d.device_id}>
-              {d.hostname || d.device_id}
-            </option>
-          ))}
-        </select>
-
-        <select
-          value={form.metric}
-          onChange={e => setForm(f => ({ ...f, metric: e.target.value }))}
-          className="alert-select"
-        >
-          <option value="cpu_percent">CPU %</option>
-          <option value="ram_percent">RAM %</option>
-          <option value="disk_percent">Disk %</option>
-          <option value="battery_percent">Battery %</option>
-        </select>
-
-        <select
-          value={form.condition}
-          onChange={e => setForm(f => ({ ...f, condition: e.target.value }))}
-          className="alert-select"
-        >
-          <option value="gt">&gt; above</option>
-          <option value="lt">&lt; below</option>
-        </select>
-
-        <input
-          type="number"
-          min={0}
-          max={100}
-          value={form.threshold}
-          onChange={e => setForm(f => ({ ...f, threshold: Number(e.target.value) }))}
-          className="alert-input"
-        />
-
-        <button className="alert-add-btn" onClick={() => onAddRule(form)}>
-          Add Rule
-        </button>
-      </div>
-
-      {/* Existing Rules */}
-      {rules.length > 0 && (
-        <ul className="rule-list">
-          {rules.map((r) => (
-            <li key={r.id} className="rule-item">
-              <span className="rule-text">
-                <span className="rule-device">{r.device_id === '*' ? 'All' : r.device_id}</span>
-                {' '}{r.metric} {r.condition === 'gt' ? '>' : '<'} {r.threshold}%
-              </span>
-              <button className="rule-delete" onClick={() => r.id && onDeleteRule(r.id)}>✕</button>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {/* Recent Firings */}
-      {firings.length > 0 && (
-        <div className="firings-section">
-          <div className="firings-title">Recent Firings</div>
-          <ul className="firings-list">
-            {firings.slice(0, 8).map((f, i) => (
-              <li key={i} className="firing-item">
-                <span className="firing-badge">🔔</span>
-                <span className="firing-text">
-                  <b>{f.device_id}</b> — {f.metric} = {f.value.toFixed(1)}%{' '}
-                  ({f.condition === 'gt' ? '>' : '<'} {f.threshold}%)
-                </span>
-                <span className="firing-time">
-                  {new Date(f.fired_at).toLocaleTimeString()}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function Home() {
@@ -803,19 +671,13 @@ export default function Home() {
   const [syncInterval, setSyncInterval] = useState(10);
   const [isUpdating, setIsUpdating]   = useState(false);
   const [activeTab, setActiveTab]     = useState<Record<string, string>>({});
-  const [alertRules, setAlertRules]   = useState<AlertRule[]>([]);
-  const [alertFirings, setAlertFirings] = useState<AlertFiring[]>([]);
   const [focusCache, setFocusCache]   = useState<Record<string, AppFocusSummary[]>>({});
 
   // ── Data fetching ────────────────────────────────────────────────────────────
 
   const fetchAll = useCallback(async () => {
     try {
-      const [devRes, ruleRes, firingRes] = await Promise.all([
-        fetch(`${API}/devices`, { headers: readHeaders() }),
-        fetch(`${API}/alerts/rules`, { headers: readHeaders() }),
-        fetch(`${API}/alerts/firings`, { headers: readHeaders() }),
-      ]);
+      const devRes = await fetch(`${API}/devices`, { headers: readHeaders() });
 
       if (devRes.ok) {
         const data: Device[] = await devRes.json();
@@ -834,8 +696,6 @@ export default function Home() {
         });
         setFocusCache(newFocusCache);
       }
-      if (ruleRes.ok) setAlertRules(await ruleRes.json() ?? []);
-      if (firingRes.ok) setAlertFirings(await firingRes.json() ?? []);
     } catch (e) {
       console.error('Fetch error:', e);
     } finally {
@@ -875,29 +735,6 @@ export default function Home() {
     finally { setIsUpdating(false); }
   };
 
-  // ── Alert CRUD ───────────────────────────────────────────────────────────────
-
-  const addAlertRule = async (rule: Omit<AlertRule, 'id'>) => {
-    try {
-      const res = await fetch(`${API}/alerts/rules`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(rule),
-      });
-      if (res.ok) {
-        const created: AlertRule = await res.json();
-        setAlertRules(r => [...r, created]);
-      }
-    } catch {}
-  };
-
-  const deleteAlertRule = async (id: string) => {
-    try {
-      await fetch(`${API}/alerts/rules/${id}`, { method: 'DELETE' });
-      setAlertRules(r => r.filter(x => x.id !== id));
-    } catch {}
-  };
-
   const deleteDevice = async (deviceId: string) => {
     if (!confirm(`Remove device ${deviceId}?`)) return;
     try {
@@ -929,11 +766,6 @@ export default function Home() {
             <div className="status-dot" />
             {onlineCount} / {devices.length} Online
           </div>
-          {alertFirings.length > 0 && (
-            <div className="alert-badge">
-              🔔 {alertFirings.length} Alert{alertFirings.length !== 1 ? 's' : ''}
-            </div>
-          )}
           {isUpdating && (
             <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Updating…</span>
           )}
@@ -966,16 +798,6 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Alert Panel */}
-          <div className="glass-card" style={{ marginTop: '1.5rem' }}>
-            <AlertPanel
-              devices={devices}
-              rules={alertRules}
-              firings={alertFirings}
-              onAddRule={addAlertRule}
-              onDeleteRule={deleteAlertRule}
-            />
-          </div>
         </aside>
 
         {/* Main content */}

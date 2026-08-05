@@ -13,6 +13,7 @@ package collector
 import (
 	"bufio"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -98,14 +99,36 @@ func collectMacOSServices() []ServiceEntry {
 	return services
 }
 
-// discoverRunningMacOSLabels scans /var/run for .pid files. The filename
-// (without .pid) is usually the launchd label or a close derivative.
-// Returns a map of label → pid string.
+// discoverRunningMacOSLabels returns a map of launchd label → pid string for
+// all currently running launchd jobs. It first tries `launchctl list` (fast,
+// authoritative) and falls back to scanning /var/run/*.pid files.
 func discoverRunningMacOSLabels() map[string]string {
 	running := map[string]string{}
 
-	dirs := []string{"/var/run", "/private/var/run"}
-	for _, dir := range dirs {
+	// Primary: parse `launchctl list` output.
+	// Output format (tab-separated):  PID  LastExitStatus  Label
+	// Running jobs have a numeric PID; stopped jobs show "-".
+	out, err := exec.Command("launchctl", "list").Output()
+	if err == nil {
+		scanner := bufio.NewScanner(strings.NewReader(string(out)))
+		for scanner.Scan() {
+			line := scanner.Text()
+			parts := strings.Fields(line)
+			if len(parts) < 3 {
+				continue
+			}
+			pid := parts[0]
+			label := parts[2]
+			if pid == "-" || pid == "PID" {
+				continue // stopped or header line
+			}
+			running[label] = pid
+		}
+		return running
+	}
+
+	// Fallback: scan /var/run/*.pid files.
+	for _, dir := range []string{"/var/run", "/private/var/run"} {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
@@ -120,32 +143,12 @@ func discoverRunningMacOSLabels() map[string]string {
 				continue
 			}
 			pid := strings.TrimSpace(string(data))
-			// Verify the process is actually alive.
-			if _, err := os.Stat("/proc/" + pid); err == nil || pidAlive(pid) {
+			if pid != "" && pid != "0" {
 				running[label] = pid
 			}
 		}
 	}
 	return running
-}
-
-// pidAlive checks if a PID is still running by verifying the /proc/<pid>
-// directory exists (Linux) or checking /proc/self/../<pid> (stub on macOS).
-// On macOS /proc doesn't exist, so this always returns true if the PID string
-// is non-empty (stale PIDs will incorrectly show as running). A proper fix
-// requires a kill(pid, 0) syscall check.
-func pidAlive(pid string) bool {
-	if pid == "" || pid == "0" {
-		return false
-	}
-	// On Linux check /proc/<pid>
-	if runtime.GOOS == "linux" {
-		_, err := os.Stat("/proc/" + pid)
-		return err == nil
-	}
-	// On macOS /proc doesn't exist — we can't reliably check without syscalls.
-	// Returning true means stale .pid files will show services as running.
-	return true
 }
 
 // ─── Linux ────────────────────────────────────────────────────────────────────
