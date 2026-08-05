@@ -198,6 +198,7 @@ func toGB(bytes uint64) float64 {
 	return round2(float64(bytes) / (1024 * 1024 * 1024))
 }
 
+// round2 rounds v to 2 decimal places.
 func round2(v float64) float64 {
-	return float64(int(v*100)) / 100
+	return math.Round(v*100) / 100
 }

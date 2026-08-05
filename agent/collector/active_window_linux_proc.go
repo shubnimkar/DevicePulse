@@ -39,11 +39,12 @@ func linuxProcFallbackActiveWindow() string {
 	}
 
 	type candidate struct {
-		name string
-		rss  int64  // resident set size in pages (higher = more likely "active")
-		tty  int    // controlling tty (0 = no tty / daemon)
-		pgid int    // process group ID
-		tpgid int   // foreground process group of the tty
+		name         string
+		rss          int64  // resident set size in pages (higher = more likely "active")
+		tty          int    // controlling tty (0 = no tty / daemon)
+		pgid         int    // process group ID
+		tpgid        int    // foreground process group of the tty
+		isForeground bool   // true when pgid == tpgid and tty != 0
 	}
 
 	var best candidate
@@ -104,23 +105,14 @@ func linuxProcFallbackActiveWindow() string {
 		}
 
 		// Prefer foreground processes; among those, the one with the largest RSS.
-		if isForeground && (!isForegroundComm(best.name) || rss > best.rss) {
-			best = candidate{name: comm, rss: rss, tty: ttyNr, pgid: pgid, tpgid: tpgid}
-		} else if best.name == "" && rss > best.rss {
+		if isForeground && (!best.isForeground || rss > best.rss) {
+			best = candidate{name: comm, rss: rss, tty: ttyNr, pgid: pgid, tpgid: tpgid, isForeground: true}
+		} else if !best.isForeground && rss > best.rss {
 			best = candidate{name: comm, rss: rss}
 		}
 	}
 
 	return best.name
-}
-
-// isForegroundComm returns true if name is from a foreground (TTY) process.
-// We just check that best was set via the isForeground path by checking tty != 0.
-// Since we can't store metadata in the string, we do this as a helper that
-// always returns false; the caller uses a separate bool in the struct.
-func isForegroundComm(_ string) bool {
-	// Placeholder — the real foreground check is inline above.
-	return false
 }
 
 // ── /proc helpers ─────────────────────────────────────────────────────────────

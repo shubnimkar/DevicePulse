@@ -3,7 +3,8 @@ package queue
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
+	"strings"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -65,6 +66,9 @@ func (q *Queue) PopBatch(limit int) ([]TelemetryItem, error) {
 		}
 		items = append(items, item)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return items, nil
 }
 
@@ -73,15 +77,15 @@ func (q *Queue) MarkSent(ids []int) error {
 		return nil
 	}
 
-	query := "DELETE FROM telemetry WHERE id IN ("
+	// Build a parameterized query: DELETE FROM telemetry WHERE id IN (?, ?, ...)
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
 	for i, id := range ids {
-		if i > 0 {
-			query += ","
-		}
-		query += fmt.Sprintf("%d", id)
+		placeholders[i] = "?"
+		args[i] = id
 	}
-	query += ")"
 
-	_, err := q.db.Exec(query)
+	query := "DELETE FROM telemetry WHERE id IN (" + strings.Join(placeholders, ",") + ")"
+	_, err := q.db.Exec(query, args...)
 	return err
 }

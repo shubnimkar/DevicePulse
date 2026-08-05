@@ -2,7 +2,8 @@
 
 import { useEffect, useState, useCallback } from 'react';
 
-const API = 'http://localhost:8080';
+const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
+const DASHBOARD_TOKEN = process.env.NEXT_PUBLIC_DASHBOARD_TOKEN ?? '';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -172,6 +173,12 @@ interface AlertFiring {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+// authHeaders returns request init options with the dashboard read token set.
+// Falls back gracefully when NEXT_PUBLIC_DASHBOARD_TOKEN is not configured.
+function readHeaders(): HeadersInit {
+  return DASHBOARD_TOKEN ? { 'X-Dashboard-Token': DASHBOARD_TOKEN } : {};
+}
 
 function getDomain(url: string): string {
   try { return new URL(url).hostname; } catch { return url; }
@@ -585,29 +592,32 @@ function ActiveWindowSection({ data, cachedSummaries }: { data?: ActiveWindowDat
     return <div className="no-data">No active window data yet.</div>;
   }
 
-  // Merge: start from the persistent cache, then add any live cumulative
-  // data on top so the current session is reflected immediately.
+  // Merge strategy:
+  // - Always show live cumulative_summaries from the agent (covers the current
+  //   session in full, including data not yet pushed to the API cache).
+  // - Layer the persistent API cache on top so historical data from previous
+  //   sessions is included. When both sources have an entry for the same app
+  //   we take the larger value to avoid double-counting (the API cache already
+  //   contains data the agent has previously reported).
+  const liveSummaries = data?.cumulative_summaries ?? data?.app_summaries ?? [];
+
   const merged = new Map<string, AppFocusSummary>();
 
-  // 1. Seed from persistent cache
-  for (const entry of (cachedSummaries ?? [])) {
+  // Seed from live data first.
+  for (const entry of liveSummaries) {
     merged.set(entry.app_name, { ...entry });
   }
 
-  // 2. The live cumulative_summaries already include the current session AND
-  //    all data since agent start, but the cache also has that same data
-  //    (it was built from telemetry).  To avoid double-counting, we only
-  //    blend in the live data when there's no cache yet.
-  const liveSummaries = data?.cumulative_summaries ?? data?.app_summaries ?? [];
-  if ((cachedSummaries ?? []).length === 0) {
-    for (const entry of liveSummaries) {
-      const existing = merged.get(entry.app_name);
-      if (existing) {
-        existing.total_focus_seconds += entry.total_focus_seconds;
-        existing.session_count       += entry.session_count;
-      } else {
-        merged.set(entry.app_name, { ...entry });
-      }
+  // Merge API cache: add time that isn't already captured in the live data.
+  // If the live total for an app is higher (current session > cached history)
+  // keep the live value; otherwise use the cached value so we don't lose
+  // historical sessions that the agent no longer holds in memory.
+  for (const entry of (cachedSummaries ?? [])) {
+    const existing = merged.get(entry.app_name);
+    if (!existing) {
+      merged.set(entry.app_name, { ...entry });
+    } else if (entry.total_focus_seconds > existing.total_focus_seconds) {
+      merged.set(entry.app_name, { ...entry });
     }
   }
 
@@ -802,9 +812,9 @@ export default function Home() {
   const fetchAll = useCallback(async () => {
     try {
       const [devRes, ruleRes, firingRes] = await Promise.all([
-        fetch(`${API}/devices`),
-        fetch(`${API}/alerts/rules`),
-        fetch(`${API}/alerts/firings`),
+        fetch(`${API}/devices`, { headers: readHeaders() }),
+        fetch(`${API}/alerts/rules`, { headers: readHeaders() }),
+        fetch(`${API}/alerts/firings`, { headers: readHeaders() }),
       ]);
 
       if (devRes.ok) {
@@ -814,7 +824,7 @@ export default function Home() {
 
         // Fetch focus cache for every device in parallel
         const focusResults = await Promise.allSettled(
-          devList.map(d => fetch(`${API}/focus/${d.device_id}`).then(r => r.ok ? r.json() as Promise<FocusCacheData> : null))
+          devList.map(d => fetch(`${API}/focus/${d.device_id}`, { headers: readHeaders() }).then(r => r.ok ? r.json() as Promise<FocusCacheData> : null))
         );
         const newFocusCache: Record<string, AppFocusSummary[]> = {};
         focusResults.forEach((result, i) => {
@@ -835,7 +845,7 @@ export default function Home() {
 
   const fetchPolicy = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/policy`);
+      const res = await fetch(`${API}/policy`, { headers: readHeaders() });
       if (res.ok) {
         const d = await res.json();
         if (d.sync_interval_seconds) setSyncInterval(d.sync_interval_seconds);

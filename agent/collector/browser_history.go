@@ -237,6 +237,9 @@ func queryChromiumDB(historyPath, browserName string) []HistoryEntry {
 		entry.LastVisitTime = unixMicros * 1000
 		entries = append(entries, entry)
 	}
+	if err := rows.Err(); err != nil {
+		return nil
+	}
 	return entries
 }
 
@@ -321,6 +324,9 @@ func queryFirefoxDB(historyPath string) []HistoryEntry {
 		entry.LastVisitTime = ffMicros * 1000
 		entries = append(entries, entry)
 	}
+	if err := rows.Err(); err != nil {
+		return nil
+	}
 	return entries
 }
 
@@ -376,6 +382,9 @@ func fetchSafariHistory(safariPath string) []HistoryEntry {
 		unixSeconds := safariTime + 978307200
 		entry.LastVisitTime = int64(unixSeconds * float64(time.Second))
 		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil
 	}
 	return entries
 }

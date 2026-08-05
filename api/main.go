@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +28,9 @@ import (
 var (
 	mongoClient *mongo.Client
 	dbName      = "devicepulse"
+	// adminSecret is loaded from ADMIN_SECRET env var and required for
+	// privileged endpoints: POST /policy and POST /update/release.
+	adminSecret string
 )
 
 // ─── Focus Cache ──────────────────────────────────────────────────────────────
@@ -92,11 +99,9 @@ func (fc *FocusCache) snapshot(deviceID string) []AppFocusEntry {
 		result = append(result, *e)
 	}
 	// sort descending by focus time
-	for i := 1; i < len(result); i++ {
-		for j := i; j > 0 && result[j].TotalFocusS > result[j-1].TotalFocusS; j-- {
-			result[j], result[j-1] = result[j-1], result[j]
-		}
-	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].TotalFocusS > result[j].TotalFocusS
+	})
 	return result
 }
 
@@ -180,6 +185,44 @@ var globalPolicy = PolicyStore{
 	},
 }
 
+// loadPolicyFromMongo reads the persisted policy document from MongoDB.
+// Called once at startup so the last-saved policy survives API restarts.
+func loadPolicyFromMongo() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	coll := mongoClient.Database(dbName).Collection("config")
+	var doc bson.M
+	if err := coll.FindOne(ctx, bson.M{"_id": "global_policy"}).Decode(&doc); err != nil {
+		// No saved policy yet — keep the default.
+		return
+	}
+	delete(doc, "_id")
+
+	globalPolicy.mu.Lock()
+	for k, v := range doc {
+		globalPolicy.config[k] = v
+	}
+	globalPolicy.mu.Unlock()
+	log.Printf("Policy loaded from MongoDB: %v", globalPolicy.config)
+}
+
+// savePolicyToMongo persists the current policy config to MongoDB so it
+// survives API restarts.
+func savePolicyToMongo(cfg map[string]interface{}) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	update := bson.M{"$set": cfg}
+	opts := options.Update().SetUpsert(true)
+	_, err := mongoClient.Database(dbName).Collection("config").UpdateOne(
+		ctx, bson.M{"_id": "global_policy"}, update, opts,
+	)
+	if err != nil {
+		log.Printf("Policy persist error: %v", err)
+	}
+}
+
 // ─── Alert Rule ───────────────────────────────────────────────────────────────
 
 // AlertRule defines a threshold check applied on every ingest for a device.
@@ -212,7 +255,7 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
-		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, Authorization, X-API-Key")
+		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, Authorization, X-API-Key, X-Admin-Secret, X-Dashboard-Token")
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return
@@ -237,6 +280,46 @@ func resolveAPIKey(ctx context.Context, key string) (string, bool) {
 	}
 	deviceID, _ := device["device_id"].(string)
 	return deviceID, deviceID != ""
+}
+
+// requireAdmin is a middleware that enforces the X-Admin-Secret header.
+// Returns 401 if the header is missing or doesn't match ADMIN_SECRET.
+func requireAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if adminSecret == "" {
+			// ADMIN_SECRET not configured — block all admin requests so a
+			// misconfigured deployment doesn't accidentally allow open access.
+			http.Error(w, "Admin access not configured (set ADMIN_SECRET)", http.StatusServiceUnavailable)
+			return
+		}
+		if r.Header.Get("X-Admin-Secret") != adminSecret {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// requireRead enforces the X-Dashboard-Token header on read endpoints.
+// This prevents unauthenticated access to device telemetry, browser history,
+// and focus data from anyone who can reach port 8080.
+// Set DASHBOARD_TOKEN to any strong random value (e.g. openssl rand -hex 32).
+// If unset, read endpoints remain open (backwards-compatible default).
+func requireRead(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := os.Getenv("DASHBOARD_TOKEN")
+		if token == "" {
+			// Not configured — allow through but log a warning once.
+			// This preserves backwards compatibility for local dev.
+			next(w, r)
+			return
+		}
+		if r.Header.Get("X-Dashboard-Token") != token {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
 }
 
 // ─── Registration Handler ──────────────────────────────────────────────────────
@@ -353,15 +436,15 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// generateAPIKey creates a random hex key using crypto-safe randomness.
+// generateAPIKey creates a cryptographically random 48-char hex key.
 func generateAPIKey() string {
 	b := make([]byte, 24)
-	// fallback to time-seeded pseudo-random if crypto not available
-	for i := range b {
-		b[i] = byte(time.Now().UnixNano() >> uint(i%8) & 0xff)
-		time.Sleep(0) // yield to prevent identical timestamps
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand failure is unrecoverable — the system entropy pool is
+		// broken. Fatalf so we don't mint insecure keys silently.
+		log.Fatalf("generateAPIKey: crypto/rand.Read failed: %v", err)
 	}
-	return fmt.Sprintf("%x", b)
+	return hex.EncodeToString(b)
 }
 
 // ─── Ingest Handler ────────────────────────────────────────────────────────────
@@ -384,12 +467,11 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body, err := io.ReadAll(r.Body)
+	defer r.Body.Close()
 	if err != nil {
 		http.Error(w, "Error reading body", http.StatusInternalServerError)
 		return
 	}
-	defer r.Body.Close()
-
 	var payload map[string]interface{}
 	if err := json.Unmarshal(body, &payload); err != nil {
 		http.Error(w, "Error parsing JSON", http.StatusBadRequest)
@@ -474,22 +556,34 @@ func evaluateAlerts(deviceID string, payload map[string]interface{}) {
 		case "lt":
 			fired = val < rule.Threshold
 		}
-		if fired {
-			firing := AlertFiring{
-				RuleID:    rule.ID,
-				DeviceID:  deviceID,
-				Metric:    rule.Metric,
-				Value:     val,
-				Threshold: rule.Threshold,
-				Condition: rule.Condition,
-				FiredAt:   time.Now(),
-			}
-			if _, err := firings.InsertOne(ctx, firing); err != nil {
-				log.Printf("Alert insert error: %v", err)
-			} else {
-				log.Printf("ALERT fired: device=%s metric=%s value=%.2f %s %.2f",
-					deviceID, rule.Metric, val, rule.Condition, rule.Threshold)
-			}
+		if !fired {
+			continue
+		}
+
+		// Cooldown: only fire once per 5 minutes per rule to prevent spam.
+		cooldown := time.Now().Add(-5 * time.Minute)
+		recent, _ := firings.CountDocuments(ctx, bson.M{
+			"rule_id":  rule.ID,
+			"fired_at": bson.M{"$gt": cooldown},
+		})
+		if recent > 0 {
+			continue // already fired within the cooldown window
+		}
+
+		firing := AlertFiring{
+			RuleID:    rule.ID,
+			DeviceID:  deviceID,
+			Metric:    rule.Metric,
+			Value:     val,
+			Threshold: rule.Threshold,
+			Condition: rule.Condition,
+			FiredAt:   time.Now(),
+		}
+		if _, err := firings.InsertOne(ctx, firing); err != nil {
+			log.Printf("Alert insert error: %v", err)
+		} else {
+			log.Printf("ALERT fired: device=%s metric=%s value=%.2f %s %.2f",
+				deviceID, rule.Metric, val, rule.Condition, rule.Threshold)
 		}
 	}
 }
@@ -667,6 +761,8 @@ func policyHandler(w http.ResponseWriter, r *http.Request) {
 		globalPolicy.mu.Lock()
 		globalPolicy.config = newConfig
 		globalPolicy.mu.Unlock()
+		// Persist so the policy survives API restarts.
+		go savePolicyToMongo(newConfig)
 		log.Println("Global policy updated")
 		w.WriteHeader(http.StatusOK)
 
@@ -909,14 +1005,39 @@ func releasePublishHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	// Load .env file if present (silently ignored when not found, e.g. in production)
-	if err := godotenv.Load(); err != nil {
-		log.Println("No .env file found, relying on environment variables")
+	// Load .env file if present (silently ignored when not found, e.g. in production).
+	// We look next to the source file first (for `go run`), then next to the binary
+	// (for compiled deployments), so both workflows work without configuration.
+	{
+		// Locate the directory containing main.go via os.Executable or __file__ equivalent.
+		// For `go run`, the cwd is the source directory; for compiled binaries it's wherever
+		// the binary lives. Try both the cwd and the executable's directory.
+		candidates := []string{".env"}
+		if exe, err := os.Executable(); err == nil {
+			candidates = append(candidates, filepath.Join(filepath.Dir(exe), ".env"))
+		}
+		loaded := false
+		for _, p := range candidates {
+			if err := godotenv.Load(p); err == nil {
+				log.Printf("Loaded env from %s", p)
+				loaded = true
+				break
+			}
+		}
+		if !loaded {
+			log.Println("No .env file found, relying on environment variables")
+		}
 	}
 
 	mongoURI := os.Getenv("MONGO_URI")
 	if mongoURI == "" {
 		log.Fatal("MONGO_URI environment variable must be set")
+	}
+
+	// Load admin secret for privileged endpoints.
+	adminSecret = os.Getenv("ADMIN_SECRET")
+	if adminSecret == "" {
+		log.Println("WARNING: ADMIN_SECRET is not set — POST /policy and POST /update/release are disabled")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -935,12 +1056,15 @@ func main() {
 	// Ensure indexes
 	go ensureIndexes()
 
+	// Restore persisted policy so sync intervals survive restarts.
+	loadPolicyFromMongo()
+
 	// Build focus cache from existing telemetry data
 	go buildFocusCacheFromMongo()
 
 	// Routes
 	http.HandleFunc("/devices/register", corsMiddleware(registerHandler))
-	http.HandleFunc("/devices/", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/devices/", corsMiddleware(requireRead(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/history") {
 			historyHandler(w, r)
 		} else if r.Method == http.MethodDelete {
@@ -948,20 +1072,32 @@ func main() {
 		} else {
 			http.NotFound(w, r)
 		}
-	}))
-	http.HandleFunc("/devices", corsMiddleware(devicesHandler))
+	})))
+	http.HandleFunc("/devices", corsMiddleware(requireRead(devicesHandler)))
 	http.HandleFunc("/ingest", corsMiddleware(ingestHandler))
-	http.HandleFunc("/policy", corsMiddleware(policyHandler))
-	http.HandleFunc("/alerts/rules/", corsMiddleware(alertRuleDeleteHandler))
-	http.HandleFunc("/alerts/rules", corsMiddleware(alertRulesHandler))
-	http.HandleFunc("/alerts/firings", corsMiddleware(alertFiringsHandler))
-	http.HandleFunc("/focus/", corsMiddleware(focusHandler))
+	// GET /policy is public; POST /policy requires admin.
+	http.HandleFunc("/policy", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			requireAdmin(policyHandler)(w, r)
+		} else {
+			policyHandler(w, r)
+		}
+	}))
+	http.HandleFunc("/alerts/rules/", corsMiddleware(requireRead(alertRuleDeleteHandler)))
+	http.HandleFunc("/alerts/rules", corsMiddleware(requireRead(alertRulesHandler)))
+	http.HandleFunc("/alerts/firings", corsMiddleware(requireRead(alertFiringsHandler)))
+	http.HandleFunc("/focus/", corsMiddleware(requireRead(focusHandler)))
 
 	http.HandleFunc("/update/check",   corsMiddleware(updateCheckHandler))
-	http.HandleFunc("/update/release", corsMiddleware(releasePublishHandler))
+	// POST /update/release is admin-only — requires X-Admin-Secret header.
+	http.HandleFunc("/update/release", corsMiddleware(requireAdmin(releasePublishHandler)))
 
-	log.Println("DevicePulse API listening on :8080")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	log.Printf("DevicePulse API listening on :%s", port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
 }
@@ -990,9 +1126,11 @@ func ensureIndexes() {
 	db.Collection("alert_rules").Indexes().CreateOne(ctx,
 		mongo.IndexModel{Keys: bson.D{{Key: "device_id", Value: 1}}})
 
-	// alert_firings: index on fired_at for recency queries
-	db.Collection("alert_firings").Indexes().CreateOne(ctx,
-		mongo.IndexModel{Keys: bson.D{{Key: "fired_at", Value: -1}}})
+	// alert_firings: compound index on rule_id + fired_at for cooldown queries
+	db.Collection("alert_firings").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "fired_at", Value: -1}}},
+		{Keys: bson.D{{Key: "rule_id", Value: 1}, {Key: "fired_at", Value: -1}}},
+	})
 
 	// agent_releases: index on os+arch+published_at for fast latest-release lookup
 	db.Collection("agent_releases").Indexes().CreateOne(ctx,

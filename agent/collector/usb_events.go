@@ -2,13 +2,11 @@ package collector
 
 // USBEvents collects currently connected USB and external devices.
 //
-// Platform strategy — zero external binary requirements:
-//   macOS   — reads IOKit USB device tree via the IORegistry sysctl/iokit API
-//              through the pure-Go ioreg file reader at:
-//              /var/db/usbmuxd/* or by reading the IOKit registry via
-//              system calls. We use the ioreg XML output cached file path
-//              as a first pass, then fall back to the macOS-specific build
-//              tag file which uses the IOKit C framework via cgo-free bindings.
+// Platform strategy:
+//   macOS   — calls system_profiler SPUSBDataType (first-party Apple binary,
+//              always present on macOS). Note: this is the one platform that
+//              uses an external binary; it is an intentional exception because
+//              there is no public pure-Go IOKit USB API without CGo.
 //   Linux   — reads /sys/bus/usb/devices/ sysfs entries directly.
 //              Each device directory contains idVendor, idProduct, manufacturer,
 //              product, serial files — no lsusb binary required.

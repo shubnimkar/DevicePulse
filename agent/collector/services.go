@@ -129,15 +129,23 @@ func discoverRunningMacOSLabels() map[string]string {
 	return running
 }
 
-// pidAlive checks if a PID is alive by sending signal 0 via /proc/kill
-// simulation — on macOS we check /var/run existence since /proc doesn't exist.
+// pidAlive checks if a PID is still running by verifying the /proc/<pid>
+// directory exists (Linux) or checking /proc/self/../<pid> (stub on macOS).
+// On macOS /proc doesn't exist, so this always returns true if the PID string
+// is non-empty (stale PIDs will incorrectly show as running). A proper fix
+// requires a kill(pid, 0) syscall check.
 func pidAlive(pid string) bool {
-	if pid == "" {
+	if pid == "" || pid == "0" {
 		return false
 	}
-	// On macOS /proc doesn't exist, but we can check /var/run/<pid>.pid
-	// We already have the PID from the .pid file — assume alive.
-	return pid != "0" && pid != ""
+	// On Linux check /proc/<pid>
+	if runtime.GOOS == "linux" {
+		_, err := os.Stat("/proc/" + pid)
+		return err == nil
+	}
+	// On macOS /proc doesn't exist — we can't reliably check without syscalls.
+	// Returning true means stale .pid files will show services as running.
+	return true
 }
 
 // ─── Linux ────────────────────────────────────────────────────────────────────

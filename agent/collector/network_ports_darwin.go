@@ -54,21 +54,13 @@ func collectDarwinPortsImpl() []PortEntry {
 		}
 		// Process name lookup.
 		if c.Pid > 0 {
-			entry.Process = readComm(fmt.Sprintf("/proc/%d/comm", c.Pid))
-			if entry.Process == "" {
-				// On macOS /proc doesn't exist; gopsutil may provide the name directly.
-				entry.Process = getProcNameByPID(int(c.Pid))
-			}
+			// On macOS /proc doesn't exist; gopsutil may provide the name via
+			// internal sysctl calls. Since we didn't import the process package
+			// (to keep the dependency graph simple), we leave the process name
+			// blank. Implementing this fully requires github.com/shirou/gopsutil/v3/process.
+			entry.Process = ""
 		}
 		ports = append(ports, entry)
 	}
 	return ports
-}
-
-// getProcNameByPID returns the process name for a PID using gopsutil process.
-func getProcNameByPID(pid int) string {
-	// Use ps comm via gopsutil process package — no binary exec, uses sysctl.
-	// We avoid importing process here to keep the dependency graph simple;
-	// the process name is optional in the port entry.
-	return ""
 }

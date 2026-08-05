@@ -1,1 +1,17 @@
+# ── Secrets / env files ──────────────────────────────────────────────────────
 api/.env
+agent/.env
+dashboard/.env.local
+**/.env.local
+**/.env.*.local
+
+# ── Agent runtime data (contains api_key + telemetry) ────────────────────────
+agent/data/registration.json
+agent/data/devicepulse.db
+agent/data/devicepulse.db-shm
+agent/data/devicepulse.db-wal
+
+# ── Build artifacts ───────────────────────────────────────────────────────────
+agent/agent_bin
+agent/main
+api/api

@@ -1,6 +1,6 @@
 module github.com/devicepulse/api
 
-go 1.26.5
+go 1.23.0
 
 require go.mongodb.org/mongo-driver v1.17.9
 

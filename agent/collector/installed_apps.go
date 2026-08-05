@@ -269,6 +269,9 @@ func queryRPMSqlite(path string) []AppEntry {
 			apps = append(apps, AppEntry{Name: name, Version: version, Source: "rpm"})
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return nil
+	}
 	return apps
 }
 
@@ -280,10 +283,7 @@ func queryRPMSqlite(path string) []AppEntry {
 // ─── shared helpers ──────────────────────────────────────────────────────────
 
 // cutPrefix returns (value, true) when s starts with prefix.
-// Mirrors strings.CutPrefix (Go 1.20+) for compatibility.
+// Uses strings.CutPrefix (Go 1.20+).
 func cutPrefix(s, prefix string) (string, bool) {
-	if strings.HasPrefix(s, prefix) {
-		return s[len(prefix):], true
-	}
-	return "", false
+	return strings.CutPrefix(s, prefix)
 }

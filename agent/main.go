@@ -15,6 +15,7 @@ import (
 	"github.com/devicepulse/agent/collector"
 	"github.com/devicepulse/agent/queue"
 	"github.com/devicepulse/agent/updater"
+	"github.com/joho/godotenv"
 )
 
 // defaultAPIURL is the fallback API endpoint. Override at build time with:
@@ -71,6 +72,13 @@ func resolveDataDir() string {
 
 func main() {
 	fmt.Println("DevicePulse Agent starting...")
+
+	// Load .env if present — allows setting DEVICEPULSE_API_URL, DEVICEPULSE_DATA_DIR,
+	// etc. without rebuilding. Silently ignored in production where env vars are
+	// injected by systemd/launchd/container runtime.
+	if err := godotenv.Load(); err == nil {
+		log.Println("Loaded .env file")
+	}
 
 	// Resolve API URL: env var takes priority over build-time default.
 	apiURL = defaultAPIURL

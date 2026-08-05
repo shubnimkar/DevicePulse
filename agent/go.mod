@@ -1,6 +1,6 @@
 module github.com/devicepulse/agent
 
-go 1.26.5
+go 1.25.0
 
 require (
 	github.com/shirou/gopsutil/v3 v3.24.5
@@ -14,6 +14,7 @@ require (
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jezek/xgb v1.3.1 // indirect
+	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect

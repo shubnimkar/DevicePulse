@@ -1,0 +1,169 @@
+# Security Guide
+
+## Secrets Management
+
+### API Secrets (`api/.env`)
+
+```bash
+# Required
+MONGO_URI=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/
+
+# Required for admin endpoints
+ADMIN_SECRET=<random-32-char-hex>
+
+# Optional
+PORT=8080
+```
+
+**Generate a secure admin secret:**
+```bash
+openssl rand -hex 32
+```
+
+**Never commit** `api/.env` — it's already in `.gitignore`. Use `api/.env.example` as a template.
+
+---
+
+### Dashboard Environment (`dashboard/.env.local`)
+
+```bash
+NEXT_PUBLIC_API_URL=http://localhost:8080
+```
+
+For production builds:
+```bash
+NEXT_PUBLIC_API_URL=https://your-api-domain.com npm run build
+```
+
+---
+
+### Agent Configuration
+
+The agent stores credentials in `agent/data/registration.json` after its first registration. This file contains:
+- `device_id` — unique device identifier
+- `api_key` — authentication token for API calls
+- `hardware_uuid` — hardware fingerprint (dedup key)
+- `mac_address` — primary network interface MAC
+
+**File permissions:** The agent writes `registration.json` with mode `0600` (owner read/write only).
+
+**Never commit** `agent/data/` — it's in `.gitignore` and contains telemetry + credentials.
+
+---
+
+## Admin Endpoints
+
+The following endpoints require the `X-Admin-Secret` header:
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/policy` | POST | Update global policy (sync interval) |
+| `/update/release` | POST | Publish a new agent binary release |
+
+**If `ADMIN_SECRET` is not set**, these endpoints return `503 Service Unavailable` to prevent accidental open access.
+
+**Example authenticated request:**
+```bash
+curl -X POST http://localhost:8080/policy \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-Secret: your-secret-here" \
+  -d '{"sync_interval_seconds": 15}'
+```
+
+---
+
+## MongoDB Connection Security
+
+### Local Development
+```bash
+MONGO_URI=mongodb://localhost:27017
+```
+
+### Production (MongoDB Atlas)
+```bash
+MONGO_URI=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/?retryWrites=true&w=majority
+```
+
+**Atlas security checklist:**
+- ✅ Use a dedicated database user (not the Atlas admin account)
+- ✅ Restrict IP allowlist to your API server's public IP
+- ✅ Enable TLS/SSL (Atlas default)
+- ✅ Rotate passwords quarterly
+- ✅ Use a strong password (24+ chars, random)
+
+---
+
+## API Key Generation
+
+Device API keys are generated using `crypto/rand` (cryptographically secure randomness) and encoded as 48-character hex strings.
+
+**Old versions** (before this security patch) used time-based pseudo-random generation. If you deployed an API before this fix, consider rotating all device keys by:
+1. Clearing the `devices` collection
+2. Forcing all agents to re-register
+
+---
+
+## Alert Deduplication
+
+Alerts fire **once per 5 minutes** per rule to prevent spam. The cooldown is implemented via a MongoDB query on `(rule_id, fired_at)` with a compound index.
+
+If an agent sends telemetry every 10 seconds with CPU at 90%, and a rule fires at 90%, you'll get:
+- 1 firing immediately
+- Next firing 5 minutes later (if CPU is still above threshold)
+
+---
+
+## Data Retention
+
+The API stores:
+- **Telemetry**: unbounded (one document per agent sync cycle)
+- **Alert firings**: unbounded
+- **Focus cache**: in-memory, rebuilt from the last 500 telemetry docs per device on startup
+
+**Recommended cleanup strategy** (manual for now):
+```javascript
+// MongoDB shell — delete telemetry older than 30 days
+db.telemetry.deleteMany({
+  "_id": {
+    "$lt": ObjectId(Math.floor(Date.now() / 1000 - 86400 * 30).toString(16) + "0000000000000000")
+  }
+})
+```
+
+---
+
+## Exposed Credentials (Incident Response)
+
+**If you accidentally commit a secret:**
+
+1. **Rotate immediately** — don't wait for the PR to merge or branch to be deleted. Treat the secret as compromised.
+2. **MongoDB Atlas password**: Database Access → Edit User → Reset Password → update `.env`
+3. **Admin secret**: Generate a new one with `openssl rand -hex 32` → update `.env` → restart API
+4. **Device API keys**: If the devices collection was exposed, clear it and force agents to re-register
+
+**Git history cleanup** (optional):
+```bash
+# Remove .env from history (use BFG Repo-Cleaner or git-filter-repo)
+git filter-repo --invert-paths --path api/.env
+```
+
+---
+
+## Production Deployment Checklist
+
+- [ ] Set `ADMIN_SECRET` in production `.env`
+- [ ] Restrict MongoDB Atlas IP allowlist to API server only
+- [ ] Run API behind a reverse proxy (nginx) with TLS
+- [ ] Use Let's Encrypt for free TLS certificates (`certbot --nginx`)
+- [ ] Set `NEXT_PUBLIC_API_URL` to the production HTTPS domain
+- [ ] Monitor alert firings for suspicious activity
+- [ ] Set up log aggregation (API logs contain auth failures)
+- [ ] Back up MongoDB regularly (Atlas automated backups)
+
+---
+
+## Vulnerability Disclosure
+
+**Found a security issue?** Email: security@devicepulse.io (replace with your actual contact)
+
+**Do NOT** open a public GitHub issue for security vulnerabilities.
