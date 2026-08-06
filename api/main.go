@@ -18,7 +18,6 @@ import (
 
 	"github.com/joho/godotenv"
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -221,32 +220,6 @@ func savePolicyToMongo(cfg map[string]interface{}) {
 	if err != nil {
 		log.Printf("Policy persist error: %v", err)
 	}
-}
-
-// ─── Alert Rule ───────────────────────────────────────────────────────────────
-
-// AlertRule defines a threshold check applied on every ingest for a device.
-// Supported metrics: cpu_percent, ram_percent, disk_percent
-// Supported conditions: gt (greater than), lt (less than)
-type AlertRule struct {
-	ID        primitive.ObjectID `bson:"_id,omitempty"    json:"id,omitempty"`
-	DeviceID  string             `bson:"device_id"        json:"device_id"`
-	Metric    string             `bson:"metric"           json:"metric"`
-	Condition string             `bson:"condition"        json:"condition"` // "gt" | "lt"
-	Threshold float64            `bson:"threshold"        json:"threshold"`
-	CreatedAt time.Time          `bson:"created_at"       json:"created_at"`
-}
-
-// AlertFiring is stored when a rule fires.
-type AlertFiring struct {
-	ID        primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
-	RuleID    primitive.ObjectID `bson:"rule_id"       json:"rule_id"`
-	DeviceID  string             `bson:"device_id"     json:"device_id"`
-	Metric    string             `bson:"metric"        json:"metric"`
-	Value     float64            `bson:"value"         json:"value"`
-	Threshold float64            `bson:"threshold"     json:"threshold"`
-	Condition string             `bson:"condition"     json:"condition"`
-	FiredAt   time.Time          `bson:"fired_at"      json:"fired_at"`
 }
 
 // ─── CORS Middleware ───────────────────────────────────────────────────────────
@@ -503,9 +476,6 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Error updating device state: %v", err)
 	}
 
-	// Evaluate alert rules asynchronously so ingest stays fast
-	go evaluateAlerts(authDeviceID, payload)
-
 	// Update focus cache from the per-cycle app_summaries in this payload
 	go func() {
 		if data, ok := payload["data"].(map[string]interface{}); ok {
@@ -519,113 +489,6 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Ingested telemetry for %s", authDeviceID)
 	w.WriteHeader(http.StatusOK)
-}
-
-// ─── Alert Evaluation ─────────────────────────────────────────────────────────
-
-func evaluateAlerts(deviceID string, payload map[string]interface{}) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// Load rules for this device
-	coll := mongoClient.Database(dbName).Collection("alert_rules")
-	cursor, err := coll.Find(ctx, bson.M{"device_id": bson.M{"$in": []string{deviceID, "*"}}})
-	if err != nil {
-		return
-	}
-	defer cursor.Close(ctx)
-
-	var rules []AlertRule
-	if err := cursor.All(ctx, &rules); err != nil || len(rules) == 0 {
-		return
-	}
-
-	// Extract metric values from payload
-	metrics := extractMetrics(payload)
-
-	firings := mongoClient.Database(dbName).Collection("alert_firings")
-	for _, rule := range rules {
-		val, ok := metrics[rule.Metric]
-		if !ok {
-			continue
-		}
-		fired := false
-		switch rule.Condition {
-		case "gt":
-			fired = val > rule.Threshold
-		case "lt":
-			fired = val < rule.Threshold
-		}
-		if !fired {
-			continue
-		}
-
-		// Cooldown: only fire once per 5 minutes per rule to prevent spam.
-		cooldown := time.Now().Add(-5 * time.Minute)
-		recent, _ := firings.CountDocuments(ctx, bson.M{
-			"rule_id":  rule.ID,
-			"fired_at": bson.M{"$gt": cooldown},
-		})
-		if recent > 0 {
-			continue // already fired within the cooldown window
-		}
-
-		firing := AlertFiring{
-			RuleID:    rule.ID,
-			DeviceID:  deviceID,
-			Metric:    rule.Metric,
-			Value:     val,
-			Threshold: rule.Threshold,
-			Condition: rule.Condition,
-			FiredAt:   time.Now(),
-		}
-		if _, err := firings.InsertOne(ctx, firing); err != nil {
-			log.Printf("Alert insert error: %v", err)
-		} else {
-			log.Printf("ALERT fired: device=%s metric=%s value=%.2f %s %.2f",
-				deviceID, rule.Metric, val, rule.Condition, rule.Threshold)
-		}
-	}
-}
-
-// extractMetrics pulls numeric values from HardwareStats for rule evaluation.
-func extractMetrics(payload map[string]interface{}) map[string]float64 {
-	out := map[string]float64{}
-	data, ok := payload["data"].(map[string]interface{})
-	if !ok {
-		return out
-	}
-
-	hw, ok := data["HardwareStats"].(map[string]interface{})
-	if !ok {
-		return out
-	}
-
-	if cpu, ok := hw["cpu"].(map[string]interface{}); ok {
-		if v, ok := toFloat(cpu["usage_percent"]); ok {
-			out["cpu_percent"] = v
-		}
-	}
-	if ram, ok := hw["ram"].(map[string]interface{}); ok {
-		if v, ok := toFloat(ram["used_percent"]); ok {
-			out["ram_percent"] = v
-		}
-	}
-	if disks, ok := hw["disks"].([]interface{}); ok && len(disks) > 0 {
-		if d, ok := disks[0].(map[string]interface{}); ok {
-			if v, ok := toFloat(d["used_percent"]); ok {
-				out["disk_percent"] = v
-			}
-		}
-	}
-	if batt, ok := hw["battery"].(map[string]interface{}); ok {
-		if avail, _ := batt["available"].(bool); avail {
-			if v, ok := toFloat(batt["percent"]); ok {
-				out["battery_percent"] = v
-			}
-		}
-	}
-	return out
 }
 
 func toFloat(v interface{}) (float64, bool) {
@@ -769,108 +632,6 @@ func policyHandler(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
-}
-
-// ─── Alert Rules Handlers ──────────────────────────────────────────────────────
-
-// GET  /alerts/rules          — list all rules
-// POST /alerts/rules          — create a rule
-// DELETE /alerts/rules/{id}   — delete a rule
-func alertRulesHandler(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	coll := mongoClient.Database(dbName).Collection("alert_rules")
-
-	switch r.Method {
-	case http.MethodGet:
-		cursor, err := coll.Find(ctx, bson.M{})
-		if err != nil {
-			http.Error(w, "Database error", http.StatusInternalServerError)
-			return
-		}
-		defer cursor.Close(ctx)
-		var rules []bson.M
-		cursor.All(ctx, &rules)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(rules)
-
-	case http.MethodPost:
-		var rule AlertRule
-		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
-			http.Error(w, "Bad JSON", http.StatusBadRequest)
-			return
-		}
-		rule.ID        = primitive.NewObjectID()
-		rule.CreatedAt = time.Now()
-		if _, err := coll.InsertOne(ctx, rule); err != nil {
-			http.Error(w, "Database error", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(rule)
-
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-// DELETE /alerts/rules/{id}
-func alertRuleDeleteHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	parts := strings.Split(r.URL.Path, "/")
-	if len(parts) < 4 {
-		http.Error(w, "Invalid URL", http.StatusBadRequest)
-		return
-	}
-	idStr := parts[3]
-
-	oid, err := primitive.ObjectIDFromHex(idStr)
-	if err != nil {
-		http.Error(w, "Invalid rule ID", http.StatusBadRequest)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	coll := mongoClient.Database(dbName).Collection("alert_rules")
-	if _, err := coll.DeleteOne(ctx, bson.M{"_id": oid}); err != nil {
-		http.Error(w, "Database error", http.StatusInternalServerError)
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-}
-
-// GET /alerts/firings — recent alert firings (last 50)
-func alertFiringsHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	opts := options.Find().SetSort(bson.D{{Key: "fired_at", Value: -1}}).SetLimit(50)
-	cursor, err := mongoClient.Database(dbName).Collection("alert_firings").Find(ctx, bson.M{}, opts)
-	if err != nil {
-		http.Error(w, "Database error", http.StatusInternalServerError)
-		return
-	}
-	defer cursor.Close(ctx)
-
-	var firings []bson.M
-	cursor.All(ctx, &firings)
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(firings)
 }
 
 // ─── Focus Handler ─────────────────────────────────────────────────────────────
@@ -1083,9 +844,6 @@ func main() {
 			policyHandler(w, r)
 		}
 	}))
-	http.HandleFunc("/alerts/rules/", corsMiddleware(requireRead(alertRuleDeleteHandler)))
-	http.HandleFunc("/alerts/rules", corsMiddleware(requireRead(alertRulesHandler)))
-	http.HandleFunc("/alerts/firings", corsMiddleware(requireRead(alertFiringsHandler)))
 	http.HandleFunc("/focus/", corsMiddleware(requireRead(focusHandler)))
 
 	http.HandleFunc("/update/check",   corsMiddleware(updateCheckHandler))
@@ -1121,16 +879,6 @@ func ensureIndexes() {
 	// telemetry: index on device_id + _id for fast history queries
 	db.Collection("telemetry").Indexes().CreateOne(ctx,
 		mongo.IndexModel{Keys: bson.D{{Key: "device_id", Value: 1}, {Key: "_id", Value: -1}}})
-
-	// alert_rules: index on device_id
-	db.Collection("alert_rules").Indexes().CreateOne(ctx,
-		mongo.IndexModel{Keys: bson.D{{Key: "device_id", Value: 1}}})
-
-	// alert_firings: compound index on rule_id + fired_at for cooldown queries
-	db.Collection("alert_firings").Indexes().CreateMany(ctx, []mongo.IndexModel{
-		{Keys: bson.D{{Key: "fired_at", Value: -1}}},
-		{Keys: bson.D{{Key: "rule_id", Value: 1}, {Key: "fired_at", Value: -1}}},
-	})
 
 	// agent_releases: index on os+arch+published_at for fast latest-release lookup
 	db.Collection("agent_releases").Indexes().CreateOne(ctx,

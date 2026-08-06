@@ -1,0 +1,158 @@
+// ─── Shared Types ─────────────────────────────────────────────────────────────
+
+export interface ProcessData {
+  pid: number;
+  name: string;
+  cpu: number;
+  memory: number;
+}
+
+export interface HistoryEntry {
+  url: string;
+  title: string;
+  last_visit_time: number;
+  browser: string;
+}
+
+export interface SystemInfo {
+  hostname: string;
+  os: string;
+  architecture: string;
+  num_cpus: number;
+  platform: string;
+  platform_version: string;
+  kernel_version: string;
+}
+
+export interface CPUStat {
+  usage_percent: number;
+  core_count: number;
+}
+
+export interface RAMStat {
+  total_gb: number;
+  used_gb: number;
+  free_gb: number;
+  used_percent: number;
+}
+
+export interface DiskStat {
+  mount: string;
+  total_gb: number;
+  used_gb: number;
+  free_gb: number;
+  used_percent: number;
+}
+
+export interface NetStat {
+  interface: string;
+  bytes_sent: number;
+  bytes_recv: number;
+}
+
+export interface BatteryStat {
+  available: boolean;
+  percent: number;
+  plugged: boolean;
+  charging: boolean;
+  charge_rate_w: number;
+  state: 'charging' | 'discharging' | 'full' | 'empty' | 'idle' | 'unknown';
+}
+
+export interface HardwareStats {
+  cpu: CPUStat;
+  ram: RAMStat;
+  disks: DiskStat[];
+  network: NetStat[];
+  battery?: BatteryStat;
+  uptime_human: string;
+}
+
+export interface ServiceEntry {
+  name: string;
+  status: 'running' | 'stopped' | 'unknown';
+  pid?: string;
+}
+
+export interface PortEntry {
+  protocol: string;
+  local_addr: string;
+  state?: string;
+  pid?: number;
+  process?: string;
+}
+
+export interface AppEntry {
+  name: string;
+  version?: string;
+  bundle_id?: string;
+  path?: string;
+  source: string;
+}
+
+export interface USBDevice {
+  name: string;
+  vendor_id?: string;
+  product_id?: string;
+  manufacturer?: string;
+  serial_number?: string;
+  speed?: string;
+}
+
+export interface OSUpdateInfo {
+  last_update_time?: string;
+  last_update_raw?: string;
+  pending_updates?: string[];
+  pending_count: number;
+  source: string;
+}
+
+export interface AppFocusSummary {
+  app_name: string;
+  total_focus_seconds: number;
+  session_count: number;
+}
+
+export interface ActiveWindowData {
+  current_app: string;
+  app_summaries: AppFocusSummary[];
+  cumulative_summaries: AppFocusSummary[];
+}
+
+export interface FocusCacheData {
+  device_id: string;
+  app_summaries: AppFocusSummary[];
+}
+
+export interface DeviceData {
+  SystemInfo?: SystemInfo;
+  ProcessMonitor?: { top_processes: ProcessData[] };
+  BrowserHistory?: { top_recent_urls: HistoryEntry[] };
+  HardwareStats?: HardwareStats;
+  Services?: { services: ServiceEntry[]; source?: string };
+  NetworkPorts?: { open_ports: PortEntry[]; source?: string };
+  InstalledApps?: { installed_apps: AppEntry[]; count: number; source?: string };
+  USBEvents?: { usb_devices: USBDevice[]; count: number; source?: string };
+  OSUpdates?: { os_updates: OSUpdateInfo };
+  ActiveWindowTracker?: ActiveWindowData;
+}
+
+export interface Device {
+  device_id: string;
+  hostname?: string;
+  timestamp?: string;
+  last_seen?: string;
+  data?: DeviceData;
+}
+
+export type DeviceTab =
+  | 'overview'
+  | 'hardware'
+  | 'processes'
+  | 'browser'
+  | 'services'
+  | 'ports'
+  | 'apps'
+  | 'security'
+  | 'focus'
+  | 'sysinfo';
