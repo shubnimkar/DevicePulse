@@ -145,6 +145,25 @@ export interface Device {
   data?: DeviceData;
 }
 
+export interface EnterprisePolicy {
+  sync_interval_seconds: number;
+  telemetry_retention_days: number;
+  delta_upload_enabled: boolean;
+  cache_unchanged_collector_data: boolean;
+  browser_history_mode: 'disabled' | 'domain_only' | 'full_url';
+  browser_history_limit: number;
+  collect_system_info: boolean;
+  collect_hardware_stats: boolean;
+  collect_processes: boolean;
+  collect_browser_history: boolean;
+  collect_active_window: boolean;
+  collect_services: boolean;
+  collect_network_ports: boolean;
+  collect_installed_apps: boolean;
+  collect_os_updates: boolean;
+  collect_usb_devices: boolean;
+}
+
 export type DeviceTab =
   | 'overview'
   | 'hardware'

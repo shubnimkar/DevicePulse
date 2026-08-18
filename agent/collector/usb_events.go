@@ -95,8 +95,8 @@ func collectLinuxUSB() []USBDevice {
 // collectLinuxUSBFromPath walks /sys/devices looking for USB devices.
 func collectLinuxUSBFromPath(root string) []USBDevice {
 	var devices []USBDevice
-	// Walk only 4 levels deep to avoid traversing the entire /sys tree.
-	walkDepth(root, 0, 4, func(path string) {
+	// Walk 6 levels deep to catch USB devices behind hubs.
+	walkDepth(root, 0, 6, func(path string) {
 		dev := readSysUSBDevice(path)
 		if dev != nil {
 			devices = append(devices, *dev)

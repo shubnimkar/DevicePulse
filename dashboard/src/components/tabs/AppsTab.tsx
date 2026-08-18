@@ -18,9 +18,9 @@ export default function AppsTab({ data }: Props) {
 
   return (
     <div>
-      <div className="collector-header">
-        <span className="count-pill count-running">📦 {data?.count ?? allApps.length} apps</span>
-        {data?.source && <span className="count-pill count-source">{data.source}</span>}
+      <div className="apps-header">
+        <span className="pill pill-neutral">{data?.count ?? allApps.length} apps</span>
+        {data?.source && <span className="pill pill-blue mono">{data.source}</span>}
         <input
           className="app-search"
           placeholder="Search apps…"
@@ -30,17 +30,12 @@ export default function AppsTab({ data }: Props) {
         />
       </div>
       <div className="apps-grid">
-        {filtered.slice(0, 60).map((app, i) => (
+        {filtered.map((app, i) => (
           <div key={i} className="app-item" title={app.path}>
             <div className="app-name">{app.name}</div>
             <div className="app-version">{app.version ?? '—'}</div>
           </div>
         ))}
-        {filtered.length > 60 && (
-          <div className="no-data" style={{ gridColumn: '1/-1', padding: '0.75rem' }}>
-            +{filtered.length - 60} more
-          </div>
-        )}
       </div>
     </div>
   );

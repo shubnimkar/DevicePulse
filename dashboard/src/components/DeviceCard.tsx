@@ -21,64 +21,59 @@ interface Props {
   cachedFocus: AppFocusSummary[];
 }
 
-const TABS: { key: DeviceTab; label: string; icon: string }[] = [
-  { key: 'overview',   label: 'Overview',  icon: '🏠' },
-  { key: 'hardware',   label: 'Hardware',  icon: '📊' },
-  { key: 'processes',  label: 'Processes', icon: '⚙️' },
-  { key: 'browser',    label: 'Browser',   icon: '🌐' },
-  { key: 'services',   label: 'Services',  icon: '🔧' },
-  { key: 'ports',      label: 'Ports',     icon: '🔌' },
-  { key: 'apps',       label: 'Apps',      icon: '📦' },
-  { key: 'security',   label: 'Security',  icon: '🛡' },
-  { key: 'focus',      label: 'Focus',     icon: '🎯' },
-  { key: 'sysinfo',    label: 'System',    icon: '🖥' },
+const TABS: { key: DeviceTab; label: string; icon: React.ReactNode }[] = [
+  { key: 'overview',   label: 'Overview',   icon: <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/><rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg> },
+  { key: 'hardware',   label: 'Hardware',   icon: <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M3 2h10a1 1 0 011 1v8a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1zm2 11h6v1H5v-1z"/></svg> },
+  { key: 'processes',  label: 'Processes',  icon: <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><circle cx="4" cy="4" r="2"/><circle cx="12" cy="4" r="2"/><circle cx="4" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><path d="M4 6v4M12 6v4M6 4h4M6 12h4"/></svg> },
+  { key: 'browser',    label: 'Browser',    icon: <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="7" stroke="currentColor" strokeWidth="1.5" fill="none"/><path d="M1 8h14M8 1c-2 2-3 4-3 7s1 5 3 7M8 1c2 2 3 4 3 7s-1 5-3 7"/></svg> },
+  { key: 'services',   label: 'Services',   icon: <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l1.5 3h3l-2.5 2 1 3L8 7.5 5 9l1-3L3.5 4h3z"/><path d="M3 11h10M3 13h10"/></svg> },
+  { key: 'ports',      label: 'Ports',      icon: <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><rect x="2" y="5" width="12" height="6" rx="1" stroke="currentColor" strokeWidth="1.2" fill="none"/><circle cx="5" cy="8" r="1"/><circle cx="8" cy="8" r="1"/><circle cx="11" cy="8" r="1"/></svg> },
+  { key: 'apps',       label: 'Apps',       icon: <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="1" width="4" height="4" rx="0.5"/><rect x="6" y="1" width="4" height="4" rx="0.5"/><rect x="11" y="1" width="4" height="4" rx="0.5"/><rect x="1" y="6" width="4" height="4" rx="0.5"/><rect x="6" y="6" width="4" height="4" rx="0.5"/><rect x="11" y="6" width="4" height="4" rx="0.5"/><rect x="1" y="11" width="4" height="4" rx="0.5"/><rect x="6" y="11" width="4" height="4" rx="0.5"/><rect x="11" y="11" width="4" height="4" rx="0.5"/></svg> },
+  { key: 'security',   label: 'Security',   icon: <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1L2 3v5c0 3.5 2.5 6 6 7 3.5-1 6-3.5 6-7V3L8 1z"/></svg> },
+  { key: 'focus',      label: 'Focus',      icon: <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="2"/><circle cx="8" cy="8" r="5" stroke="currentColor" strokeWidth="1.2" fill="none"/><circle cx="8" cy="8" r="7.5" stroke="currentColor" strokeWidth="1" fill="none" opacity="0.4"/></svg> },
+  { key: 'sysinfo',    label: 'System',     icon: <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="2" width="14" height="9" rx="1" stroke="currentColor" strokeWidth="1.2" fill="none"/><path d="M5 14h6M8 11v3"/></svg> },
 ];
 
 export default function DeviceCard({ device, tab, onTabChange, onDelete, cachedFocus }: Props) {
-  const sys     = device.data?.SystemInfo;
-  const procs   = device.data?.ProcessMonitor?.top_processes ?? [];
+  const sys    = device.data?.SystemInfo;
+  const procs  = device.data?.ProcessMonitor?.top_processes ?? [];
   const history = device.data?.BrowserHistory?.top_recent_urls ?? [];
-  const hw      = device.data?.HardwareStats;
-  const online  = isOnline(device.last_seen);
+  const hw     = device.data?.HardwareStats;
+  const online = isOnline(device.last_seen);
 
   const hostname = sys?.hostname || device.hostname || device.device_id;
   const osIcon   = getOSIcon(sys?.os);
 
-  // Quick status badges for the card header
   const cpuPct = hw?.cpu?.usage_percent;
   const ramPct = hw?.ram?.used_percent;
 
-  return (
-    <div className="device-card glass-card">
-      {/* Accent top bar */}
-      <div
-        className="device-card-accent"
-        style={{ background: online ? 'var(--accent-gradient)' : 'rgba(107,114,128,0.4)' }}
-      />
+  // Derive card state for the left border color
+  const risk = Math.max(cpuPct ?? 0, ramPct ?? 0, hw?.disks?.[0]?.used_percent ?? 0);
+  const state = !online ? 'offline' : risk >= 90 ? 'critical' : risk >= 70 ? 'warning' : 'online';
 
-      {/* Card header */}
+  return (
+    <div className={`device-card state-${state}`}>
+      {/* Header */}
       <div className="device-header">
         <div className="device-header-left">
           <div className="device-name-row">
-            <span className={`online-dot ${online ? 'online' : 'offline'}`} />
+            <span className={`online-dot ${online ? 'on' : 'off'}`} />
             <span className="device-hostname">{osIcon} {hostname}</span>
-            <span className={`status-pill ${online ? 'pill-online' : 'pill-offline'}`}>
-              {online ? 'Online' : 'Offline'}
+            <span className={`status-badge badge-${online ? (state === 'critical' ? 'critical' : state === 'warning' ? 'warning' : 'online') : 'offline'}`}>
+              <span className="dot" />
+              {online ? (state === 'critical' ? 'Critical' : state === 'warning' ? 'Warning' : 'Online') : 'Offline'}
             </span>
           </div>
           <div className="device-meta-row">
-            <span className="device-meta-item">🕐 {timeAgo(device.last_seen)}</span>
+            <span className="device-meta-item">{timeAgo(device.last_seen)}</span>
             {sys?.platform_version && (
-              <span className="device-os-badge">
-                {sys.os} {sys.platform_version}
-              </span>
+              <span className="device-badge">{sys.os} {sys.platform_version}</span>
             )}
-            <span className="device-id-badge">{device.device_id.slice(0, 22)}…</span>
+            <span className="device-badge">{device.device_id.slice(0, 20)}…</span>
           </div>
         </div>
 
         <div className="device-header-right">
-          {/* Inline resource pills */}
           {cpuPct !== undefined && (
             <span className="resource-pill" style={{ color: metricColor(cpuPct) }}>
               CPU {cpuPct.toFixed(0)}%
@@ -89,13 +84,10 @@ export default function DeviceCard({ device, tab, onTabChange, onDelete, cachedF
               MEM {ramPct.toFixed(0)}%
             </span>
           )}
-          <button
-            className="device-delete-btn"
-            title="Remove device"
-            onClick={onDelete}
-            aria-label="Remove device"
-          >
-            🗑
+          <button className="delete-btn" title="Remove device" onClick={onDelete} aria-label="Remove device">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M2 4h12M5 4V2h6v2M6 7v5M10 7v5M3 4l1 10h8l1-10"/>
+            </svg>
           </button>
         </div>
       </div>
@@ -107,16 +99,17 @@ export default function DeviceCard({ device, tab, onTabChange, onDelete, cachedF
             key={t.key}
             role="tab"
             aria-selected={tab === t.key}
-            className={`tab-btn ${tab === t.key ? 'tab-active' : ''}`}
+            className={`tab-btn ${tab === t.key ? 'active' : ''}`}
             onClick={() => onTabChange(t.key)}
           >
-            {t.icon} {t.label}
+            {t.icon}
+            {t.label}
           </button>
         ))}
       </div>
 
-      {/* Tab content */}
-      <div className="device-section" role="tabpanel">
+      {/* Tab panel */}
+      <div className="tab-panel" role="tabpanel">
         {tab === 'overview'  && <OverviewTab data={device.data} cachedFocus={cachedFocus} />}
         {tab === 'hardware'  && <HardwareTab hw={hw} />}
         {tab === 'processes' && <ProcessesTab procs={procs} />}
@@ -124,13 +117,9 @@ export default function DeviceCard({ device, tab, onTabChange, onDelete, cachedF
         {tab === 'services'  && <ServicesTab data={device.data?.Services} />}
         {tab === 'ports'     && <PortsTab data={device.data?.NetworkPorts} />}
         {tab === 'apps'      && <AppsTab data={device.data?.InstalledApps} />}
-        {tab === 'security'  && (
-          <SecurityTab usb={device.data?.USBEvents} osUpd={device.data?.OSUpdates} />
-        )}
-        {tab === 'focus' && (
-          <FocusTab data={device.data?.ActiveWindowTracker} cachedSummaries={cachedFocus} />
-        )}
-        {tab === 'sysinfo' && <SysInfoTab sys={sys} />}
+        {tab === 'security'  && <SecurityTab usb={device.data?.USBEvents} osUpd={device.data?.OSUpdates} />}
+        {tab === 'focus'     && <FocusTab data={device.data?.ActiveWindowTracker} cachedSummaries={cachedFocus} />}
+        {tab === 'sysinfo'   && <SysInfoTab sys={sys} />}
       </div>
     </div>
   );

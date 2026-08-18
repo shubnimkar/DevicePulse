@@ -2,13 +2,12 @@ interface GaugeBarProps {
   value: number;
   color?: string;
   height?: number;
-  animated?: boolean;
 }
 
-export default function GaugeBar({ value, color, height = 5, animated = true }: GaugeBarProps) {
+export default function GaugeBar({ value, color, height = 4 }: GaugeBarProps) {
   return (
     <div
-      className="gauge-wrap"
+      className="gauge-track"
       style={{ height }}
       role="progressbar"
       aria-valuenow={Math.min(value, 100)}
@@ -16,10 +15,10 @@ export default function GaugeBar({ value, color, height = 5, animated = true }: 
       aria-valuemax={100}
     >
       <div
-        className={`gauge-bar${animated ? ' gauge-animated' : ''}`}
+        className="gauge-fill"
         style={{
           width: `${Math.min(value, 100)}%`,
-          background: color ?? 'var(--accent-gradient)',
+          background: color ?? 'var(--blue)',
         }}
       />
     </div>

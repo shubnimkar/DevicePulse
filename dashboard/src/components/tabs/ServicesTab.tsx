@@ -12,37 +12,30 @@ export default function ServicesTab({ data }: Props) {
   const services = data?.services ?? [];
   if (!services.length) return <div className="no-data">No service data yet.</div>;
 
-  const filtered =
-    filter === 'all' ? services : services.filter(s => s.status === filter);
-  const runCount = services.filter(s => s.status === 'running').length;
+  const filtered = filter === 'all' ? services : services.filter(s => s.status === filter);
+  const runCount  = services.filter(s => s.status === 'running').length;
   const stopCount = services.filter(s => s.status === 'stopped').length;
 
   return (
     <div>
-      <div className="collector-header">
-        <div className="collector-counts">
-          <span className="count-pill count-running">▶ {runCount} running</span>
-          <span className="count-pill count-stopped">■ {stopCount} stopped</span>
-          {data?.source && <span className="count-pill count-source">{data.source}</span>}
-        </div>
-        <div className="filter-tabs">
+      <div className="svc-header">
+        <span className="pill pill-green">&#9654; {runCount} running</span>
+        <span className="pill pill-neutral">&#9632; {stopCount} stopped</span>
+        {data?.source && <span className="pill pill-blue mono">{data.source}</span>}
+        <div className="svc-filter">
           {(['all', 'running', 'stopped'] as const).map(f => (
-            <button
-              key={f}
-              className={`filter-btn ${filter === f ? 'filter-active' : ''}`}
-              onClick={() => setFilter(f)}
-            >
+            <button key={f} className={`svc-filter-btn ${filter === f ? 'active' : ''}`} onClick={() => setFilter(f)}>
               {f}
             </button>
           ))}
         </div>
       </div>
-      <div className="service-grid">
+      <div className="svc-grid">
         {filtered.map((s, i) => (
-          <div key={i} className={`service-item ${s.status}`}>
-            <div className={`service-dot ${s.status}`} />
-            <div className="service-name" title={s.name}>{s.name}</div>
-            {s.pid && <div className="service-pid">PID {s.pid}</div>}
+          <div key={i} className="svc-item">
+            <div className={`svc-dot ${s.status}`} />
+            <div className="svc-name" title={s.name}>{s.name}</div>
+            {s.pid && <div className="svc-pid">{s.pid}</div>}
           </div>
         ))}
       </div>

@@ -16,8 +16,8 @@ Enterprise endpoint telemetry platform. Deploy a lightweight Go agent on any mac
 
 | Component | Stack | Default port |
 |-----------|-------|--------------|
-| `agent/`  | Go 1.26, gopsutil, modernc/sqlite | — |
-| `api/`    | Go 1.26, stdlib net/http, MongoDB driver | 8080 |
+| `agent/`  | Go 1.25, gopsutil, modernc/sqlite | — |
+| `api/`    | Go 1.23, stdlib net/http, MongoDB driver | 8080 |
 | `dashboard/` | Next.js 16, React 19, TypeScript, Tailwind 4 | 3000 |
 
 ---
@@ -26,7 +26,7 @@ Enterprise endpoint telemetry platform. Deploy a lightweight Go agent on any mac
 
 ### 1. Prerequisites
 
-- Go 1.21+
+- Go 1.25+ for the agent; Go 1.23+ for the API
 - Node.js 18+
 - A MongoDB instance (local or Atlas)
 
@@ -167,16 +167,13 @@ Agents authenticate via the `X-API-Key` header using the key returned at registr
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | `POST` | `/devices/register` | — | Register a device (deduplicates by hardware UUID → MAC → hostname) |
+| `GET` | `/health` | — | API health check |
 | `GET` | `/devices` | — | List all registered devices |
 | `DELETE` | `/devices/{id}` | — | Remove a device |
 | `GET` | `/devices/{id}/history` | — | Last 100 telemetry snapshots for a device |
-| `POST` | `/ingest` | ✓ X-API-Key | Accept a telemetry payload, run alert rules |
+| `POST` | `/ingest` | ✓ X-API-Key | Accept a telemetry payload |
 | `GET` | `/policy` | — | Read the current global policy |
 | `POST` | `/policy` | — | Update the global policy (e.g. `sync_interval_seconds`) |
-| `GET` | `/alerts/rules` | — | List alert rules |
-| `POST` | `/alerts/rules` | — | Create an alert rule |
-| `DELETE` | `/alerts/rules/{id}` | — | Delete an alert rule |
-| `GET` | `/alerts/firings` | — | Last 50 alert firings |
 | `GET` | `/focus/{device_id}` | — | Cumulative per-app focus totals |
 | `GET` | `/update/check` | ✓ X-API-Key | Check for a new agent binary (used by auto-updater) |
 | `POST` | `/update/release` | — | Publish a new agent release |
@@ -209,8 +206,6 @@ Repeat for each OS/arch combination you support. Agents will pick up the update 
 |------------|----------|
 | `devices` | Registered devices (hardware_uuid, mac_address, hostname) + latest telemetry snapshot |
 | `telemetry` | Every ingest payload (time-series) |
-| `alert_rules` | User-defined threshold rules |
-| `alert_firings` | Historical firing events |
 | `agent_releases` | Published agent binaries with version, OS, arch, URL, checksum |
 
 ### Build binary
@@ -244,7 +239,6 @@ Single-page Next.js app that polls the API every 5 seconds.
 ### Sidebar panels
 
 - **Global Policy** — slider to adjust agent sync interval (2–60 s) in real time
-- **Alerts** — create threshold rules (CPU / RAM / Disk / Battery %, above/below), see recent firings
 
 ### Build for production
 
@@ -282,7 +276,7 @@ DevicePulse/
 │       ├── devicepulse.db       # Local telemetry queue (auto-created)
 │       └── registration.json    # Device credentials + hardware fingerprint (auto-created)
 ├── api/
-│   ├── main.go                  # HTTP server, MongoDB handlers, alert engine, focus cache, update endpoints
+│   ├── main.go                  # HTTP server, MongoDB handlers, focus cache, update endpoints
 │   └── .env                     # MONGO_URI
 └── dashboard/
     └── src/app/
@@ -296,7 +290,12 @@ DevicePulse/
 | Variable | Component | Default | Description |
 |----------|-----------|---------|-------------|
 | `MONGO_URI` | API | — | MongoDB connection string (required) |
+| `ADMIN_SECRET` | API | — | Admin secret for privileged endpoints such as policy updates and release publishing |
+| `DASHBOARD_TOKEN` | API | — | Optional token required by read endpoints when configured |
 | `DEVICEPULSE_API_URL` | Agent | `http://localhost:8080` | API endpoint override at runtime |
+| `NEXT_PUBLIC_API_URL` | Dashboard | `http://localhost:8080` | API URL used by the browser dashboard |
+| `NEXT_PUBLIC_DASHBOARD_TOKEN` | Dashboard | — | Dashboard token sent to read endpoints when `DASHBOARD_TOKEN` is configured |
+| `NEXT_PUBLIC_ADMIN_SECRET` | Dashboard | — | Admin secret sent for policy updates in simple dashboard deployments |
 
 The agent API URL can also be baked in at build time:
 ```bash

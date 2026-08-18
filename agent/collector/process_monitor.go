@@ -47,8 +47,8 @@ func (p *ProcessMonitor) Collect() (map[string]interface{}, error) {
 			continue
 		}
 
-		// Only include processes using some CPU to filter out noise
-		if cpu > 0.1 || mem > 1.0 {
+	// Only include processes using some CPU or memory to filter out idle noise
+	if cpu > 0.1 || mem > 1.0 {
 			data = append(data, ProcessData{
 				PID:    proc.Pid,
 				Name:   name,
@@ -58,15 +58,10 @@ func (p *ProcessMonitor) Collect() (map[string]interface{}, error) {
 		}
 	}
 
-	// Sort by CPU usage descending
+	// Sort by CPU usage descending — no cap, report all active processes
 	sort.Slice(data, func(i, j int) bool {
 		return data[i].CPU > data[j].CPU
 	})
-
-	// Return top 5
-	if len(data) > 5 {
-		data = data[:5]
-	}
 
 	return map[string]interface{}{
 		"top_processes": data,

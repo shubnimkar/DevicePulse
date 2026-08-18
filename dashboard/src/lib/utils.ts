@@ -2,9 +2,17 @@
 
 export const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
 export const DASHBOARD_TOKEN = process.env.NEXT_PUBLIC_DASHBOARD_TOKEN ?? '';
+export const ADMIN_SECRET = process.env.NEXT_PUBLIC_ADMIN_SECRET ?? '';
 
 export function readHeaders(): HeadersInit {
   return DASHBOARD_TOKEN ? { 'X-Dashboard-Token': DASHBOARD_TOKEN } : {};
+}
+
+export function adminHeaders(): HeadersInit {
+  return {
+    'Content-Type': 'application/json',
+    ...(ADMIN_SECRET ? { 'X-Admin-Secret': ADMIN_SECRET } : {}),
+  };
 }
 
 export function getDomain(url: string): string {
@@ -23,6 +31,20 @@ export function formatVisitTime(nanos: number): string {
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
   return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+export function formatFullDateTime(nanos: number): string {
+  if (!nanos) return '';
+  const ms = nanos / 1_000_000;
+  const date = new Date(ms);
+  return date.toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
 }
 
 export function isOnline(lastSeen?: string): boolean {

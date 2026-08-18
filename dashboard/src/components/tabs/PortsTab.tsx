@@ -12,9 +12,9 @@ export default function PortsTab({ data }: Props) {
 
   return (
     <div>
-      <div className="collector-header">
-        <span className="count-pill count-running">🔌 {ports.length} open ports</span>
-        {data?.source && <span className="count-pill count-source">{data.source}</span>}
+      <div className="ports-header">
+        <span className="pill pill-green">{ports.length} open ports</span>
+        {data?.source && <span className="pill pill-blue mono">{data.source}</span>}
       </div>
       <table className="ports-table">
         <thead>
@@ -30,26 +30,14 @@ export default function PortsTab({ data }: Props) {
           {ports.map((p, i) => (
             <tr key={i}>
               <td>
-                <span
-                  className={`proto-badge proto-${p.protocol
-                    .replace('4', '')
-                    .replace('6', '')}`}
-                >
+                <span className={`proto-badge proto-${p.protocol.replace('4','').replace('6','')}`}>
                   {p.protocol.toUpperCase()}
                 </span>
               </td>
-              <td>
-                <span className="mono-text">{p.local_addr}</span>
-              </td>
-              <td>
-                <span className="state-text">{p.state ?? '—'}</span>
-              </td>
-              <td>
-                <span className="process-badge">{p.process ?? '—'}</span>
-              </td>
-              <td>
-                <span className="mono-text muted">{p.pid ?? '—'}</span>
-              </td>
+              <td><span className="mono">{p.local_addr}</span></td>
+              <td><span className="port-state">{p.state ?? '—'}</span></td>
+              <td><span className="port-proc">{p.process ?? '—'}</span></td>
+              <td><span className="mono" style={{ color: 'var(--text-3)' }}>{p.pid ?? '—'}</span></td>
             </tr>
           ))}
         </tbody>

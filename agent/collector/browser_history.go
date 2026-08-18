@@ -40,6 +40,8 @@ func (b *BrowserHistory) Name() string { return "BrowserHistory" }
 func (b *BrowserHistory) Start() error { return nil }
 func (b *BrowserHistory) Stop() error  { return nil }
 
+const maxBrowserHistoryEntries = 200
+
 type HistoryEntry struct {
 	URL           string `json:"url"`
 	Title         string `json:"title"`
@@ -80,8 +82,8 @@ func (b *BrowserHistory) Collect() (map[string]interface{}, error) {
 	sort.Slice(allEntries, func(i, j int) bool {
 		return allEntries[i].LastVisitTime > allEntries[j].LastVisitTime
 	})
-	if len(allEntries) > 10 {
-		allEntries = allEntries[:10]
+	if len(allEntries) > maxBrowserHistoryEntries {
+		allEntries = allEntries[:maxBrowserHistoryEntries]
 	}
 
 	return map[string]interface{}{"top_recent_urls": allEntries}, nil
@@ -266,9 +268,6 @@ func fetchChromiumHistory(baseDir, browserName string) []HistoryEntry {
 	}
 
 	sort.Slice(profiles, func(i, j int) bool { return profiles[i].modTime > profiles[j].modTime })
-	if len(profiles) > 3 {
-		profiles = profiles[:3]
-	}
 
 	var results []HistoryEntry
 	for _, p := range profiles {
@@ -296,7 +295,7 @@ func queryChromiumDB(historyPath, browserName string) []HistoryEntry {
 	}
 	defer db.Close()
 
-	rows, err := db.Query(`SELECT url, title, last_visit_time FROM urls ORDER BY last_visit_time DESC LIMIT 10`)
+	rows, err := db.Query(`SELECT url, title, last_visit_time FROM urls ORDER BY last_visit_time DESC LIMIT ?`, maxBrowserHistoryEntries)
 	if err != nil {
 		return nil
 	}
@@ -353,9 +352,6 @@ func fetchFirefoxHistory(baseDir string) []HistoryEntry {
 	}
 
 	sort.Slice(profiles, func(i, j int) bool { return profiles[i].modTime > profiles[j].modTime })
-	if len(profiles) > 2 {
-		profiles = profiles[:2]
-	}
 
 	var results []HistoryEntry
 	for _, p := range profiles {
@@ -388,7 +384,7 @@ func queryFirefoxDB(historyPath string) []HistoryEntry {
 		FROM moz_places
 		WHERE last_visit_date IS NOT NULL
 		ORDER BY last_visit_date DESC
-		LIMIT 10`)
+		LIMIT ?`, maxBrowserHistoryEntries)
 	if err != nil {
 		return nil
 	}
@@ -445,7 +441,7 @@ func fetchSafariHistory(safariPath string) []HistoryEntry {
 		FROM history_items i
 		JOIN history_visits v ON i.id = v.history_item
 		ORDER BY v.visit_time DESC
-		LIMIT 10`)
+		LIMIT ?`, maxBrowserHistoryEntries)
 	if err != nil {
 		return nil
 	}

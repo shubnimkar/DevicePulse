@@ -2,6 +2,7 @@
 
 import { AppFocusSummary, ActiveWindowData } from '@/types';
 import { formatDuration } from '@/lib/utils';
+import GaugeBar from '@/components/GaugeBar';
 
 interface Props {
   data?: ActiveWindowData;
@@ -15,71 +16,49 @@ export default function FocusTab({ data, cachedSummaries }: Props) {
 
   const liveSummaries = data?.cumulative_summaries ?? data?.app_summaries ?? [];
   const merged = new Map<string, AppFocusSummary>();
-  for (const entry of liveSummaries) {
-    merged.set(entry.app_name, { ...entry });
-  }
-  for (const entry of cachedSummaries) {
-    const existing = merged.get(entry.app_name);
-    if (!existing) {
-      merged.set(entry.app_name, { ...entry });
-    } else if (entry.total_focus_seconds > existing.total_focus_seconds) {
-      merged.set(entry.app_name, { ...entry });
-    }
+  for (const e of liveSummaries) merged.set(e.app_name, { ...e });
+  for (const e of cachedSummaries) {
+    const ex = merged.get(e.app_name);
+    if (!ex || e.total_focus_seconds > ex.total_focus_seconds) merged.set(e.app_name, { ...e });
   }
 
-  const summaries = Array.from(merged.values()).sort(
-    (a, b) => b.total_focus_seconds - a.total_focus_seconds
-  );
-
+  const summaries = Array.from(merged.values()).sort((a, b) => b.total_focus_seconds - a.total_focus_seconds);
   const totalSeconds = summaries.reduce((s, a) => s + a.total_focus_seconds, 0);
   const currentApp = data?.current_app ?? '';
 
   return (
     <div>
       {currentApp && (
-        <div className="aw-current">
-          <span className="aw-current-dot" />
-          <span className="aw-current-label">Currently in focus:</span>
-          <span className="aw-current-app">{currentApp}</span>
+        <div className="focus-current">
+          <span className="live-dot" />
+          <span className="focus-current-label">Currently in focus:</span>
+          <span className="focus-current-app">{currentApp}</span>
         </div>
       )}
 
       {summaries.length === 0 ? (
         <div className="no-data">No focus sessions recorded yet.</div>
       ) : (
-        <div className="aw-list">
+        <div className="focus-list">
           {summaries.map((app, i) => {
-            const pct =
-              totalSeconds > 0
-                ? (app.total_focus_seconds / totalSeconds) * 100
-                : 0;
+            const pct = totalSeconds > 0 ? (app.total_focus_seconds / totalSeconds) * 100 : 0;
             const isActive = app.app_name === currentApp;
             return (
-              <div key={i} className={`aw-item ${isActive ? 'aw-item-active' : ''}`}>
-                <div className="aw-row">
-                  <span className="aw-app-name" title={app.app_name}>
-                    {isActive && <span className="aw-live-dot" />}
+              <div key={i} className={`focus-item ${isActive ? 'is-active' : ''}`}>
+                <div className="focus-row">
+                  <span className="focus-app-name" title={app.app_name}>
+                    {isActive && <span className="live-dot" />}
                     {app.app_name}
                   </span>
-                  <span className="aw-duration">
-                    {formatDuration(app.total_focus_seconds)}
-                  </span>
-                  <span className="aw-sessions">
-                    {app.session_count} session{app.session_count !== 1 ? 's' : ''}
-                  </span>
+                  <span className="focus-duration">{formatDuration(app.total_focus_seconds)}</span>
+                  <span className="focus-sessions">{app.session_count} session{app.session_count !== 1 ? 's' : ''}</span>
                 </div>
-                <div className="gauge-wrap">
-                  <div
-                    className="gauge-bar gauge-animated"
-                    style={{
-                      width: `${pct}%`,
-                      background: isActive
-                        ? 'var(--success-color)'
-                        : 'var(--accent-color)',
-                    }}
-                  />
-                </div>
-                <div className="aw-pct">{pct.toFixed(1)}% of tracked time</div>
+                <GaugeBar
+                  value={pct}
+                  color={isActive ? 'var(--green)' : 'var(--blue)'}
+                  height={3}
+                />
+                <div className="focus-pct">{pct.toFixed(1)}% of tracked time</div>
               </div>
             );
           })}

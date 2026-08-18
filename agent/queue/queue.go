@@ -52,7 +52,7 @@ func (q *Queue) Push(payload map[string]interface{}) error {
 }
 
 func (q *Queue) PopBatch(limit int) ([]TelemetryItem, error) {
-	rows, err := q.db.Query("SELECT id, payload FROM telemetry ORDER BY created_at ASC LIMIT ?", limit)
+	rows, err := q.db.Query("SELECT id, payload FROM telemetry ORDER BY id ASC LIMIT ?", limit)
 	if err != nil {
 		return nil, err
 	}

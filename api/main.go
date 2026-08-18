@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -74,7 +75,7 @@ func (fc *FocusCache) applyFocusSummaries(deviceID string, summaries []interface
 		if name == "" {
 			continue
 		}
-		dur, _      := toFloat(m["total_focus_seconds"])
+		dur, _ := toFloat(m["total_focus_seconds"])
 		sessions, _ := toFloat(m["session_count"])
 
 		e, ok := apps[name]
@@ -82,7 +83,7 @@ func (fc *FocusCache) applyFocusSummaries(deviceID string, summaries []interface
 			e = &AppFocusEntry{AppName: name}
 			apps[name] = e
 		}
-		e.TotalFocusS  += dur
+		e.TotalFocusS += dur
 		e.SessionCount += int(sessions)
 	}
 }
@@ -125,9 +126,9 @@ func buildFocusCacheFromMongo() {
 			continue
 		}
 
+		// No limit — scan all telemetry to build accurate cumulative totals.
 		opts := options.Find().
 			SetSort(bson.D{{Key: "_id", Value: -1}}).
-			SetLimit(500).
 			SetProjection(bson.M{"data.ActiveWindowTracker.app_summaries": 1, "_id": 0})
 
 		cursor, err := coll.Find(ctx, bson.M{"device_id": deviceID}, opts)
@@ -179,9 +180,98 @@ type PolicyStore struct {
 }
 
 var globalPolicy = PolicyStore{
-	config: map[string]interface{}{
-		"sync_interval_seconds": 10,
-	},
+	config: defaultPolicy(),
+}
+
+func defaultPolicy() map[string]interface{} {
+	return map[string]interface{}{
+		"sync_interval_seconds":          10,
+		"telemetry_retention_days":       30,
+		"delta_upload_enabled":           true,
+		"cache_unchanged_collector_data": true,
+		"browser_history_mode":           "disabled",
+		"browser_history_limit":          10,
+		"collect_system_info":            true,
+		"collect_hardware_stats":         true,
+		"collect_processes":              true,
+		"collect_browser_history":        false,
+		"collect_active_window":          true,
+		"collect_services":               true,
+		"collect_network_ports":          true,
+		"collect_installed_apps":         true,
+		"collect_os_updates":             true,
+		"collect_usb_devices":            true,
+	}
+}
+
+func normalizePolicy(input map[string]interface{}) map[string]interface{} {
+	policy := defaultPolicy()
+	for k, v := range input {
+		policy[k] = v
+	}
+
+	clampNumber(policy, "sync_interval_seconds", 2, 3600)
+	clampNumber(policy, "telemetry_retention_days", 1, 3650)
+	clampNumber(policy, "browser_history_limit", 0, 1000)
+
+	mode, _ := policy["browser_history_mode"].(string)
+	switch mode {
+	case "disabled", "domain_only", "full_url":
+	default:
+		policy["browser_history_mode"] = "disabled"
+	}
+
+	boolKeys := []string{
+		"delta_upload_enabled",
+		"cache_unchanged_collector_data",
+		"collect_system_info",
+		"collect_hardware_stats",
+		"collect_processes",
+		"collect_browser_history",
+		"collect_active_window",
+		"collect_services",
+		"collect_network_ports",
+		"collect_installed_apps",
+		"collect_os_updates",
+		"collect_usb_devices",
+	}
+	for _, key := range boolKeys {
+		if _, ok := policy[key].(bool); !ok {
+			policy[key] = defaultPolicy()[key]
+		}
+	}
+
+	if policy["browser_history_mode"] == "disabled" {
+		policy["collect_browser_history"] = false
+	}
+
+	return policy
+}
+
+func clampNumber(policy map[string]interface{}, key string, min, max float64) {
+	v, ok := toFloat(policy[key])
+	if !ok {
+		policy[key] = defaultPolicy()[key]
+		return
+	}
+	if v < min {
+		v = min
+	}
+	if v > max {
+		v = max
+	}
+	policy[key] = v
+}
+
+func currentRetentionDays() int {
+	globalPolicy.mu.RLock()
+	defer globalPolicy.mu.RUnlock()
+
+	days, ok := toFloat(globalPolicy.config["telemetry_retention_days"])
+	if !ok || days < 1 {
+		return 30
+	}
+	return int(days)
 }
 
 // loadPolicyFromMongo reads the persisted policy document from MongoDB.
@@ -199,9 +289,7 @@ func loadPolicyFromMongo() {
 	delete(doc, "_id")
 
 	globalPolicy.mu.Lock()
-	for k, v := range doc {
-		globalPolicy.config[k] = v
-	}
+	globalPolicy.config = normalizePolicy(doc)
 	globalPolicy.mu.Unlock()
 	log.Printf("Policy loaded from MongoDB: %v", globalPolicy.config)
 }
@@ -295,6 +383,20 @@ func requireRead(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// requireAgent validates that the request belongs to a registered agent.
+func requireAgent(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if _, ok := resolveAPIKey(ctx, r.Header.Get("X-API-Key")); !ok {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
 // ─── Registration Handler ──────────────────────────────────────────────────────
 
 // POST /devices/register
@@ -324,9 +426,9 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hostname     := body["hostname"]
+	hostname := body["hostname"]
 	hardwareUUID := body["hardware_uuid"]
-	macAddress   := body["mac_address"]
+	macAddress := body["mac_address"]
 
 	if hostname == "" {
 		hostname = "unknown"
@@ -362,7 +464,7 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 		coll.UpdateOne(ctx, dedupFilter, update)
 
 		deviceID, _ := existing["device_id"].(string)
-		apiKey, _   := existing["api_key"].(string)
+		apiKey, _ := existing["api_key"].(string)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
 			"device_id": deviceID,
@@ -427,8 +529,9 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 5*1024*1024)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// Authenticate
@@ -451,11 +554,15 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ensure device_id matches the registered key
+	// Ensure device_id matches the registered key and attach retention metadata.
+	now := time.Now()
+	retentionDays := currentRetentionDays()
 	payload["device_id"] = authDeviceID
+	payload["ingested_at"] = now
+	payload["telemetry_expires_at"] = now.AddDate(0, 0, retentionDays)
 
 	collTelemetry := mongoClient.Database(dbName).Collection("telemetry")
-	collDevices   := mongoClient.Database(dbName).Collection("devices")
+	collDevices := mongoClient.Database(dbName).Collection("devices")
 
 	// Insert telemetry event
 	if _, err = collTelemetry.InsertOne(ctx, payload); err != nil {
@@ -470,7 +577,7 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 		"device_id": authDeviceID,
 		"timestamp": payload["timestamp"],
 		"data":      payload["data"],
-		"last_seen": time.Now(),
+		"last_seen": now,
 	}}
 	if _, err = collDevices.UpdateOne(ctx, bson.M{"device_id": authDeviceID}, update, opts); err != nil {
 		log.Printf("Error updating device state: %v", err)
@@ -499,6 +606,8 @@ func toFloat(v interface{}) (float64, bool) {
 		return float64(n), true
 	case int32:
 		return float64(n), true
+	case int:
+		return float64(n), true
 	}
 	return 0, false
 }
@@ -522,7 +631,8 @@ func deviceDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	res, err := mongoClient.Database(dbName).Collection("devices").DeleteOne(ctx, bson.M{"device_id": deviceID})
+	db := mongoClient.Database(dbName)
+	res, err := db.Collection("devices").DeleteOne(ctx, bson.M{"device_id": deviceID})
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
@@ -531,6 +641,14 @@ func deviceDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Device not found", http.StatusNotFound)
 		return
 	}
+
+	if _, err := db.Collection("telemetry").DeleteMany(ctx, bson.M{"device_id": deviceID}); err != nil {
+		log.Printf("Telemetry cleanup failed for deleted device %s: %v", deviceID, err)
+	}
+
+	globalFocusCache.mu.Lock()
+	delete(globalFocusCache.data, deviceID)
+	globalFocusCache.mu.Unlock()
 
 	log.Printf("Device deleted: %s", deviceID)
 	w.WriteHeader(http.StatusOK)
@@ -544,25 +662,27 @@ func devicesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cursor, err := mongoClient.Database(dbName).Collection("devices").Find(ctx, bson.M{})
+	opts := options.Find().SetProjection(bson.M{
+		"api_key": 0,
+		"data.BrowserHistory.top_recent_urls": bson.M{
+			"$slice": 50,
+		},
+	})
+	cursor, err := mongoClient.Database(dbName).Collection("devices").Find(ctx, bson.M{}, opts)
 	if err != nil {
+		log.Printf("Devices query error: %v", err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 	defer cursor.Close(ctx)
 
-	var devices []bson.M
+	devices := []bson.M{}
 	if err = cursor.All(ctx, &devices); err != nil {
 		http.Error(w, "Parsing error", http.StatusInternalServerError)
 		return
-	}
-
-	// Strip api_key from the list response
-	for _, d := range devices {
-		delete(d, "api_key")
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -584,11 +704,22 @@ func historyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	deviceID := parts[2]
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Optional ?limit=N query param. Defaults to 0 (no limit) for full history.
+	// Dashboard live view uses a small limit; report generation omits it.
+	var findOpts *options.FindOptions
+	if lStr := r.URL.Query().Get("limit"); lStr != "" {
+		if l, err := strconv.ParseInt(lStr, 10, 64); err == nil && l > 0 {
+			findOpts = options.Find().SetSort(bson.D{{Key: "_id", Value: -1}}).SetLimit(l)
+		}
+	}
+	if findOpts == nil {
+		findOpts = options.Find().SetSort(bson.D{{Key: "_id", Value: -1}})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	opts := options.Find().SetSort(bson.D{{Key: "_id", Value: -1}}).SetLimit(100)
-	cursor, err := mongoClient.Database(dbName).Collection("telemetry").Find(ctx, bson.M{"device_id": deviceID}, opts)
+	cursor, err := mongoClient.Database(dbName).Collection("telemetry").Find(ctx, bson.M{"device_id": deviceID}, findOpts)
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
@@ -622,10 +753,21 @@ func policyHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		globalPolicy.mu.Lock()
-		globalPolicy.config = newConfig
+		merged := make(map[string]interface{}, len(globalPolicy.config)+len(newConfig))
+		for k, v := range globalPolicy.config {
+			merged[k] = v
+		}
+		for k, v := range newConfig {
+			merged[k] = v
+		}
+		globalPolicy.config = normalizePolicy(merged)
+		savedConfig := make(map[string]interface{}, len(globalPolicy.config))
+		for k, v := range globalPolicy.config {
+			savedConfig[k] = v
+		}
 		globalPolicy.mu.Unlock()
 		// Persist so the policy survives API restarts.
-		go savePolicyToMongo(newConfig)
+		go savePolicyToMongo(savedConfig)
 		log.Println("Global policy updated")
 		w.WriteHeader(http.StatusOK)
 
@@ -655,7 +797,7 @@ func focusHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"device_id":    deviceID,
+		"device_id":     deviceID,
 		"app_summaries": entries,
 	})
 }
@@ -665,8 +807,8 @@ func focusHandler(w http.ResponseWriter, r *http.Request) {
 // AgentRelease describes a published agent binary in the releases collection.
 type AgentRelease struct {
 	Version     string    `bson:"version"          json:"version"`
-	OS          string    `bson:"os"               json:"os"`           // "darwin" | "linux" | "windows"
-	Arch        string    `bson:"arch"             json:"arch"`         // "amd64" | "arm64"
+	OS          string    `bson:"os"               json:"os"`   // "darwin" | "linux" | "windows"
+	Arch        string    `bson:"arch"             json:"arch"` // "amd64" | "arm64"
 	DownloadURL string    `bson:"download_url"     json:"download_url"`
 	Checksum    string    `bson:"checksum_sha256"  json:"checksum_sha256"`
 	PublishedAt time.Time `bson:"published_at"     json:"published_at"`
@@ -686,8 +828,8 @@ func updateCheckHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	currentVersion := r.URL.Query().Get("version")
-	agentOS        := r.URL.Query().Get("os")
-	agentArch      := r.URL.Query().Get("arch")
+	agentOS := r.URL.Query().Get("os")
+	agentArch := r.URL.Query().Get("arch")
 
 	if currentVersion == "" || agentOS == "" || agentArch == "" {
 		http.Error(w, "Missing required query params: version, os, arch", http.StatusBadRequest)
@@ -765,6 +907,16 @@ func releasePublishHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 }
 
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
 func main() {
 	// Load .env file if present (silently ignored when not found, e.g. in production).
 	// We look next to the source file first (for `go run`), then next to the binary
@@ -801,7 +953,7 @@ func main() {
 		log.Println("WARNING: ADMIN_SECRET is not set — POST /policy and POST /update/release are disabled")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	client, err := mongo.Connect(ctx, options.Client().ApplyURI(mongoURI))
@@ -824,6 +976,7 @@ func main() {
 	go buildFocusCacheFromMongo()
 
 	// Routes
+	http.HandleFunc("/health", corsMiddleware(healthHandler))
 	http.HandleFunc("/devices/register", corsMiddleware(registerHandler))
 	http.HandleFunc("/devices/", corsMiddleware(requireRead(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/history") {
@@ -846,7 +999,7 @@ func main() {
 	}))
 	http.HandleFunc("/focus/", corsMiddleware(requireRead(focusHandler)))
 
-	http.HandleFunc("/update/check",   corsMiddleware(updateCheckHandler))
+	http.HandleFunc("/update/check", corsMiddleware(requireAgent(updateCheckHandler)))
 	// POST /update/release is admin-only — requires X-Admin-Secret header.
 	http.HandleFunc("/update/release", corsMiddleware(requireAdmin(releasePublishHandler)))
 
@@ -868,17 +1021,22 @@ func ensureIndexes() {
 
 	// devices: unique on device_id, api_key; sparse indexes on fingerprint fields
 	deviceIdx := []mongo.IndexModel{
-		{Keys: bson.D{{Key: "device_id", Value: 1}},     Options: options.Index().SetUnique(true).SetSparse(true)},
-		{Keys: bson.D{{Key: "api_key", Value: 1}},       Options: options.Index().SetUnique(true).SetSparse(true)},
-		{Keys: bson.D{{Key: "hostname", Value: 1}},       Options: options.Index().SetSparse(true)},
-		{Keys: bson.D{{Key: "hardware_uuid", Value: 1}},  Options: options.Index().SetSparse(true)},
-		{Keys: bson.D{{Key: "mac_address", Value: 1}},    Options: options.Index().SetSparse(true)},
+		{Keys: bson.D{{Key: "device_id", Value: 1}}, Options: options.Index().SetUnique(true).SetSparse(true)},
+		{Keys: bson.D{{Key: "api_key", Value: 1}}, Options: options.Index().SetUnique(true).SetSparse(true)},
+		{Keys: bson.D{{Key: "hostname", Value: 1}}, Options: options.Index().SetSparse(true)},
+		{Keys: bson.D{{Key: "hardware_uuid", Value: 1}}, Options: options.Index().SetSparse(true)},
+		{Keys: bson.D{{Key: "mac_address", Value: 1}}, Options: options.Index().SetSparse(true)},
 	}
 	db.Collection("devices").Indexes().CreateMany(ctx, deviceIdx)
 
 	// telemetry: index on device_id + _id for fast history queries
 	db.Collection("telemetry").Indexes().CreateOne(ctx,
 		mongo.IndexModel{Keys: bson.D{{Key: "device_id", Value: 1}, {Key: "_id", Value: -1}}})
+	db.Collection("telemetry").Indexes().CreateOne(ctx,
+		mongo.IndexModel{
+			Keys:    bson.D{{Key: "telemetry_expires_at", Value: 1}},
+			Options: options.Index().SetExpireAfterSeconds(0).SetSparse(true),
+		})
 
 	// agent_releases: index on os+arch+published_at for fast latest-release lookup
 	db.Collection("agent_releases").Indexes().CreateOne(ctx,

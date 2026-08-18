@@ -250,7 +250,7 @@ func queryRPMSqlite(path string) []AppEntry {
 	// columns exposed by the rpmdb-sqlite extension on supported systems.
 	// If that extension isn't available, we fall back to listing table names
 	// and trying common schemas.
-	rows, err := db.Query(`SELECT name, version FROM rpm WHERE 1=1 LIMIT 5000`)
+	rows, err := db.Query(`SELECT name, version FROM rpm WHERE 1=1`)
 	if err != nil {
 		// Try alternate schema used by some distros.
 		rows, err = db.Query(`SELECT key, value FROM Packages LIMIT 1`)

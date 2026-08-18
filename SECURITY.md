@@ -28,12 +28,16 @@ openssl rand -hex 32
 
 ```bash
 NEXT_PUBLIC_API_URL=http://localhost:8080
+NEXT_PUBLIC_DASHBOARD_TOKEN=<same-value-as-api-DASHBOARD_TOKEN-if-configured>
+NEXT_PUBLIC_ADMIN_SECRET=<same-value-as-api-ADMIN_SECRET-for-policy-updates>
 ```
 
 For production builds:
 ```bash
 NEXT_PUBLIC_API_URL=https://your-api-domain.com npm run build
 ```
+
+Values prefixed with `NEXT_PUBLIC_` are embedded in browser-side JavaScript. For a production admin console, restrict access to trusted admins with network controls, authentication, or a server-side dashboard/proxy before exposing privileged operations.
 
 ---
 
@@ -103,21 +107,10 @@ Device API keys are generated using `crypto/rand` (cryptographically secure rand
 
 ---
 
-## Alert Deduplication
-
-Alerts fire **once per 5 minutes** per rule to prevent spam. The cooldown is implemented via a MongoDB query on `(rule_id, fired_at)` with a compound index.
-
-If an agent sends telemetry every 10 seconds with CPU at 90%, and a rule fires at 90%, you'll get:
-- 1 firing immediately
-- Next firing 5 minutes later (if CPU is still above threshold)
-
----
-
 ## Data Retention
 
 The API stores:
 - **Telemetry**: unbounded (one document per agent sync cycle)
-- **Alert firings**: unbounded
 - **Focus cache**: in-memory, rebuilt from the last 500 telemetry docs per device on startup
 
 **Recommended cleanup strategy** (manual for now):
@@ -156,7 +149,6 @@ git filter-repo --invert-paths --path api/.env
 - [ ] Run API behind a reverse proxy (nginx) with TLS
 - [ ] Use Let's Encrypt for free TLS certificates (`certbot --nginx`)
 - [ ] Set `NEXT_PUBLIC_API_URL` to the production HTTPS domain
-- [ ] Monitor alert firings for suspicious activity
 - [ ] Set up log aggregation (API logs contain auth failures)
 - [ ] Back up MongoDB regularly (Atlas automated backups)
 

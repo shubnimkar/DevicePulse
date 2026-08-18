@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -28,6 +29,8 @@ var defaultAPIURL = "http://localhost:8080"
 //	go build -ldflags "-X main.agentVersion=1.2.0"
 var agentVersion = "0.0.1-dev"
 
+const maxTelemetryPayloadBytes = 5 * 1024 * 1024
+
 // apiURL is the resolved endpoint used at runtime.
 // Priority: DEVICEPULSE_API_URL env var → defaultAPIURL (build-time default).
 var apiURL string
@@ -43,6 +46,7 @@ var (
 
 	policyMu     sync.RWMutex
 	syncInterval = 10 * time.Second
+	registerMu   sync.Mutex
 )
 
 // resolveDataDir returns the absolute path to the agent's data directory.
@@ -128,24 +132,24 @@ func main() {
 	go syncEngine(q)
 
 	// ── Collectors ──────────────────────────────────────────────────────────────
-	sysInfo      := &collector.SystemInfo{}
-	procMon      := &collector.ProcessMonitor{}
-	browserHist  := &collector.BrowserHistory{}
-	hwStats      := &collector.HardwareStats{}
-	activeWin    := &collector.ActiveWindowTracker{}
+	sysInfo := &collector.SystemInfo{}
+	procMon := &collector.ProcessMonitor{}
+	browserHist := &collector.BrowserHistory{}
+	hwStats := &collector.HardwareStats{}
+	activeWin := &collector.ActiveWindowTracker{}
 	if err := activeWin.Start(); err != nil {
 		log.Printf("ActiveWindowTracker failed to start: %v", err)
 	}
 
 	// Fast collectors — run every sync cycle.
-	services  := &collector.Services{}
-	netPorts  := &collector.NetworkPorts{}
+	services := &collector.Services{}
+	netPorts := &collector.NetworkPorts{}
 	usbEvents := &collector.USBEvents{}
 
 	// Slow collectors — run in background on a fixed 60-second interval.
 	// Results are cached and included in every payload until refreshed.
 	installedApps := &collector.InstalledApps{}
-	osUpdates     := &collector.OSUpdates{}
+	osUpdates := &collector.OSUpdates{}
 
 	type slowCache struct {
 		mu    sync.RWMutex
@@ -223,7 +227,7 @@ func main() {
 
 		// Read slow-collector cache (non-blocking)
 		cache.mu.RLock()
-		appsPayload  := cache.apps
+		appsPayload := cache.apps
 		osUpdPayload := cache.osUpd
 		cache.mu.RUnlock()
 
@@ -274,27 +278,36 @@ func main() {
 //  3. Otherwise register (or re-register) with the API, which will return
 //     existing credentials if the hardware was seen before.
 func registerDevice() error {
+	return registerDeviceWithCache(true)
+}
+
+func registerDeviceWithCache(useCache bool) error {
+	registerMu.Lock()
+	defer registerMu.Unlock()
+
 	regFile := filepath.Join(dataDir, "registration.json")
 
 	fp := collector.GetHardwareFingerprint()
 	log.Printf("Hardware fingerprint: %s", fp)
 
 	// Try loading cached credentials
-	if data, err := os.ReadFile(regFile); err == nil {
-		var reg map[string]string
-		if json.Unmarshal(data, &reg) == nil {
-			cachedUUID := reg["hardware_uuid"]
-			cachedMAC  := reg["mac_address"]
-			// Accept cached creds only if the hardware identifiers still match.
-			// This handles the case where the binary is copied to a different machine.
-			if reg["device_id"] != "" && reg["api_key"] != "" &&
-				cachedUUID == fp.HardwareUUID && cachedMAC == fp.MACAddress {
-				deviceID = reg["device_id"]
-				apiKey   = reg["api_key"]
-				log.Printf("Loaded cached registration: device_id=%s", deviceID)
-				return nil
+	if useCache {
+		if data, err := os.ReadFile(regFile); err == nil {
+			var reg map[string]string
+			if json.Unmarshal(data, &reg) == nil {
+				cachedUUID := reg["hardware_uuid"]
+				cachedMAC := reg["mac_address"]
+				// Accept cached creds only if the hardware identifiers still match.
+				// This handles the case where the binary is copied to a different machine.
+				if reg["device_id"] != "" && reg["api_key"] != "" &&
+					cachedUUID == fp.HardwareUUID && cachedMAC == fp.MACAddress {
+					deviceID = reg["device_id"]
+					apiKey = reg["api_key"]
+					log.Printf("Loaded cached registration: device_id=%s", deviceID)
+					return nil
+				}
+				log.Printf("Fingerprint mismatch or incomplete cache — re-registering")
 			}
-			log.Printf("Fingerprint mismatch or incomplete cache — re-registering")
 		}
 	}
 
@@ -322,7 +335,7 @@ func registerDevice() error {
 	}
 
 	deviceID = result["device_id"]
-	apiKey   = result["api_key"]
+	apiKey = result["api_key"]
 
 	if deviceID == "" || apiKey == "" {
 		return fmt.Errorf("registration response missing device_id or api_key")
@@ -342,7 +355,7 @@ func registerDevice() error {
 	return nil
 }
 
-// policyPoller fetches policy rules from the API
+// policyPoller fetches global policy configuration from the API.
 func policyPoller() {
 	for {
 		req, _ := http.NewRequest(http.MethodGet, apiURL+"/policy", nil)
@@ -381,21 +394,34 @@ func syncEngine(q *queue.Queue) {
 
 		if len(items) > 0 {
 			var sentIDs []int
-			client := &http.Client{Timeout: 10 * time.Second}
+			droppedCount := 0
+			client := &http.Client{Timeout: 2 * time.Minute}
 
 			for _, item := range items {
-				req, err := http.NewRequest(http.MethodPost, apiURL+"/ingest",
-					bytes.NewBuffer([]byte(item.Payload)))
-				if err != nil {
+				if len(item.Payload) > maxTelemetryPayloadBytes {
+					log.Printf("SyncEngine: dropping oversized queue item %d (%d bytes > %d bytes)",
+						item.ID, len(item.Payload), maxTelemetryPayloadBytes)
+					sentIDs = append(sentIDs, item.ID)
+					droppedCount++
 					continue
 				}
-				req.Header.Set("Content-Type", "application/json")
-				req.Header.Set("X-API-Key", apiKey)
 
-				resp, err := client.Do(req)
-				if err == nil && resp.StatusCode == http.StatusOK {
+				status, sent := uploadQueuedItem(client, item)
+				if sent {
 					sentIDs = append(sentIDs, item.ID)
-					resp.Body.Close()
+					continue
+				}
+
+				if status == http.StatusUnauthorized {
+					log.Printf("SyncEngine: cached credentials rejected; re-registering device")
+					if err := registerDeviceWithCache(false); err != nil {
+						log.Printf("SyncEngine: re-registration failed: %v", err)
+						continue
+					}
+
+					if _, sent := uploadQueuedItem(client, item); sent {
+						sentIDs = append(sentIDs, item.ID)
+					}
 				}
 			}
 
@@ -403,13 +429,46 @@ func syncEngine(q *queue.Queue) {
 				if err := q.MarkSent(sentIDs); err != nil {
 					log.Printf("Error clearing sent items: %v", err)
 				} else {
-					log.Printf("SyncEngine: uploaded %d items", len(sentIDs))
+					uploadedCount := len(sentIDs) - droppedCount
+					if droppedCount > 0 {
+						log.Printf("SyncEngine: cleared %d items (%d uploaded, %d dropped)",
+							len(sentIDs), uploadedCount, droppedCount)
+					} else {
+						log.Printf("SyncEngine: uploaded %d items", uploadedCount)
+					}
 				}
 			}
 		}
 
 		time.Sleep(5 * time.Second)
 	}
+}
+
+func uploadQueuedItem(client *http.Client, item queue.TelemetryItem) (int, bool) {
+	req, err := http.NewRequest(http.MethodPost, apiURL+"/ingest",
+		bytes.NewBuffer([]byte(item.Payload)))
+	if err != nil {
+		log.Printf("SyncEngine: failed to build request for queue item %d: %v", item.ID, err)
+		return 0, false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", apiKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("SyncEngine: upload failed for queue item %d: %v", item.ID, err)
+		return 0, false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		return resp.StatusCode, true
+	}
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	log.Printf("SyncEngine: upload failed for queue item %d: status %d: %s",
+		item.ID, resp.StatusCode, string(bytes.TrimSpace(body)))
+	return resp.StatusCode, false
 }
 
 // runWindowOnlyMode is entered when DEVICEPULSE_MODE=window_only.
