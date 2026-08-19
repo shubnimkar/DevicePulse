@@ -54,7 +54,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 AGENT_DIR="$REPO_ROOT/agent"
 DIST_DIR="$REPO_ROOT/dist"
-LDFLAGS="-X main.defaultAPIURL=${API_URL} -X main.agentVersion=${VERSION} -s -w"
+BASE_LDFLAGS="-X main.defaultAPIURL=${API_URL} -X main.agentVersion=${VERSION} -s -w"
 
 mkdir -p "$DIST_DIR"
 
@@ -84,6 +84,10 @@ for target in "${TARGETS[@]}"; do
   fi
 
   OUTPUT="$DIST_DIR/devicepulse-agent-${VERSION}-${SUFFIX}"
+  LDFLAGS="$BASE_LDFLAGS"
+  if [[ "$GOOS" == "windows" ]]; then
+    LDFLAGS="$LDFLAGS -H=windowsgui"
+  fi
   echo ""
   echo "▶ Building $GOOS/$GOARCH → $(basename "$OUTPUT")"
 

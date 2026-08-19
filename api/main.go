@@ -210,7 +210,7 @@ func normalizePolicy(input map[string]interface{}) map[string]interface{} {
 		policy[k] = v
 	}
 
-	clampNumber(policy, "sync_interval_seconds", 2, 3600)
+	clampNumber(policy, "sync_interval_seconds", 10, 3600)
 	clampNumber(policy, "telemetry_retention_days", 1, 3650)
 	clampNumber(policy, "browser_history_limit", 0, 1000)
 

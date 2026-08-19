@@ -85,7 +85,15 @@
           Start="install"
           Stop="both"
           Remove="uninstall"
-          Wait="yes" />      </Component>
+          Wait="yes" />
+
+        <util:ServiceConfig
+          FirstFailureActionType="restart"
+          SecondFailureActionType="restart"
+          ThirdFailureActionType="restart"
+          RestartServiceDelayInSeconds="60"
+          ResetPeriodInDays="1" />
+      </Component>
 
       <!-- Data directory: C:\ProgramData\DevicePulse\Agent
            LocalSystem (SYSTEM account) has full control by default over

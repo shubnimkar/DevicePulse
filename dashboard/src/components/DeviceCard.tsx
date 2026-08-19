@@ -1,7 +1,7 @@
 'use client';
 
 import { AppFocusSummary, Device, DeviceTab } from '@/types';
-import { isOnline, getOSIcon, timeAgo, metricColor } from '@/lib/utils';
+import { isOnline, timeAgo, metricColor } from '@/lib/utils';
 import OverviewTab from '@/components/tabs/OverviewTab';
 import HardwareTab from '@/components/tabs/HardwareTab';
 import ProcessesTab from '@/components/tabs/ProcessesTab';
@@ -42,8 +42,6 @@ export default function DeviceCard({ device, tab, onTabChange, onDelete, cachedF
   const online = isOnline(device.last_seen);
 
   const hostname = sys?.hostname || device.hostname || device.device_id;
-  const osIcon   = getOSIcon(sys?.os);
-
   const cpuPct = hw?.cpu?.usage_percent;
   const ramPct = hw?.ram?.used_percent;
 
@@ -58,7 +56,7 @@ export default function DeviceCard({ device, tab, onTabChange, onDelete, cachedF
         <div className="device-header-left">
           <div className="device-name-row">
             <span className={`online-dot ${online ? 'on' : 'off'}`} />
-            <span className="device-hostname">{osIcon} {hostname}</span>
+            <span className="device-hostname">{hostname}</span>
             <span className={`status-badge badge-${online ? (state === 'critical' ? 'critical' : state === 'warning' ? 'warning' : 'online') : 'offline'}`}>
               <span className="dot" />
               {online ? (state === 'critical' ? 'Critical' : state === 'warning' ? 'Warning' : 'Online') : 'Offline'}

@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { Device, AppFocusSummary, FocusCacheData, DeviceTab, EnterprisePolicy } from '@/types';
-import { API, readHeaders, adminHeaders, isOnline, getOSIcon, timeAgo } from '@/lib/utils';
+import { API, readHeaders, adminHeaders, isOnline, timeAgo } from '@/lib/utils';
 import DeviceCard from '@/components/DeviceCard';
 
 type PageView = 'dashboard' | 'inventory' | 'settings';
@@ -87,7 +87,6 @@ const IconSettings = () => (
 export default function Home() {
   const [devices, setDevices]         = useState<Device[]>([]);
   const [loading, setLoading]         = useState(true);
-  const [syncInterval, setSyncInterval] = useState(10);
   const [isUpdating, setIsUpdating]   = useState(false);
   const [policy, setPolicy]           = useState<EnterprisePolicy>(DEFAULT_POLICY);
   const [policySavedAt, setPolicySavedAt] = useState<string>('');
@@ -134,7 +133,6 @@ export default function Home() {
         const d = await res.json();
         const nextPolicy = { ...DEFAULT_POLICY, ...d };
         setPolicy(nextPolicy);
-        if (nextPolicy.sync_interval_seconds) setSyncInterval(nextPolicy.sync_interval_seconds);
       }
     } catch {}
   }, []);
@@ -150,7 +148,6 @@ export default function Home() {
   const savePolicy = async (nextPolicy: EnterprisePolicy) => {
     setIsUpdating(true);
     setPolicy(nextPolicy);
-    setSyncInterval(nextPolicy.sync_interval_seconds);
     try {
       const res = await fetch(`${API}/policy`, {
         method: 'POST',
@@ -161,15 +158,15 @@ export default function Home() {
     } catch {} finally { setIsUpdating(false); }
   };
 
-  const handlePolicyUpdate = async (val: number) => {
-    const nextPolicy = { ...policy, sync_interval_seconds: val };
-    await savePolicy(nextPolicy);
-  };
+  const clampSyncInterval = (value: number) => Math.min(3600, Math.max(10, value || 10));
 
   const updatePolicyField = <K extends keyof EnterprisePolicy>(key: K, value: EnterprisePolicy[K]) => {
-    const nextPolicy = { ...policy, [key]: value };
+    const nextValue = key === 'sync_interval_seconds'
+      ? clampSyncInterval(Number(value)) as EnterprisePolicy[K]
+      : value;
+    const nextPolicy = { ...policy, [key]: nextValue };
     if (key === 'browser_history_mode') {
-      nextPolicy.collect_browser_history = value !== 'disabled';
+      nextPolicy.collect_browser_history = nextValue !== 'disabled';
     }
     void savePolicy(nextPolicy);
   };
@@ -383,30 +380,6 @@ export default function Home() {
           </div>
         </div>
 
-        <div className="sidebar-section">
-          <div className="sidebar-label">Global Policy</div>
-          <div className="policy-widget">
-            <div className="policy-slider-row">
-              <span>Sync Interval</span>
-              <strong>{syncInterval}s</strong>
-            </div>
-            <input
-              type="range"
-              min="2"
-              max="60"
-              value={syncInterval}
-              onChange={e => setSyncInterval(Number(e.target.value))}
-              onMouseUp={e => handlePolicyUpdate(Number((e.target as HTMLInputElement).value))}
-              disabled={isUpdating}
-              className="policy-slider"
-              aria-label="Sync interval in seconds"
-            />
-            <div className="slider-range">
-              <span>2s (fast)</span>
-              <span>60s (eco)</span>
-            </div>
-          </div>
-        </div>
       </aside>
 
       {/* ── Main content ── */}
@@ -502,13 +475,12 @@ export default function Home() {
                     <div className="number-control">
                       <input
                         type="number"
-                        min="2"
+                        min="10"
                         max="3600"
                         value={policy.sync_interval_seconds}
                         onChange={e => {
                           const next = Number(e.target.value);
                           setPolicy(p => ({ ...p, sync_interval_seconds: next }));
-                          setSyncInterval(next);
                         }}
                         onBlur={e => updatePolicyField('sync_interval_seconds', Number(e.target.value))}
                       />
@@ -660,7 +632,7 @@ export default function Home() {
                         : online ? 'Online' : 'Offline';
 
                       const platform = sys?.platform
-                        ? `${getOSIcon(sys.os)} ${sys.platform}${sys.architecture ? `, ${sys.architecture}` : ''}`
+                        ? `${sys.platform}${sys.architecture ? `, ${sys.architecture}` : ''}`
                         : '—';
 
                       return (

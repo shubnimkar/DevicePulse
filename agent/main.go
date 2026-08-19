@@ -75,8 +75,13 @@ func resolveDataDir() string {
 }
 
 func main() {
-	fmt.Println("DevicePulse Agent starting...")
+	if runPlatformService() {
+		return
+	}
+	runAgent()
+}
 
+func runAgent() {
 	// Load .env if present — allows setting DEVICEPULSE_API_URL, DEVICEPULSE_DATA_DIR,
 	// etc. without rebuilding. Silently ignored in production where env vars are
 	// injected by systemd/launchd/container runtime.
@@ -98,6 +103,8 @@ func main() {
 	//   Linux   : /var/lib/devicepulse   (systemd WorkingDirectory)
 	// The env var allows overriding in dev/test without recompiling.
 	dataDir = resolveDataDir()
+	configureLogging(dataDir)
+	log.Println("DevicePulse Agent starting...")
 	log.Printf("Data directory: %s", dataDir)
 
 	// DEVICEPULSE_MODE controls which collectors are active.
@@ -267,6 +274,21 @@ func main() {
 
 		time.Sleep(interval)
 	}
+}
+
+func configureLogging(dir string) {
+	if dir == "" {
+		return
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return
+	}
+	logFile := filepath.Join(dir, "agent.log")
+	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	log.SetOutput(io.MultiWriter(os.Stderr, f))
 }
 
 // registerDevice calls POST /devices/register and stores the device_id + api_key.
