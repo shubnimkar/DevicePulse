@@ -188,21 +188,6 @@ export default function Home() {
   const onlineCount  = devices.filter(d => isOnline(d.last_seen)).length;
   const offlineCount = devices.length - onlineCount;
 
-  const fleetLoad = devices.reduce(
-    (acc, d) => {
-      const hw = d.data?.HardwareStats;
-      if (hw?.cpu?.usage_percent  !== undefined) acc.cpu.push(hw.cpu.usage_percent);
-      if (hw?.ram?.used_percent   !== undefined) acc.ram.push(hw.ram.used_percent);
-      if (hw?.disks?.[0]?.used_percent !== undefined) acc.disk.push(hw.disks[0].used_percent);
-      return acc;
-    },
-    { cpu: [] as number[], ram: [] as number[], disk: [] as number[] }
-  );
-  const avg = (arr: number[]) => arr.length ? Math.round(arr.reduce((s, v) => s + v, 0) / arr.length) : 0;
-  const avgCpu  = avg(fleetLoad.cpu);
-  const avgRam  = avg(fleetLoad.ram);
-  const avgDisk = avg(fleetLoad.disk);
-
   const deviceRisk = (device: Device) => {
     const hw = device.data?.HardwareStats;
     return Math.max(hw?.cpu?.usage_percent ?? 0, hw?.ram?.used_percent ?? 0, hw?.disks?.[0]?.used_percent ?? 0);
@@ -269,24 +254,6 @@ export default function Home() {
         <div className="header-brand">
           <div className="header-logo"><IconLogo /></div>
           <span className="brand-name">DevicePulse</span>
-        </div>
-
-        <div className="header-center">
-          <div className="header-stat">
-            <span className="dot" />
-            <strong>{onlineCount}</strong>
-            <span>online</span>
-          </div>
-          <div className="header-stat">
-            <strong>{devices.length}</strong>
-            <span>total</span>
-          </div>
-          <div className="header-stat">
-            <strong>CPU {avgCpu}%</strong>
-          </div>
-          <div className="header-stat">
-            <strong>MEM {avgRam}%</strong>
-          </div>
         </div>
 
         <div className="header-right">
@@ -364,11 +331,6 @@ export default function Home() {
                   {f}
                 </button>
               ))}
-            </div>
-            <div className="fleet-metrics">
-              <div className="fleet-metric"><span>CPU</span><strong>{avgCpu}%</strong></div>
-              <div className="fleet-metric"><span>Mem</span><strong>{avgRam}%</strong></div>
-              <div className="fleet-metric"><span>Disk</span><strong>{avgDisk}%</strong></div>
             </div>
             {attentionDevice && (
               <div className="attention-strip">
