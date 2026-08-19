@@ -120,6 +120,32 @@ body {
   margin-left: auto;
 }
 
+.user-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: 320px;
+  color: var(--text-2);
+  font-size: 0.8125rem;
+}
+.user-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.user-chip strong,
+.role-badge {
+  color: var(--blue);
+  background: var(--blue-dim);
+  border: 1px solid var(--blue-border);
+  border-radius: var(--radius);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  padding: 0.1875rem 0.45rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
 .live-badge {
   display: inline-flex;
   align-items: center;
@@ -140,6 +166,99 @@ body {
   border-radius: 50%;
   background: var(--green);
   animation: pulse 2s infinite;
+}
+
+/* ── Auth ───────────────────────────────────────────────────────────────────── */
+.auth-shell {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 1.5rem;
+  background: var(--bg);
+}
+
+.auth-panel {
+  width: min(100%, 420px);
+  display: grid;
+  gap: 0.875rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 1.25rem;
+}
+
+.auth-panel h1 {
+  color: var(--text-1);
+  font-size: 1.25rem;
+  line-height: 1.2;
+}
+
+.auth-panel p {
+  color: var(--text-2);
+  font-size: 0.875rem;
+}
+
+.auth-field {
+  display: grid;
+  gap: 0.375rem;
+}
+
+.auth-field span {
+  color: var(--text-2);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.auth-field input,
+.auth-field select {
+  width: 100%;
+  min-width: 0;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-1);
+  font-family: 'Inter', sans-serif;
+  font-size: 0.875rem;
+  padding: 0.625rem 0.75rem;
+  outline: none;
+}
+
+.auth-field input:focus,
+.auth-field select:focus {
+  border-color: var(--blue);
+}
+
+.auth-error {
+  color: var(--red);
+  background: var(--red-dim);
+  border: 1px solid var(--red-border);
+  border-radius: var(--radius);
+  font-size: 0.8125rem;
+  padding: 0.625rem 0.75rem;
+  white-space: pre-wrap;
+}
+
+.auth-submit {
+  border: none;
+  border-radius: var(--radius);
+  background: var(--blue);
+  color: #fff;
+  cursor: pointer;
+  font-family: 'Inter', sans-serif;
+  font-size: 0.875rem;
+  font-weight: 700;
+  padding: 0.6875rem 0.875rem;
+}
+
+.auth-submit:hover { opacity: 0.88; }
+
+.auth-link {
+  border: none;
+  background: transparent;
+  color: var(--text-3);
+  font-family: 'Inter', sans-serif;
+  font-size: 0.75rem;
+  text-align: center;
 }
 
 /* ── Sidebar ─────────────────────────────────────────────────────────────────── */
@@ -425,6 +544,11 @@ body {
   padding: 0.25rem 0.5rem;
   white-space: nowrap;
 }
+.save-state.muted {
+  color: var(--text-2);
+  background: var(--surface-2);
+  border-color: var(--border);
+}
 
 .settings-grid {
   display: grid;
@@ -529,6 +653,11 @@ body {
   accent-color: var(--blue);
   flex-shrink: 0;
 }
+.toggle-row input:disabled,
+.collector-toggle input:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
 
 .segmented-control {
   display: inline-grid;
@@ -561,11 +690,67 @@ body {
   color: #fff;
   background: var(--blue);
 }
+.segmented-control button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
 
 .collector-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.625rem;
+}
+
+.user-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.875rem;
+}
+.user-submit {
+  align-self: end;
+}
+
+.reset-password-form {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) auto auto;
+  gap: 0.375rem;
+  justify-content: end;
+  margin-left: auto;
+  max-width: 420px;
+}
+
+.reset-password-form input {
+  min-width: 0;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-1);
+  font-family: 'Inter', sans-serif;
+  font-size: 0.75rem;
+  padding: 0.3125rem 0.5rem;
+  outline: none;
+}
+
+.reset-password-form input:focus {
+  border-color: var(--blue);
+}
+
+.role-select {
+  min-width: 116px;
+  background: var(--blue-dim);
+  border: 1px solid var(--blue-border);
+  border-radius: var(--radius);
+  color: var(--blue);
+  font-family: 'Inter', sans-serif;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 0.3125rem 0.5rem;
+  text-transform: uppercase;
+  outline: none;
+}
+
+.role-select:focus {
+  border-color: var(--blue);
 }
 
 /* ── Filter Tabs ─────────────────────────────────────────────────────────────── */

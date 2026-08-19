@@ -1,18 +1,13 @@
 // ─── Utility helpers ──────────────────────────────────────────────────────────
 
 export const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
-export const DASHBOARD_TOKEN = process.env.NEXT_PUBLIC_DASHBOARD_TOKEN ?? '';
-export const ADMIN_SECRET = process.env.NEXT_PUBLIC_ADMIN_SECRET ?? '';
 
 export function readHeaders(): HeadersInit {
-  return DASHBOARD_TOKEN ? { 'X-Dashboard-Token': DASHBOARD_TOKEN } : {};
+  return {};
 }
 
 export function adminHeaders(): HeadersInit {
-  return {
-    'Content-Type': 'application/json',
-    ...(ADMIN_SECRET ? { 'X-Admin-Secret': ADMIN_SECRET } : {}),
-  };
+  return { 'Content-Type': 'application/json' };
 }
 
 export function getDomain(url: string): string {

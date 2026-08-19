@@ -145,6 +145,18 @@ export interface Device {
   data?: DeviceData;
 }
 
+export type UserRole = 'admin' | 'manager' | 'viewer';
+
+export interface DashboardUser {
+  id: string;
+  email: string;
+  name: string;
+  role: UserRole;
+  status?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
 export interface EnterprisePolicy {
   sync_interval_seconds: number;
   telemetry_retention_days: number;

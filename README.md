@@ -43,6 +43,8 @@ go run .
 **`api/.env`**
 ```
 MONGO_URI=mongodb://localhost:27017
+SESSION_SECRET=replace-with-a-strong-random-secret
+DASHBOARD_ORIGIN=http://localhost:3000
 ```
 
 ### 3. Start the Agent
@@ -162,21 +164,50 @@ sudo certbot --nginx -d your-ec2-domain.com
 
 Agents authenticate via the `X-API-Key` header using the key returned at registration.
 
+Dashboard users authenticate with an HTTP-only `devicepulse_session` cookie. On a fresh database, the dashboard registration page creates the first `admin` user. After that, registration is closed and only an `admin` can create additional dashboard users from the Access page.
+
+Dashboard roles:
+
+| Role | Access |
+|------|--------|
+| `admin` | Full access, including user creation and device deletion |
+| `manager` | View telemetry and update policy/settings |
+| `viewer` | Read-only telemetry and settings access |
+
+### Console password reset
+
+Dashboard password resets are intentionally console-only. Run this from `api/` with `MONGO_URI` available in `.env` or the environment:
+
+```bash
+go run . reset-password --email admin@example.com --password 'new-password-min-8-chars'
+```
+
+The command can reset an admin's own password or any other dashboard user's password. It updates the stored bcrypt hash directly and reactivates the user account.
+
 ### Endpoints
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | `POST` | `/devices/register` | — | Register a device (deduplicates by hardware UUID → MAC → hostname) |
 | `GET` | `/health` | — | API health check |
-| `GET` | `/devices` | — | List all registered devices |
-| `DELETE` | `/devices/{id}` | — | Remove a device |
-| `GET` | `/devices/{id}/history` | — | Last 100 telemetry snapshots for a device |
+| `GET` | `/auth/bootstrap` | — | Check whether first-admin bootstrap is required |
+| `POST` | `/auth/register` | — | Create the first dashboard admin only |
+| `POST` | `/auth/login` | — | Login dashboard user and set session cookie |
+| `POST` | `/auth/logout` | Dashboard session | Clear dashboard session cookie |
+| `GET` | `/auth/me` | Dashboard session | Return current dashboard user |
+| `GET` | `/users` | `admin` | List dashboard users |
+| `POST` | `/users` | `admin` | Create a dashboard user |
+| `POST` | `/users/{id}/password` | `admin` | Reset a dashboard user's password |
+| `POST` | `/users/{id}/role` | `admin` | Change a dashboard user's role |
+| `GET` | `/devices` | `viewer`+ | List all registered devices |
+| `DELETE` | `/devices/{id}` | `admin` | Remove a device |
+| `GET` | `/devices/{id}/history` | `viewer`+ | Last 100 telemetry snapshots for a device |
 | `POST` | `/ingest` | ✓ X-API-Key | Accept a telemetry payload |
-| `GET` | `/policy` | — | Read the current global policy |
-| `POST` | `/policy` | — | Update the global policy (e.g. `sync_interval_seconds`) |
-| `GET` | `/focus/{device_id}` | — | Cumulative per-app focus totals |
+| `GET` | `/policy` | `viewer`+ | Read the current global policy |
+| `POST` | `/policy` | `manager`+ | Update the global policy (e.g. `sync_interval_seconds`) |
+| `GET` | `/focus/{device_id}` | `viewer`+ | Cumulative per-app focus totals |
 | `GET` | `/update/check` | ✓ X-API-Key | Check for a new agent binary (used by auto-updater) |
-| `POST` | `/update/release` | — | Publish a new agent release |
+| `POST` | `/update/release` | `admin` | Publish a new agent release |
 
 ### Publishing an agent release
 

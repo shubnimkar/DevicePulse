@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -19,8 +23,10 @@ import (
 
 	"github.com/joho/godotenv"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // ─── Globals ──────────────────────────────────────────────────────────────────
@@ -30,7 +36,8 @@ var (
 	dbName      = "devicepulse"
 	// adminSecret is loaded from ADMIN_SECRET env var and required for
 	// privileged endpoints: POST /policy and POST /update/release.
-	adminSecret string
+	adminSecret   string
+	sessionSecret string
 )
 
 // ─── Focus Cache ──────────────────────────────────────────────────────────────
@@ -314,7 +321,18 @@ func savePolicyToMongo(cfg map[string]interface{}) {
 
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := r.Header.Get("Origin")
+		allowedOrigin := os.Getenv("DASHBOARD_ORIGIN")
+		if allowedOrigin == "" {
+			allowedOrigin = "http://localhost:3000"
+		}
+		if origin != "" && (origin == allowedOrigin || strings.HasPrefix(origin, "http://localhost:")) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+		}
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
 		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
 		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, Authorization, X-API-Key, X-Admin-Secret, X-Dashboard-Token")
 		if r.Method == "OPTIONS" {
@@ -326,6 +344,223 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // ─── Auth Middleware ───────────────────────────────────────────────────────────
+
+type contextKey string
+
+const dashboardUserContextKey contextKey = "dashboard_user"
+
+type UserRole string
+
+const (
+	RoleAdmin   UserRole = "admin"
+	RoleManager UserRole = "manager"
+	RoleViewer  UserRole = "viewer"
+)
+
+type DashboardUser struct {
+	ID           primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	Email        string             `bson:"email" json:"email"`
+	Name         string             `bson:"name" json:"name"`
+	PasswordHash string             `bson:"password_hash,omitempty" json:"-"`
+	Role         UserRole           `bson:"role" json:"role"`
+	Status       string             `bson:"status" json:"status"`
+	CreatedAt    time.Time          `bson:"created_at" json:"created_at"`
+	UpdatedAt    time.Time          `bson:"updated_at" json:"updated_at"`
+}
+
+type SessionClaims struct {
+	UserID string   `json:"user_id"`
+	Email  string   `json:"email"`
+	Name   string   `json:"name"`
+	Role   UserRole `json:"role"`
+	Exp    int64    `json:"exp"`
+}
+
+type authRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+	Name     string `json:"name"`
+	Role     string `json:"role"`
+}
+
+type passwordResetRequest struct {
+	Password string `json:"password"`
+}
+
+type roleUpdateRequest struct {
+	Role string `json:"role"`
+}
+
+func normalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
+func validRole(role UserRole) bool {
+	switch role {
+	case RoleAdmin, RoleManager, RoleViewer:
+		return true
+	default:
+		return false
+	}
+}
+
+func roleRank(role UserRole) int {
+	switch role {
+	case RoleAdmin:
+		return 3
+	case RoleManager:
+		return 2
+	case RoleViewer:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func canAccessRole(actual UserRole, required UserRole) bool {
+	return roleRank(actual) >= roleRank(required)
+}
+
+func userResponse(user DashboardUser) map[string]interface{} {
+	return map[string]interface{}{
+		"id":         user.ID.Hex(),
+		"email":      user.Email,
+		"name":       user.Name,
+		"role":       user.Role,
+		"status":     user.Status,
+		"created_at": user.CreatedAt,
+		"updated_at": user.UpdatedAt,
+	}
+}
+
+func signSessionPayload(payload []byte) string {
+	mac := hmac.New(sha256.New, []byte(sessionSecret))
+	mac.Write(payload)
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func createSessionToken(user DashboardUser) (string, error) {
+	claims := SessionClaims{
+		UserID: user.ID.Hex(),
+		Email:  user.Email,
+		Name:   user.Name,
+		Role:   user.Role,
+		Exp:    time.Now().Add(24 * time.Hour).Unix(),
+	}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		return "", err
+	}
+	encodedPayload := base64.RawURLEncoding.EncodeToString(payload)
+	signature := signSessionPayload([]byte(encodedPayload))
+	return encodedPayload + "." + signature, nil
+}
+
+func parseSessionToken(token string) (SessionClaims, bool) {
+	var claims SessionClaims
+	parts := strings.Split(token, ".")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return claims, false
+	}
+	expected := signSessionPayload([]byte(parts[0]))
+	if !hmac.Equal([]byte(expected), []byte(parts[1])) {
+		return claims, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return claims, false
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return claims, false
+	}
+	if claims.Exp < time.Now().Unix() || claims.UserID == "" || !validRole(claims.Role) {
+		return claims, false
+	}
+	return claims, true
+}
+
+func setSessionCookie(w http.ResponseWriter, user DashboardUser) error {
+	token, err := createSessionToken(user)
+	if err != nil {
+		return err
+	}
+	secureCookie := strings.EqualFold(os.Getenv("COOKIE_SECURE"), "true")
+	http.SetCookie(w, &http.Cookie{
+		Name:     "devicepulse_session",
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   secureCookie,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   86400,
+	})
+	return nil
+}
+
+func clearSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "devicepulse_session",
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+	})
+}
+
+func currentUser(r *http.Request) (SessionClaims, bool) {
+	user, ok := r.Context().Value(dashboardUserContextKey).(SessionClaims)
+	return user, ok
+}
+
+func requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie("devicepulse_session")
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		claims, ok := parseSessionToken(cookie.Value)
+		if !ok {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		userID, err := primitive.ObjectIDFromHex(claims.UserID)
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		var user DashboardUser
+		err = mongoClient.Database(dbName).Collection("users").FindOne(ctx, bson.M{
+			"_id":    userID,
+			"status": "active",
+		}).Decode(&user)
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		claims.Email = user.Email
+		claims.Name = user.Name
+		claims.Role = user.Role
+
+		next(w, r.WithContext(context.WithValue(r.Context(), dashboardUserContextKey, claims)))
+	}
+}
+
+func requireRole(required UserRole, next http.HandlerFunc) http.HandlerFunc {
+	return requireAuth(func(w http.ResponseWriter, r *http.Request) {
+		user, ok := currentUser(r)
+		if !ok || !canAccessRole(user.Role, required) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	})
+}
 
 // authMiddleware validates the X-API-Key header against the devices collection.
 // It returns the device_id associated with the key, or "" if invalid.
@@ -509,6 +744,381 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 		"device_id": deviceID,
 		"api_key":   apiKey,
 	})
+}
+
+// POST /auth/register
+// Bootstraps the first dashboard admin. Once any dashboard user exists, only an
+// existing admin can create users through POST /users.
+func authRegisterHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var body authRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "Bad JSON", http.StatusBadRequest)
+		return
+	}
+
+	email := normalizeEmail(body.Email)
+	name := strings.TrimSpace(body.Name)
+	if name == "" {
+		name = email
+	}
+	if email == "" || len(body.Password) < 8 {
+		http.Error(w, "Email and password with at least 8 characters are required", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	coll := mongoClient.Database(dbName).Collection("users")
+	count, err := coll.CountDocuments(ctx, bson.M{})
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	if count > 0 {
+		http.Error(w, "Registration is closed. Ask an admin to create your account.", http.StatusForbidden)
+		return
+	}
+	if _, err := mongoClient.Database(dbName).Collection("config").InsertOne(ctx, bson.M{
+		"_id":        "dashboard_bootstrap",
+		"created_at": time.Now(),
+	}); err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			http.Error(w, "Registration is closed. Ask an admin to create your account.", http.StatusForbidden)
+			return
+		}
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
+	if err != nil {
+		mongoClient.Database(dbName).Collection("config").DeleteOne(ctx, bson.M{"_id": "dashboard_bootstrap"})
+		http.Error(w, "Password hashing error", http.StatusInternalServerError)
+		return
+	}
+
+	now := time.Now()
+	user := DashboardUser{
+		ID:           primitive.NewObjectID(),
+		Email:        email,
+		Name:         name,
+		PasswordHash: string(passwordHash),
+		Role:         RoleAdmin,
+		Status:       "active",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if _, err := coll.InsertOne(ctx, user); err != nil {
+		mongoClient.Database(dbName).Collection("config").DeleteOne(ctx, bson.M{"_id": "dashboard_bootstrap"})
+		if mongo.IsDuplicateKeyError(err) {
+			http.Error(w, "User already exists", http.StatusConflict)
+			return
+		}
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	if err := setSessionCookie(w, user); err != nil {
+		http.Error(w, "Session error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"user": userResponse(user)})
+}
+
+// POST /auth/login
+func authLoginHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var body authRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "Bad JSON", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var user DashboardUser
+	err := mongoClient.Database(dbName).Collection("users").FindOne(ctx, bson.M{
+		"email":  normalizeEmail(body.Email),
+		"status": "active",
+	}).Decode(&user)
+	if err != nil || bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(body.Password)) != nil {
+		http.Error(w, "Invalid email or password", http.StatusUnauthorized)
+		return
+	}
+	if err := setSessionCookie(w, user); err != nil {
+		http.Error(w, "Session error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"user": userResponse(user)})
+}
+
+// POST /auth/logout
+func authLogoutHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	clearSessionCookie(w)
+	w.WriteHeader(http.StatusOK)
+}
+
+// GET /auth/me
+func authMeHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	user, ok := currentUser(r)
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"user": map[string]interface{}{
+			"id":    user.UserID,
+			"email": user.Email,
+			"name":  user.Name,
+			"role":  user.Role,
+		},
+	})
+}
+
+// GET /auth/bootstrap
+// Returns whether the dashboard still needs its first admin account.
+func authBootstrapHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	count, err := mongoClient.Database(dbName).Collection("users").CountDocuments(ctx, bson.M{})
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"bootstrap_required": count == 0})
+}
+
+// GET/POST /users
+// Admin-only dashboard user management. Registration after bootstrap is closed.
+func usersHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		opts := options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}})
+		cursor, err := mongoClient.Database(dbName).Collection("users").Find(ctx, bson.M{}, opts)
+		if err != nil {
+			http.Error(w, "Database error", http.StatusInternalServerError)
+			return
+		}
+		defer cursor.Close(ctx)
+
+		var users []DashboardUser
+		if err := cursor.All(ctx, &users); err != nil {
+			http.Error(w, "Parsing error", http.StatusInternalServerError)
+			return
+		}
+		result := make([]map[string]interface{}, 0, len(users))
+		for _, user := range users {
+			result = append(result, userResponse(user))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
+
+	case http.MethodPost:
+		var body authRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "Bad JSON", http.StatusBadRequest)
+			return
+		}
+		email := normalizeEmail(body.Email)
+		name := strings.TrimSpace(body.Name)
+		role := UserRole(strings.TrimSpace(body.Role))
+		if role == "" {
+			role = RoleViewer
+		}
+		if name == "" {
+			name = email
+		}
+		if email == "" || len(body.Password) < 8 || !validRole(role) {
+			http.Error(w, "Email, valid role and password with at least 8 characters are required", http.StatusBadRequest)
+			return
+		}
+
+		passwordHash, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
+		if err != nil {
+			http.Error(w, "Password hashing error", http.StatusInternalServerError)
+			return
+		}
+
+		now := time.Now()
+		user := DashboardUser{
+			ID:           primitive.NewObjectID(),
+			Email:        email,
+			Name:         name,
+			PasswordHash: string(passwordHash),
+			Role:         role,
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if _, err := mongoClient.Database(dbName).Collection("users").InsertOne(ctx, user); err != nil {
+			if mongo.IsDuplicateKeyError(err) {
+				http.Error(w, "User already exists", http.StatusConflict)
+				return
+			}
+			http.Error(w, "Database error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{"user": userResponse(user)})
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// POST /users/{id}/password
+// Admin-only password reset for any dashboard user, including the current admin.
+func userPasswordHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+	if len(parts) != 3 || parts[0] != "users" || parts[1] == "" || parts[2] != "password" {
+		http.Error(w, "Invalid URL", http.StatusBadRequest)
+		return
+	}
+	userID, err := primitive.ObjectIDFromHex(parts[1])
+	if err != nil {
+		http.Error(w, "Invalid user id", http.StatusBadRequest)
+		return
+	}
+
+	var body passwordResetRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "Bad JSON", http.StatusBadRequest)
+		return
+	}
+	if len(body.Password) < 8 {
+		http.Error(w, "Password with at least 8 characters is required", http.StatusBadRequest)
+		return
+	}
+
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
+	if err != nil {
+		http.Error(w, "Password hashing error", http.StatusInternalServerError)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	update := bson.M{"$set": bson.M{
+		"password_hash": string(passwordHash),
+		"updated_at":    time.Now(),
+		"status":        "active",
+	}}
+	res, err := mongoClient.Database(dbName).Collection("users").UpdateOne(ctx, bson.M{"_id": userID}, update)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	if res.MatchedCount == 0 {
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+// POST /users/{id}/role
+// Admin-only role change for dashboard users.
+func userRoleHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+	if len(parts) != 3 || parts[0] != "users" || parts[1] == "" || parts[2] != "role" {
+		http.Error(w, "Invalid URL", http.StatusBadRequest)
+		return
+	}
+	userID, err := primitive.ObjectIDFromHex(parts[1])
+	if err != nil {
+		http.Error(w, "Invalid user id", http.StatusBadRequest)
+		return
+	}
+
+	var body roleUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "Bad JSON", http.StatusBadRequest)
+		return
+	}
+	role := UserRole(strings.TrimSpace(body.Role))
+	if !validRole(role) {
+		http.Error(w, "Valid role is required", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	update := bson.M{"$set": bson.M{
+		"role":       role,
+		"updated_at": time.Now(),
+	}}
+	res, err := mongoClient.Database(dbName).Collection("users").UpdateOne(ctx, bson.M{"_id": userID}, update)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	if res.MatchedCount == 0 {
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func userDetailHandler(w http.ResponseWriter, r *http.Request) {
+	if strings.HasSuffix(r.URL.Path, "/password") {
+		userPasswordHandler(w, r)
+		return
+	}
+	if strings.HasSuffix(r.URL.Path, "/role") {
+		userRoleHandler(w, r)
+		return
+	}
+	http.NotFound(w, r)
 }
 
 // generateAPIKey creates a cryptographically random 48-char hex key.
@@ -917,40 +1527,97 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
+func loadEnvFile() {
+	candidates := []string{".env"}
+	if exe, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(exe), ".env"))
+	}
+	loaded := false
+	for _, p := range candidates {
+		if err := godotenv.Load(p); err == nil {
+			log.Printf("Loaded env from %s", p)
+			loaded = true
+			break
+		}
+	}
+	if !loaded {
+		log.Println("No .env file found, relying on environment variables")
+	}
+}
+
+func resetDashboardPasswordCommand(mongoURI string, args []string) {
+	fs := flag.NewFlagSet("reset-password", flag.ExitOnError)
+	emailFlag := fs.String("email", "", "dashboard user email")
+	passwordFlag := fs.String("password", "", "new password")
+	if err := fs.Parse(args); err != nil {
+		log.Fatal(err)
+	}
+
+	email := normalizeEmail(*emailFlag)
+	password := *passwordFlag
+	if email == "" || len(password) < 8 {
+		log.Fatal("Usage: go run . reset-password --email user@example.com --password new-password-min-8-chars")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI(mongoURI))
+	if err != nil {
+		log.Fatalf("Failed to connect to MongoDB: %v", err)
+	}
+	defer client.Disconnect(ctx)
+	if err := client.Ping(ctx, nil); err != nil {
+		log.Fatalf("Failed to ping MongoDB: %v", err)
+	}
+
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		log.Fatalf("Password hashing error: %v", err)
+	}
+
+	update := bson.M{"$set": bson.M{
+		"password_hash": string(passwordHash),
+		"updated_at":    time.Now(),
+		"status":        "active",
+	}}
+	res, err := client.Database(dbName).Collection("users").UpdateOne(ctx, bson.M{"email": email}, update)
+	if err != nil {
+		log.Fatalf("Password reset failed: %v", err)
+	}
+	if res.MatchedCount == 0 {
+		log.Fatalf("No dashboard user found with email %s", email)
+	}
+
+	log.Printf("Password reset for dashboard user %s", email)
+}
+
 func main() {
 	// Load .env file if present (silently ignored when not found, e.g. in production).
 	// We look next to the source file first (for `go run`), then next to the binary
 	// (for compiled deployments), so both workflows work without configuration.
-	{
-		// Locate the directory containing main.go via os.Executable or __file__ equivalent.
-		// For `go run`, the cwd is the source directory; for compiled binaries it's wherever
-		// the binary lives. Try both the cwd and the executable's directory.
-		candidates := []string{".env"}
-		if exe, err := os.Executable(); err == nil {
-			candidates = append(candidates, filepath.Join(filepath.Dir(exe), ".env"))
-		}
-		loaded := false
-		for _, p := range candidates {
-			if err := godotenv.Load(p); err == nil {
-				log.Printf("Loaded env from %s", p)
-				loaded = true
-				break
-			}
-		}
-		if !loaded {
-			log.Println("No .env file found, relying on environment variables")
-		}
-	}
+	loadEnvFile()
 
 	mongoURI := os.Getenv("MONGO_URI")
 	if mongoURI == "" {
 		log.Fatal("MONGO_URI environment variable must be set")
+	}
+	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
+		resetDashboardPasswordCommand(mongoURI, os.Args[2:])
+		return
 	}
 
 	// Load admin secret for privileged endpoints.
 	adminSecret = os.Getenv("ADMIN_SECRET")
 	if adminSecret == "" {
 		log.Println("WARNING: ADMIN_SECRET is not set — POST /policy and POST /update/release are disabled")
+	}
+	sessionSecret = os.Getenv("SESSION_SECRET")
+	if sessionSecret == "" {
+		sessionSecret = adminSecret
+	}
+	if sessionSecret == "" {
+		log.Fatal("SESSION_SECRET environment variable must be set for dashboard authentication")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -978,30 +1645,37 @@ func main() {
 	// Routes
 	http.HandleFunc("/health", corsMiddleware(healthHandler))
 	http.HandleFunc("/devices/register", corsMiddleware(registerHandler))
-	http.HandleFunc("/devices/", corsMiddleware(requireRead(func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/auth/bootstrap", corsMiddleware(authBootstrapHandler))
+	http.HandleFunc("/auth/register", corsMiddleware(authRegisterHandler))
+	http.HandleFunc("/auth/login", corsMiddleware(authLoginHandler))
+	http.HandleFunc("/auth/logout", corsMiddleware(authLogoutHandler))
+	http.HandleFunc("/auth/me", corsMiddleware(requireAuth(authMeHandler)))
+	http.HandleFunc("/users/", corsMiddleware(requireRole(RoleAdmin, userDetailHandler)))
+	http.HandleFunc("/users", corsMiddleware(requireRole(RoleAdmin, usersHandler)))
+	http.HandleFunc("/devices/", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/history") {
-			historyHandler(w, r)
+			requireRole(RoleViewer, historyHandler)(w, r)
 		} else if r.Method == http.MethodDelete {
-			deviceDeleteHandler(w, r)
+			requireRole(RoleAdmin, deviceDeleteHandler)(w, r)
 		} else {
 			http.NotFound(w, r)
 		}
-	})))
-	http.HandleFunc("/devices", corsMiddleware(requireRead(devicesHandler)))
+	}))
+	http.HandleFunc("/devices", corsMiddleware(requireRole(RoleViewer, devicesHandler)))
 	http.HandleFunc("/ingest", corsMiddleware(ingestHandler))
-	// GET /policy is public; POST /policy requires admin.
+	// Dashboard policy access is role-protected. Agents receive policy through
+	// authenticated device flows, not these browser endpoints.
 	http.HandleFunc("/policy", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
-			requireAdmin(policyHandler)(w, r)
+			requireRole(RoleManager, policyHandler)(w, r)
 		} else {
-			policyHandler(w, r)
+			requireRole(RoleViewer, policyHandler)(w, r)
 		}
 	}))
-	http.HandleFunc("/focus/", corsMiddleware(requireRead(focusHandler)))
+	http.HandleFunc("/focus/", corsMiddleware(requireRole(RoleViewer, focusHandler)))
 
 	http.HandleFunc("/update/check", corsMiddleware(requireAgent(updateCheckHandler)))
-	// POST /update/release is admin-only — requires X-Admin-Secret header.
-	http.HandleFunc("/update/release", corsMiddleware(requireAdmin(releasePublishHandler)))
+	http.HandleFunc("/update/release", corsMiddleware(requireRole(RoleAdmin, releasePublishHandler)))
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -1045,4 +1719,11 @@ func ensureIndexes() {
 			{Key: "arch", Value: 1},
 			{Key: "published_at", Value: -1},
 		}})
+
+	// users: unique email for dashboard login and quick role/status filtering
+	userIdx := []mongo.IndexModel{
+		{Keys: bson.D{{Key: "email", Value: 1}}, Options: options.Index().SetUnique(true)},
+		{Keys: bson.D{{Key: "role", Value: 1}, {Key: "status", Value: 1}}},
+	}
+	db.Collection("users").Indexes().CreateMany(ctx, userIdx)
 }

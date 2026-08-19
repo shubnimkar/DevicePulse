@@ -17,7 +17,7 @@ interface Props {
   device: Device;
   tab: DeviceTab;
   onTabChange: (tab: DeviceTab) => void;
-  onDelete: () => void;
+  onDelete?: () => void;
   cachedFocus: AppFocusSummary[];
 }
 
@@ -82,11 +82,13 @@ export default function DeviceCard({ device, tab, onTabChange, onDelete, cachedF
               MEM {ramPct.toFixed(0)}%
             </span>
           )}
-          <button className="delete-btn" title="Remove device" onClick={onDelete} aria-label="Remove device">
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-              <path d="M2 4h12M5 4V2h6v2M6 7v5M10 7v5M3 4l1 10h8l1-10"/>
-            </svg>
-          </button>
+          {onDelete && (
+            <button className="delete-btn" title="Remove device" onClick={onDelete} aria-label="Remove device">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                <path d="M2 4h12M5 4V2h6v2M6 7v5M10 7v5M3 4l1 10h8l1-10"/>
+              </svg>
+            </button>
+          )}
         </div>
       </div>
 

@@ -1,12 +1,14 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
-import { Device, AppFocusSummary, FocusCacheData, DeviceTab, EnterprisePolicy } from '@/types';
+import type { FormEvent } from 'react';
+import { Device, AppFocusSummary, FocusCacheData, DeviceTab, EnterprisePolicy, DashboardUser, UserRole } from '@/types';
 import { API, readHeaders, adminHeaders, isOnline, timeAgo } from '@/lib/utils';
 import DeviceCard from '@/components/DeviceCard';
 
-type PageView = 'dashboard' | 'inventory' | 'settings';
+type PageView = 'dashboard' | 'inventory' | 'settings' | 'access';
 type StatusFilter = 'all' | 'online' | 'critical' | 'warning' | 'offline';
+type AuthMode = 'login' | 'register';
 type CollectorPolicyKey =
   | 'collect_system_info'
   | 'collect_hardware_stats'
@@ -35,6 +37,12 @@ const DEFAULT_POLICY: EnterprisePolicy = {
   collect_installed_apps: true,
   collect_os_updates: true,
   collect_usb_devices: true,
+};
+
+const roleLabel: Record<UserRole, string> = {
+  admin: 'Admin',
+  manager: 'Manager',
+  viewer: 'Viewer',
 };
 
 // ── SVG icons ────────────────────────────────────────────────────────────────
@@ -85,6 +93,24 @@ const IconSettings = () => (
 );
 
 export default function Home() {
+  const [authUser, setAuthUser]       = useState<DashboardUser | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authMode, setAuthMode]       = useState<AuthMode>('login');
+  const [authError, setAuthError]     = useState('');
+  const [authForm, setAuthForm]       = useState({ name: '', email: '', password: '' });
+  const [bootstrapRequired, setBootstrapRequired] = useState(false);
+  const [users, setUsers]             = useState<DashboardUser[]>([]);
+  const [userForm, setUserForm]       = useState<{ name: string; email: string; password: string; role: UserRole }>({
+    name: '',
+    email: '',
+    password: '',
+    role: 'viewer',
+  });
+  const [userCreateStatus, setUserCreateStatus] = useState('');
+  const [passwordResetFor, setPasswordResetFor] = useState('');
+  const [passwordResetValue, setPasswordResetValue] = useState('');
+  const [passwordResetStatus, setPasswordResetStatus] = useState('');
+  const [roleUpdateStatus, setRoleUpdateStatus] = useState('');
   const [devices, setDevices]         = useState<Device[]>([]);
   const [loading, setLoading]         = useState(true);
   const [isUpdating, setIsUpdating]   = useState(false);
@@ -96,18 +122,59 @@ export default function Home() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [currentPage, setCurrentPage] = useState<PageView>('inventory');
 
+  const canManagePolicy = authUser?.role === 'admin' || authUser?.role === 'manager';
+  const canManageUsers = authUser?.role === 'admin';
+  const canDeleteDevices = authUser?.role === 'admin';
+
+  const apiFetch = useCallback((path: string, init?: RequestInit) => {
+    return fetch(`${API}${path}`, {
+      ...init,
+      credentials: 'include',
+      headers: init?.headers,
+    });
+  }, []);
+
+  const loadCurrentUser = useCallback(async () => {
+    setAuthLoading(true);
+    try {
+      const bootRes = await apiFetch('/auth/bootstrap');
+      if (bootRes.ok) {
+        const boot = await bootRes.json();
+        setBootstrapRequired(Boolean(boot.bootstrap_required));
+        if (boot.bootstrap_required) setAuthMode('register');
+      }
+
+      const res = await apiFetch('/auth/me');
+      if (res.ok) {
+        const data = await res.json();
+        setAuthUser(data.user);
+      } else {
+        setAuthUser(null);
+      }
+    } catch {
+      setAuthUser(null);
+      setAuthError('Could not reach the API. Check that the DevicePulse API is running.');
+    } finally {
+      setAuthLoading(false);
+    }
+  }, [apiFetch]);
+
   // ── Data fetching ─────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    void loadCurrentUser();
+  }, [loadCurrentUser]);
 
   const fetchAll = useCallback(async () => {
     try {
-      const devRes = await fetch(`${API}/devices`, { headers: readHeaders() });
+      const devRes = await apiFetch('/devices', { headers: readHeaders() });
       if (devRes.ok) {
         const data: Device[] = await devRes.json();
         const devList = data ?? [];
         setDevices(devList);
         const focusResults = await Promise.allSettled(
           devList.map(d =>
-            fetch(`${API}/focus/${d.device_id}`, { headers: readHeaders() }).then(r =>
+            apiFetch(`/focus/${d.device_id}`, { headers: readHeaders() }).then(r =>
               r.ok ? (r.json() as Promise<FocusCacheData>) : null
             )
           )
@@ -124,32 +191,145 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [apiFetch]);
 
   const fetchPolicy = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/policy`, { headers: readHeaders() });
+      const res = await apiFetch('/policy', { headers: readHeaders() });
       if (res.ok) {
         const d = await res.json();
         const nextPolicy = { ...DEFAULT_POLICY, ...d };
         setPolicy(nextPolicy);
       }
     } catch {}
-  }, []);
+  }, [apiFetch]);
+
+  const fetchUsers = useCallback(async () => {
+    if (!canManageUsers) return;
+    try {
+      const res = await apiFetch('/users');
+      if (res.ok) setUsers(await res.json());
+    } catch {}
+  }, [apiFetch, canManageUsers]);
 
   useEffect(() => {
+    if (!authUser) return;
     const t = window.setTimeout(() => { void fetchAll(); void fetchPolicy(); }, 0);
     const id = setInterval(fetchAll, 5000);
     return () => { window.clearTimeout(t); clearInterval(id); };
-  }, [fetchAll, fetchPolicy]);
+  }, [authUser, fetchAll, fetchPolicy]);
+
+  useEffect(() => {
+    if (currentPage === 'access') void fetchUsers();
+  }, [currentPage, fetchUsers]);
 
   // ── Actions ───────────────────────────────────────────────────────────────
 
+  const submitAuth = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    setAuthError('');
+    const endpoint = authMode === 'register' ? '/auth/register' : '/auth/login';
+    try {
+      const res = await apiFetch(endpoint, {
+        method: 'POST',
+        headers: adminHeaders(),
+        body: JSON.stringify(authForm),
+      });
+      if (!res.ok) {
+        setAuthError(await res.text());
+        return;
+      }
+      const data = await res.json();
+      setAuthUser(data.user);
+      setAuthForm({ name: '', email: '', password: '' });
+      setLoading(true);
+    } catch {
+      setAuthError('Could not sign in. Check the API connection and try again.');
+    }
+  };
+
+  const logout = async () => {
+    try {
+      await apiFetch('/auth/logout', { method: 'POST' });
+    } finally {
+      setAuthUser(null);
+      setDevices([]);
+      setFocusCache({});
+      setCurrentPage('inventory');
+      setAuthMode('login');
+      void loadCurrentUser();
+    }
+  };
+
+  const createUser = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    setUserCreateStatus('');
+    try {
+      const res = await apiFetch('/users', {
+        method: 'POST',
+        headers: adminHeaders(),
+        body: JSON.stringify(userForm),
+      });
+      if (!res.ok) {
+        setUserCreateStatus(await res.text());
+        return;
+      }
+      setUserForm({ name: '', email: '', password: '', role: 'viewer' });
+      setUserCreateStatus('User created');
+      void fetchUsers();
+    } catch {
+      setUserCreateStatus('Could not create user. Check the API connection and try again.');
+    }
+  };
+
+  const resetUserPassword = async (e: FormEvent<HTMLFormElement>, user: DashboardUser) => {
+    e.preventDefault();
+    setPasswordResetStatus('');
+    try {
+      const res = await apiFetch(`/users/${user.id}/password`, {
+        method: 'POST',
+        headers: adminHeaders(),
+        body: JSON.stringify({ password: passwordResetValue }),
+      });
+      if (!res.ok) {
+        setPasswordResetStatus(await res.text());
+        return;
+      }
+      setPasswordResetValue('');
+      setPasswordResetFor('');
+      setPasswordResetStatus(`Password reset for ${user.email}`);
+      void fetchUsers();
+    } catch {
+      setPasswordResetStatus('Could not reset password. Check the API connection and try again.');
+    }
+  };
+
+  const updateUserRole = async (user: DashboardUser, role: UserRole) => {
+    setRoleUpdateStatus('');
+    try {
+      const res = await apiFetch(`/users/${user.id}/role`, {
+        method: 'POST',
+        headers: adminHeaders(),
+        body: JSON.stringify({ role }),
+      });
+      if (!res.ok) {
+        setRoleUpdateStatus(await res.text());
+        return;
+      }
+      setUsers(list => list.map(item => item.id === user.id ? { ...item, role } : item));
+      setRoleUpdateStatus(`Role updated for ${user.email}`);
+      if (authUser?.id === user.id) void loadCurrentUser();
+    } catch {
+      setRoleUpdateStatus('Could not update role. Check the API connection and try again.');
+    }
+  };
+
   const savePolicy = async (nextPolicy: EnterprisePolicy) => {
+    if (!canManagePolicy) return;
     setIsUpdating(true);
     setPolicy(nextPolicy);
     try {
-      const res = await fetch(`${API}/policy`, {
+      const res = await apiFetch('/policy', {
         method: 'POST',
         headers: adminHeaders(),
         body: JSON.stringify(nextPolicy),
@@ -172,9 +352,10 @@ export default function Home() {
   };
 
   const deleteDevice = async (deviceId: string) => {
+    if (!canDeleteDevices) return;
     if (!confirm(`Remove device ${deviceId}?`)) return;
     try {
-      await fetch(`${API}/devices/${deviceId}`, { method: 'DELETE', headers: readHeaders() });
+      await apiFetch(`/devices/${deviceId}`, { method: 'DELETE', headers: readHeaders() });
       setDevices(d => d.filter(x => x.device_id !== deviceId));
     } catch {}
   };
@@ -246,6 +427,75 @@ export default function Home() {
 
   // ── Render ────────────────────────────────────────────────────────────────
 
+  if (authLoading) {
+    return (
+      <div className="auth-shell">
+        <div className="auth-panel">
+          <div className="header-logo"><IconLogo /></div>
+          <h1>DevicePulse</h1>
+          <p>Checking dashboard session…</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!authUser) {
+    const isBootstrap = authMode === 'register' && bootstrapRequired;
+    return (
+      <div className="auth-shell">
+        <form className="auth-panel" onSubmit={submitAuth}>
+          <div className="header-logo"><IconLogo /></div>
+          <h1>{isBootstrap ? 'Create first admin' : 'Sign in'}</h1>
+          <p>
+            {isBootstrap
+              ? 'Bootstrap the first administrator account for this DevicePulse dashboard.'
+              : 'Use your dashboard account to view endpoint telemetry.'}
+          </p>
+          {authMode === 'register' && (
+            <label className="auth-field">
+              <span>Name</span>
+              <input
+                value={authForm.name}
+                onChange={e => setAuthForm(f => ({ ...f, name: e.target.value }))}
+                autoComplete="name"
+              />
+            </label>
+          )}
+          <label className="auth-field">
+            <span>Email</span>
+            <input
+              type="email"
+              value={authForm.email}
+              onChange={e => setAuthForm(f => ({ ...f, email: e.target.value }))}
+              autoComplete="email"
+              required
+            />
+          </label>
+          <label className="auth-field">
+            <span>Password</span>
+            <input
+              type="password"
+              value={authForm.password}
+              onChange={e => setAuthForm(f => ({ ...f, password: e.target.value }))}
+              autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
+              minLength={8}
+              required
+            />
+          </label>
+          {authError && <div className="auth-error">{authError}</div>}
+          <button type="submit" className="auth-submit">
+            {authMode === 'register' ? 'Create admin account' : 'Sign in'}
+          </button>
+          {!bootstrapRequired && (
+            <button type="button" className="auth-link" onClick={() => setAuthMode('login')}>
+              Registration is admin-managed
+            </button>
+          )}
+        </form>
+      </div>
+    );
+  }
+
   return (
     <div className="app-shell">
 
@@ -257,12 +507,17 @@ export default function Home() {
         </div>
 
         <div className="header-right">
+          <div className="user-chip">
+            <span>{authUser.name || authUser.email}</span>
+            <strong>{roleLabel[authUser.role]}</strong>
+          </div>
           {!loading && (
             <span className="live-badge">
               <span className="dot" />
               Live
             </span>
           )}
+          <button type="button" className="btn" onClick={logout}>Sign out</button>
         </div>
       </header>
 
@@ -307,6 +562,17 @@ export default function Home() {
               <IconSettings />
               Settings
             </button>
+            {canManageUsers && (
+              <button
+                type="button"
+                className={`nav-item ${currentPage === 'access' ? 'active' : ''}`}
+                onClick={() => setCurrentPage('access')}
+                aria-current={currentPage === 'access' ? 'page' : undefined}
+              >
+                <IconSettings />
+                Access
+              </button>
+            )}
           </nav>
         </div>
 
@@ -354,6 +620,8 @@ export default function Home() {
               <h1>
                 {currentPage === 'settings'
                   ? 'Settings'
+                  : currentPage === 'access'
+                    ? 'Access Control'
                   : currentPage === 'inventory'
                     ? 'Device Inventory'
                     : 'Telemetry Dashboard'}
@@ -361,12 +629,14 @@ export default function Home() {
               <p>
                 {currentPage === 'settings'
                   ? 'Enterprise data collection, retention and upload controls'
+                  : currentPage === 'access'
+                  ? 'Create dashboard users and assign roles'
                   : currentPage === 'inventory'
                   ? `${devices.length.toLocaleString()} device${devices.length !== 1 ? 's' : ''} registered`
                   : 'Live endpoint telemetry grouped by device'}
               </p>
             </div>
-            {currentPage !== 'settings' && (
+            {currentPage !== 'settings' && currentPage !== 'access' && (
               <div className="toolbar">
                 <div className="search-box">
                   <IconSearch />
@@ -390,7 +660,7 @@ export default function Home() {
           </div>
 
           {/* Status filter tabs */}
-          {currentPage !== 'settings' && (
+          {currentPage !== 'settings' && currentPage !== 'access' && (
             <div className="filter-tabs" role="group" aria-label="Filter by status">
               {filterOptions.map(opt => (
                 <button
@@ -407,7 +677,152 @@ export default function Home() {
           )}
 
           {/* Content */}
-          {currentPage === 'settings' ? (
+          {currentPage === 'access' ? (
+            <div className="settings-layout">
+              <section className="settings-panel">
+                <div className="settings-panel-header">
+                  <div>
+                    <h2>Create Dashboard User</h2>
+                    <p>New users can sign in after an admin creates their account.</p>
+                  </div>
+                  {userCreateStatus && <span className="save-state">{userCreateStatus}</span>}
+                </div>
+                <form className="user-form" onSubmit={createUser}>
+                  <label className="auth-field">
+                    <span>Name</span>
+                    <input
+                      value={userForm.name}
+                      onChange={e => setUserForm(f => ({ ...f, name: e.target.value }))}
+                      autoComplete="name"
+                    />
+                  </label>
+                  <label className="auth-field">
+                    <span>Email</span>
+                    <input
+                      type="email"
+                      value={userForm.email}
+                      onChange={e => setUserForm(f => ({ ...f, email: e.target.value }))}
+                      autoComplete="email"
+                      required
+                    />
+                  </label>
+                  <label className="auth-field">
+                    <span>Role</span>
+                    <select
+                      value={userForm.role}
+                      onChange={e => setUserForm(f => ({ ...f, role: e.target.value as UserRole }))}
+                    >
+                      <option value="viewer">Viewer</option>
+                      <option value="manager">Manager</option>
+                      <option value="admin">Admin</option>
+                    </select>
+                  </label>
+                  <label className="auth-field">
+                    <span>Temporary Password</span>
+                    <input
+                      type="password"
+                      value={userForm.password}
+                      onChange={e => setUserForm(f => ({ ...f, password: e.target.value }))}
+                      autoComplete="new-password"
+                      minLength={8}
+                      required
+                    />
+                  </label>
+                  <button type="submit" className="auth-submit user-submit">Create user</button>
+                </form>
+              </section>
+
+              <section className="settings-panel">
+                <div className="settings-panel-header">
+                  <div>
+                    <h2>Dashboard Users</h2>
+                    <p>Accounts with active access to this dashboard.</p>
+                  </div>
+                  {passwordResetStatus && <span className="save-state">{passwordResetStatus}</span>}
+                  {roleUpdateStatus && <span className="save-state">{roleUpdateStatus}</span>}
+                </div>
+                <div className="table-wrap">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>User</th>
+                        <th>Role</th>
+                        <th>Status</th>
+                        <th>Created</th>
+                        <th style={{ textAlign: 'right' }}>Password</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {users.map(user => (
+                        <tr key={user.id}>
+                          <td>
+                            <div className="device-cell-text">
+                              <strong>{user.name || user.email}</strong>
+                              <span>{user.email}</span>
+                            </div>
+                          </td>
+                          <td>
+                            <select
+                              className="role-select"
+                              value={user.role}
+                              onChange={e => updateUserRole(user, e.target.value as UserRole)}
+                              aria-label={`Change role for ${user.email}`}
+                            >
+                              <option value="viewer">Viewer</option>
+                              <option value="manager">Manager</option>
+                              <option value="admin">Admin</option>
+                            </select>
+                          </td>
+                          <td>{user.status ?? 'active'}</td>
+                          <td>{user.created_at ? new Date(user.created_at).toLocaleDateString() : '—'}</td>
+                          <td>
+                            {passwordResetFor === user.id ? (
+                              <form className="reset-password-form" onSubmit={e => resetUserPassword(e, user)}>
+                                <input
+                                  type="password"
+                                  value={passwordResetValue}
+                                  onChange={e => setPasswordResetValue(e.target.value)}
+                                  placeholder="New password"
+                                  minLength={8}
+                                  autoComplete="new-password"
+                                  required
+                                />
+                                <button type="submit" className="action-btn">Save</button>
+                                <button
+                                  type="button"
+                                  className="action-btn"
+                                  onClick={() => {
+                                    setPasswordResetFor('');
+                                    setPasswordResetValue('');
+                                  }}
+                                >
+                                  Cancel
+                                </button>
+                              </form>
+                            ) : (
+                              <div className="row-actions">
+                                <button
+                                  type="button"
+                                  className="action-btn"
+                                  onClick={() => {
+                                    setPasswordResetStatus('');
+                                    setPasswordResetFor(user.id);
+                                    setPasswordResetValue('');
+                                  }}
+                                >
+                                  Reset
+                                </button>
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
+          ) : currentPage === 'settings' ? (
             <div className="settings-layout">
               <section className="settings-panel">
                 <div className="settings-panel-header">
@@ -416,6 +831,7 @@ export default function Home() {
                     <p>Controls how long new server telemetry remains queryable.</p>
                   </div>
                   {policySavedAt && <span className="save-state">Saved {policySavedAt}</span>}
+                  {!canManagePolicy && <span className="save-state muted">Read only</span>}
                 </div>
                 <div className="settings-grid two-col">
                   <label className="setting-field">
@@ -426,6 +842,7 @@ export default function Home() {
                         min="1"
                         max="3650"
                         value={policy.telemetry_retention_days}
+                        disabled={!canManagePolicy}
                         onChange={e => setPolicy(p => ({ ...p, telemetry_retention_days: Number(e.target.value) }))}
                         onBlur={e => updatePolicyField('telemetry_retention_days', Number(e.target.value))}
                       />
@@ -440,6 +857,7 @@ export default function Home() {
                         min="10"
                         max="3600"
                         value={policy.sync_interval_seconds}
+                        disabled={!canManagePolicy}
                         onChange={e => {
                           const next = Number(e.target.value);
                           setPolicy(p => ({ ...p, sync_interval_seconds: next }));
@@ -468,6 +886,7 @@ export default function Home() {
                     <input
                       type="checkbox"
                       checked={policy.delta_upload_enabled}
+                      disabled={!canManagePolicy}
                       onChange={e => updatePolicyField('delta_upload_enabled', e.target.checked)}
                     />
                   </label>
@@ -479,6 +898,7 @@ export default function Home() {
                     <input
                       type="checkbox"
                       checked={policy.cache_unchanged_collector_data}
+                      disabled={!canManagePolicy}
                       onChange={e => updatePolicyField('cache_unchanged_collector_data', e.target.checked)}
                     />
                   </label>
@@ -502,6 +922,7 @@ export default function Home() {
                       key={value}
                       type="button"
                       className={policy.browser_history_mode === value ? 'active' : ''}
+                      disabled={!canManagePolicy}
                       onClick={() => updatePolicyField('browser_history_mode', value)}
                     >
                       {label}
@@ -516,7 +937,7 @@ export default function Home() {
                       min="0"
                       max="1000"
                       value={policy.browser_history_limit}
-                      disabled={policy.browser_history_mode === 'disabled'}
+                      disabled={!canManagePolicy || policy.browser_history_mode === 'disabled'}
                       onChange={e => setPolicy(p => ({ ...p, browser_history_limit: Number(e.target.value) }))}
                       onBlur={e => updatePolicyField('browser_history_limit', Number(e.target.value))}
                     />
@@ -542,6 +963,7 @@ export default function Home() {
                       <input
                         type="checkbox"
                         checked={Boolean(policy[item.key])}
+                        disabled={!canManagePolicy}
                         onChange={e => updatePolicyField(item.key, e.target.checked)}
                       />
                     </label>
@@ -641,14 +1063,16 @@ export default function Home() {
                               >
                                 Inspect
                               </button>
-                              <button
-                                type="button"
-                                className="action-btn danger"
-                                onClick={() => deleteDevice(device.device_id)}
-                                aria-label={`Remove ${name}`}
-                              >
-                                ×
-                              </button>
+                              {canDeleteDevices && (
+                                <button
+                                  type="button"
+                                  className="action-btn danger"
+                                  onClick={() => deleteDevice(device.device_id)}
+                                  aria-label={`Remove ${name}`}
+                                >
+                                  ×
+                                </button>
+                              )}
                             </div>
                           </td>
                         </tr>
@@ -677,7 +1101,7 @@ export default function Home() {
                     device={device}
                     tab={getTab(device.device_id)}
                     onTabChange={tab => setTab(device.device_id, tab)}
-                    onDelete={() => deleteDevice(device.device_id)}
+                    onDelete={canDeleteDevices ? () => deleteDevice(device.device_id) : undefined}
                     cachedFocus={focusCache[device.device_id] ?? []}
                   />
                 </div>
