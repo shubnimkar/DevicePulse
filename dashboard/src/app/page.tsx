@@ -2,13 +2,15 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import type { FormEvent } from 'react';
-import { Device, AppFocusSummary, FocusCacheData, DeviceTab, EnterprisePolicy, DashboardUser, UserRole } from '@/types';
+import { Device, AppFocusSummary, FocusCacheData, DeviceTab, EnterprisePolicy, DashboardUser, UserRole, HistoryEntry, BrowserHistoryArchiveData } from '@/types';
 import { API, readHeaders, adminHeaders, isOnline, timeAgo } from '@/lib/utils';
 import DeviceCard from '@/components/DeviceCard';
+import type { BrowserHistoryRange } from '@/components/tabs/BrowserTab';
 
-type PageView = 'dashboard' | 'inventory' | 'settings' | 'access';
+type PageView = 'dashboard' | 'inventory' | 'inspect' | 'settings' | 'access';
 type StatusFilter = 'all' | 'online' | 'critical' | 'warning' | 'offline';
 type AuthMode = 'login' | 'register';
+type BrowserHistoryCache = Record<string, Partial<Record<BrowserHistoryRange, HistoryEntry[]>>>;
 type CollectorPolicyKey =
   | 'collect_system_info'
   | 'collect_hardware_stats'
@@ -25,12 +27,12 @@ const DEFAULT_POLICY: EnterprisePolicy = {
   telemetry_retention_days: 30,
   delta_upload_enabled: true,
   cache_unchanged_collector_data: true,
-  browser_history_mode: 'disabled',
+  browser_history_mode: 'full_url',
   browser_history_limit: 10,
   collect_system_info: true,
   collect_hardware_stats: true,
   collect_processes: true,
-  collect_browser_history: false,
+  collect_browser_history: true,
   collect_active_window: true,
   collect_services: true,
   collect_network_ports: true,
@@ -44,6 +46,24 @@ const roleLabel: Record<UserRole, string> = {
   manager: 'Manager',
   viewer: 'Viewer',
 };
+
+function localDateKey(daysAgo: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() - daysAgo);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function browserHistoryQuery(range: BrowserHistoryRange): string {
+  const params = new URLSearchParams({ limit: '500' });
+  const offset = range === 'recent' ? 0 : range === 'last_day' ? 1 : 2;
+  const date = localDateKey(offset);
+  params.set('from', date);
+  params.set('to', date);
+  return params.toString();
+}
 
 // ── SVG icons ────────────────────────────────────────────────────────────────
 const IconGrid = () => (
@@ -118,13 +138,18 @@ export default function Home() {
   const [policySavedAt, setPolicySavedAt] = useState<string>('');
   const [activeTab, setActiveTab]     = useState<Record<string, DeviceTab>>({});
   const [focusCache, setFocusCache]   = useState<Record<string, AppFocusSummary[]>>({});
+  const [browserHistoryCache, setBrowserHistoryCache] = useState<BrowserHistoryCache>({});
+  const [browserHistoryRange, setBrowserHistoryRange] = useState<BrowserHistoryRange>('recent');
+  const [browserHistoryLoading, setBrowserHistoryLoading] = useState<Record<string, boolean>>({});
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
-  const [currentPage, setCurrentPage] = useState<PageView>('inventory');
+  const [currentPage, setCurrentPage] = useState<PageView>('dashboard');
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
 
   const canManagePolicy = authUser?.role === 'admin' || authUser?.role === 'manager';
   const canManageUsers = authUser?.role === 'admin';
   const canDeleteDevices = authUser?.role === 'admin';
+  const canFilterBrowserHistory = authUser?.role === 'admin';
 
   const apiFetch = useCallback((path: string, init?: RequestInit) => {
     return fetch(`${API}${path}`, {
@@ -165,6 +190,25 @@ export default function Home() {
     void loadCurrentUser();
   }, [loadCurrentUser]);
 
+  const fetchBrowserHistory = useCallback(async (deviceId: string, range = browserHistoryRange) => {
+    try {
+      setBrowserHistoryLoading(state => ({ ...state, [deviceId]: true }));
+      const res = await apiFetch(`/devices/${encodeURIComponent(deviceId)}/browser-history?${browserHistoryQuery(range)}`, { headers: readHeaders() });
+      if (!res.ok) return;
+      const data: BrowserHistoryArchiveData = await res.json();
+      setBrowserHistoryCache(cache => ({
+        ...cache,
+        [deviceId]: {
+          ...cache[deviceId],
+          [range]: data.entries ?? [],
+        },
+      }));
+    } catch {
+    } finally {
+      setBrowserHistoryLoading(state => ({ ...state, [deviceId]: false }));
+    }
+  }, [apiFetch, browserHistoryRange]);
+
   const fetchAll = useCallback(async () => {
     try {
       const devRes = await apiFetch('/devices', { headers: readHeaders() });
@@ -185,13 +229,18 @@ export default function Home() {
             cache[devList[i].device_id] = result.value.app_summaries ?? [];
         });
         setFocusCache(cache);
+        await Promise.allSettled(
+          devList
+            .filter(d => activeTab[d.device_id] === 'browser')
+            .map(d => fetchBrowserHistory(d.device_id, browserHistoryRange))
+        );
       }
     } catch (e) {
       console.error('Fetch error:', e);
     } finally {
       setLoading(false);
     }
-  }, [apiFetch]);
+  }, [activeTab, apiFetch, browserHistoryRange, fetchBrowserHistory]);
 
   const fetchPolicy = useCallback(async () => {
     try {
@@ -353,21 +402,61 @@ export default function Home() {
 
   const deleteDevice = async (deviceId: string) => {
     if (!canDeleteDevices) return;
-    if (!confirm(`Remove device ${deviceId}?`)) return;
+    if (!confirm(`Remove device ${deviceId} and all of its data?`)) return;
     try {
-      await apiFetch(`/devices/${deviceId}`, { method: 'DELETE', headers: readHeaders() });
+      const res = await apiFetch(`/devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE', headers: readHeaders() });
+      if (!res.ok) throw new Error(await res.text());
       setDevices(d => d.filter(x => x.device_id !== deviceId));
+      setActiveTab(prev => {
+        const next = { ...prev };
+        delete next[deviceId];
+        return next;
+      });
+      setFocusCache(prev => {
+        const next = { ...prev };
+        delete next[deviceId];
+        return next;
+      });
+      setBrowserHistoryCache(prev => {
+        const next = { ...prev };
+        delete next[deviceId];
+        return next;
+      });
+      setBrowserHistoryLoading(prev => {
+        const next = { ...prev };
+        delete next[deviceId];
+        return next;
+      });
+      if (selectedDeviceId === deviceId) {
+        setSelectedDeviceId('');
+        setCurrentPage('inventory');
+      }
     } catch {}
   };
 
   const getTab = (id: string): DeviceTab => activeTab[id] ?? 'overview';
-  const setTab = (id: string, tab: DeviceTab) =>
+  const setTab = (id: string, tab: DeviceTab) => {
     setActiveTab(prev => ({ ...prev, [id]: tab }));
+    if (tab === 'browser') void fetchBrowserHistory(id, browserHistoryRange);
+  };
+
+  const updateBrowserHistoryRange = (range: BrowserHistoryRange) => {
+    setBrowserHistoryRange(range);
+    if (selectedDeviceId && getTab(selectedDeviceId) === 'browser') {
+      void fetchBrowserHistory(selectedDeviceId, range);
+    }
+  };
 
   // ── Computed stats ────────────────────────────────────────────────────────
 
   const onlineCount  = devices.filter(d => isOnline(d.last_seen)).length;
   const offlineCount = devices.length - onlineCount;
+  const fleetUptimePercent = devices.length > 0 ? (onlineCount / devices.length) * 100 : 0;
+  const selectedDevice = devices.find(d => d.device_id === selectedDeviceId);
+  const selectedDeviceName = selectedDevice?.data?.SystemInfo?.hostname || selectedDevice?.hostname || selectedDeviceId;
+  const selectedBrowserHistory = selectedDevice
+    ? browserHistoryCache[selectedDevice.device_id]?.[browserHistoryRange]
+    : undefined;
 
   const deviceRisk = (device: Device) => {
     const hw = device.data?.HardwareStats;
@@ -390,7 +479,8 @@ export default function Home() {
   const normalizedQuery = searchQuery.trim().toLowerCase();
   const filteredDevices = devices.filter(device => {
     const state = getDeviceState(device);
-    if (statusFilter !== 'all' && state !== statusFilter) return false;
+    if (statusFilter === 'online' && !isOnline(device.last_seen)) return false;
+    if (statusFilter !== 'all' && statusFilter !== 'online' && state !== statusFilter) return false;
     if (!normalizedQuery) return true;
     const sys = device.data?.SystemInfo;
     return [device.device_id, device.hostname, sys?.hostname, sys?.os, sys?.platform, sys?.platform_version]
@@ -406,11 +496,9 @@ export default function Home() {
   ];
 
   const viewDeviceDetails = (deviceId: string) => {
-    setCurrentPage('dashboard');
+    setSelectedDeviceId(deviceId);
+    setCurrentPage('inspect');
     setTab(deviceId, 'overview');
-    window.setTimeout(() => {
-      document.getElementById(`device-${deviceId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }, 0);
   };
 
   const collectorControls: { key: CollectorPolicyKey; label: string; meta: string }[] = [
@@ -622,6 +710,8 @@ export default function Home() {
                   ? 'Settings'
                   : currentPage === 'access'
                     ? 'Access Control'
+                  : currentPage === 'inspect'
+                    ? selectedDeviceName || 'Inspect Device'
                   : currentPage === 'inventory'
                     ? 'Device Inventory'
                     : 'Telemetry Dashboard'}
@@ -631,12 +721,20 @@ export default function Home() {
                   ? 'Enterprise data collection, retention and upload controls'
                   : currentPage === 'access'
                   ? 'Create dashboard users and assign roles'
+                  : currentPage === 'inspect'
+                  ? selectedDevice?.device_id || 'Device telemetry details'
                   : currentPage === 'inventory'
                   ? `${devices.length.toLocaleString()} device${devices.length !== 1 ? 's' : ''} registered`
-                  : 'Live endpoint telemetry grouped by device'}
+                  : 'Fleet status summary'}
               </p>
             </div>
-            {currentPage !== 'settings' && currentPage !== 'access' && (
+            {currentPage === 'inspect' ? (
+              <div className="toolbar">
+                <button type="button" className="btn" onClick={() => setCurrentPage('inventory')}>
+                  ‹ Back to Inventory
+                </button>
+              </div>
+            ) : currentPage === 'inventory' && (
               <div className="toolbar">
                 <div className="search-box">
                   <IconSearch />
@@ -659,8 +757,57 @@ export default function Home() {
             )}
           </div>
 
+          {currentPage === 'dashboard' && (
+            <section className="dashboard-tiles" aria-label="Fleet summary">
+              <button
+                type="button"
+                className="dashboard-tile"
+                onClick={() => {
+                  setStatusFilter('all');
+                  setCurrentPage('inventory');
+                }}
+              >
+                <span>Total Devices</span>
+                <strong>{devices.length.toLocaleString()}</strong>
+              </button>
+              <button
+                type="button"
+                className="dashboard-tile tile-online"
+                onClick={() => {
+                  setStatusFilter('online');
+                  setCurrentPage('inventory');
+                }}
+              >
+                <span>Online</span>
+                <strong>{onlineCount.toLocaleString()}</strong>
+              </button>
+              <button
+                type="button"
+                className="dashboard-tile tile-offline"
+                onClick={() => {
+                  setStatusFilter('offline');
+                  setCurrentPage('inventory');
+                }}
+              >
+                <span>Offline</span>
+                <strong>{offlineCount.toLocaleString()}</strong>
+              </button>
+              <button
+                type="button"
+                className="dashboard-tile tile-uptime"
+                onClick={() => {
+                  setStatusFilter('all');
+                  setCurrentPage('inventory');
+                }}
+              >
+                <span>Total Uptime</span>
+                <strong>{fleetUptimePercent.toFixed(1)}%</strong>
+              </button>
+            </section>
+          )}
+
           {/* Status filter tabs */}
-          {currentPage !== 'settings' && currentPage !== 'access' && (
+          {currentPage === 'inventory' && (
             <div className="filter-tabs" role="group" aria-label="Filter by status">
               {filterOptions.map(opt => (
                 <button
@@ -909,12 +1056,11 @@ export default function Home() {
                 <div className="settings-panel-header">
                   <div>
                     <h2>Browser History</h2>
-                    <p>Use the least invasive mode that still supports your reporting needs.</p>
+                    <p>Choose how much URL detail is retained for browser history reporting.</p>
                   </div>
                 </div>
                 <div className="segmented-control" role="group" aria-label="Browser history mode">
                   {([
-                    ['disabled', 'Disabled'],
                     ['domain_only', 'Domain only'],
                     ['full_url', 'Full URL'],
                   ] as const).map(([value, label]) => (
@@ -937,7 +1083,7 @@ export default function Home() {
                       min="0"
                       max="1000"
                       value={policy.browser_history_limit}
-                      disabled={!canManagePolicy || policy.browser_history_mode === 'disabled'}
+                      disabled={!canManagePolicy}
                       onChange={e => setPolicy(p => ({ ...p, browser_history_limit: Number(e.target.value) }))}
                       onBlur={e => updatePolicyField('browser_history_limit', Number(e.target.value))}
                     />
@@ -975,6 +1121,29 @@ export default function Home() {
             <div className="loading" role="status" aria-label="Loading">
               Connecting to telemetry stream…
             </div>
+          ) : currentPage === 'dashboard' ? null : currentPage === 'inspect' ? (
+            selectedDevice ? (
+              <div className="inspect-device">
+                <DeviceCard
+                  device={selectedDevice}
+                  tab={getTab(selectedDevice.device_id)}
+                  onTabChange={tab => setTab(selectedDevice.device_id, tab)}
+                  onDelete={canDeleteDevices ? () => deleteDevice(selectedDevice.device_id) : undefined}
+                  cachedFocus={focusCache[selectedDevice.device_id] ?? []}
+                  browserHistory={selectedBrowserHistory}
+                  browserHistoryRange={browserHistoryRange}
+                  browserHistoryLoading={Boolean(browserHistoryLoading[selectedDevice.device_id])}
+                  canFilterBrowserHistory={canFilterBrowserHistory}
+                  onBrowserHistoryRangeChange={updateBrowserHistoryRange}
+                />
+              </div>
+            ) : (
+              <div className="empty-state">
+                <span className="empty-icon">🔍</span>
+                <div className="empty-title">Device not found</div>
+                <div className="empty-sub">Return to inventory and choose a device.</div>
+              </div>
+            )
           ) : devices.length === 0 ? (
             <div className="empty-state">
               <span className="empty-icon">📡</span>
@@ -1092,22 +1261,7 @@ export default function Home() {
                 </div>
               </div>
             </div>
-          ) : (
-            /* ── Device telemetry cards ── */
-            <div className="device-grid">
-              {filteredDevices.map((device, idx) => (
-                <div key={device.device_id ?? idx} id={`device-${device.device_id}`}>
-                  <DeviceCard
-                    device={device}
-                    tab={getTab(device.device_id)}
-                    onTabChange={tab => setTab(device.device_id, tab)}
-                    onDelete={canDeleteDevices ? () => deleteDevice(device.device_id) : undefined}
-                    cachedFocus={focusCache[device.device_id] ?? []}
-                  />
-                </div>
-              ))}
-            </div>
-          )}
+          ) : null}
 
         </div>
       </main>

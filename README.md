@@ -77,7 +77,7 @@ npm run dev
 | `SystemInfo` | Hostname, OS, architecture, kernel | Every sync |
 | `HardwareStats` | CPU %, RAM, disk usage, network I/O, battery | Every sync |
 | `ProcessMonitor` | Top processes (CPU + memory %) | Every sync |
-| `BrowserHistory` | Top 10 recent URLs across Chrome, Edge, Firefox, Safari | Every sync |
+| `BrowserHistory` | Incremental recent browser visits across Chrome, Edge, Firefox, Safari | Every sync |
 | `ActiveWindowTracker` | Current foreground app, per-app focus duration | Every sync |
 | `Services` | Running/stopped system services | Every sync |
 | `NetworkPorts` | Open TCP/UDP ports with process names | Every sync |
@@ -202,6 +202,7 @@ The command can reset an admin's own password or any other dashboard user's pass
 | `GET` | `/devices` | `viewer`+ | List all registered devices |
 | `DELETE` | `/devices/{id}` | `admin` | Remove a device |
 | `GET` | `/devices/{id}/history` | `viewer`+ | Last 100 telemetry snapshots for a device |
+| `GET` | `/devices/{id}/browser-history?from=YYYY-MM-DD&to=YYYY-MM-DD` | `viewer`+ | Browser history entries archived in S3 for a date range |
 | `POST` | `/ingest` | ✓ X-API-Key | Accept a telemetry payload |
 | `GET` | `/policy` | `viewer`+ | Read the current global policy |
 | `POST` | `/policy` | `manager`+ | Update the global policy (e.g. `sync_interval_seconds`) |
@@ -323,6 +324,10 @@ DevicePulse/
 | `MONGO_URI` | API | — | MongoDB connection string (required) |
 | `ADMIN_SECRET` | API | — | Admin secret for privileged endpoints such as policy updates and release publishing |
 | `DASHBOARD_TOKEN` | API | — | Optional token required by read endpoints when configured |
+| `BROWSER_HISTORY_S3_BUCKET` | API | — | S3 bucket for browser-history archive objects; disables S3 archive when unset |
+| `BROWSER_HISTORY_S3_PREFIX` | API | `browser-history` | S3 key prefix for browser-history archive objects |
+| `BROWSER_HISTORY_S3_ENDPOINT` | API | — | Optional S3-compatible endpoint, for example MinIO |
+| `BROWSER_HISTORY_S3_PATH_STYLE` | API | `false` | Force path-style S3 requests; automatically enabled when endpoint is set |
 | `DEVICEPULSE_API_URL` | Agent | `http://localhost:8080` | API endpoint override at runtime |
 | `NEXT_PUBLIC_API_URL` | Dashboard | `http://localhost:8080` | API URL used by the browser dashboard |
 | `NEXT_PUBLIC_DASHBOARD_TOKEN` | Dashboard | — | Dashboard token sent to read endpoints when `DASHBOARD_TOKEN` is configured |

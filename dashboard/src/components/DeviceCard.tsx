@@ -1,11 +1,12 @@
 'use client';
 
-import { AppFocusSummary, Device, DeviceTab } from '@/types';
+import { AppFocusSummary, Device, DeviceTab, HistoryEntry } from '@/types';
 import { isOnline, timeAgo, metricColor } from '@/lib/utils';
 import OverviewTab from '@/components/tabs/OverviewTab';
 import HardwareTab from '@/components/tabs/HardwareTab';
 import ProcessesTab from '@/components/tabs/ProcessesTab';
 import BrowserTab from '@/components/tabs/BrowserTab';
+import type { BrowserHistoryRange } from '@/components/tabs/BrowserTab';
 import ServicesTab from '@/components/tabs/ServicesTab';
 import PortsTab from '@/components/tabs/PortsTab';
 import AppsTab from '@/components/tabs/AppsTab';
@@ -19,6 +20,11 @@ interface Props {
   onTabChange: (tab: DeviceTab) => void;
   onDelete?: () => void;
   cachedFocus: AppFocusSummary[];
+  browserHistory?: HistoryEntry[];
+  browserHistoryRange?: BrowserHistoryRange;
+  browserHistoryLoading?: boolean;
+  canFilterBrowserHistory?: boolean;
+  onBrowserHistoryRangeChange?: (range: BrowserHistoryRange) => void;
 }
 
 const TABS: { key: DeviceTab; label: string; icon: React.ReactNode }[] = [
@@ -34,10 +40,21 @@ const TABS: { key: DeviceTab; label: string; icon: React.ReactNode }[] = [
   { key: 'sysinfo',    label: 'System',     icon: <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="2" width="14" height="9" rx="1" stroke="currentColor" strokeWidth="1.2" fill="none"/><path d="M5 14h6M8 11v3"/></svg> },
 ];
 
-export default function DeviceCard({ device, tab, onTabChange, onDelete, cachedFocus }: Props) {
+export default function DeviceCard({
+  device,
+  tab,
+  onTabChange,
+  onDelete,
+  cachedFocus,
+  browserHistory,
+  browserHistoryRange = 'recent',
+  browserHistoryLoading = false,
+  canFilterBrowserHistory = false,
+  onBrowserHistoryRangeChange,
+}: Props) {
   const sys    = device.data?.SystemInfo;
   const procs  = device.data?.ProcessMonitor?.top_processes ?? [];
-  const history = device.data?.BrowserHistory?.top_recent_urls ?? [];
+  const history = browserHistory ?? device.data?.BrowserHistory?.top_recent_urls ?? [];
   const hw     = device.data?.HardwareStats;
   const online = isOnline(device.last_seen);
 
@@ -113,7 +130,15 @@ export default function DeviceCard({ device, tab, onTabChange, onDelete, cachedF
         {tab === 'overview'  && <OverviewTab data={device.data} cachedFocus={cachedFocus} />}
         {tab === 'hardware'  && <HardwareTab hw={hw} />}
         {tab === 'processes' && <ProcessesTab procs={procs} />}
-        {tab === 'browser'   && <BrowserTab history={history} />}
+        {tab === 'browser'   && (
+          <BrowserTab
+            history={history}
+            canFilterHistory={canFilterBrowserHistory}
+            historyRange={browserHistoryRange}
+            historyLoading={browserHistoryLoading}
+            onHistoryRangeChange={onBrowserHistoryRangeChange}
+          />
+        )}
         {tab === 'services'  && <ServicesTab data={device.data?.Services} />}
         {tab === 'ports'     && <PortsTab data={device.data?.NetworkPorts} />}
         {tab === 'apps'      && <AppsTab data={device.data?.InstalledApps} />}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -40,6 +41,9 @@ type RAMStat struct {
 // DiskStat holds per-mount usage.
 type DiskStat struct {
 	Mount       string  `json:"mount"`
+	TotalBytes  uint64  `json:"total_bytes"`
+	UsedBytes   uint64  `json:"used_bytes"`
+	FreeBytes   uint64  `json:"free_bytes"`
 	TotalGB     float64 `json:"total_gb"`
 	UsedGB      float64 `json:"used_gb"`
 	FreeGB      float64 `json:"free_gb"`
@@ -48,21 +52,21 @@ type DiskStat struct {
 
 // NetStat holds cumulative I/O per interface.
 type NetStat struct {
-	Interface string `json:"interface"`
-	BytesSent uint64 `json:"bytes_sent"`
-	BytesRecv uint64 `json:"bytes_recv"`
+	Interface   string `json:"interface"`
+	BytesSent   uint64 `json:"bytes_sent"`
+	BytesRecv   uint64 `json:"bytes_recv"`
 	PacketsSent uint64 `json:"packets_sent"`
 	PacketsRecv uint64 `json:"packets_recv"`
 }
 
 // BatteryStat holds battery info (may be empty on desktops).
 type BatteryStat struct {
-	Available    bool    `json:"available"`
-	Percent      float64 `json:"percent"`       // 0–100
-	Plugged      bool    `json:"plugged"`       // true = AC / charging source connected
-	Charging     bool    `json:"charging"`      // true = actively charging
-	ChargeRateW  float64 `json:"charge_rate_w"` // charge/discharge rate in Watts (negative = discharging)
-	State        string  `json:"state"`         // "charging", "discharging", "full", "unknown"
+	Available   bool    `json:"available"`
+	Percent     float64 `json:"percent"`       // 0–100
+	Plugged     bool    `json:"plugged"`       // true = AC / charging source connected
+	Charging    bool    `json:"charging"`      // true = actively charging
+	ChargeRateW float64 `json:"charge_rate_w"` // charge/discharge rate in Watts (negative = discharging)
+	State       string  `json:"state"`         // "charging", "discharging", "full", "unknown"
 }
 
 func (h *HardwareStats) Collect() (map[string]interface{}, error) {
@@ -97,12 +101,18 @@ func (h *HardwareStats) Collect() (map[string]interface{}, error) {
 	partitions, err := disk.Partitions(false)
 	if err == nil {
 		for _, p := range partitions {
+			if shouldSkipDiskPartition(p) {
+				continue
+			}
 			usage, err := disk.Usage(p.Mountpoint)
 			if err != nil || usage.Total == 0 {
 				continue
 			}
 			disks = append(disks, DiskStat{
 				Mount:       p.Mountpoint,
+				TotalBytes:  usage.Total,
+				UsedBytes:   usage.Used,
+				FreeBytes:   usage.Free,
 				TotalGB:     toGB(usage.Total),
 				UsedGB:      toGB(usage.Used),
 				FreeGB:      toGB(usage.Free),
@@ -221,6 +231,54 @@ func (h *HardwareStats) Collect() (map[string]interface{}, error) {
 	}
 
 	return result, nil
+}
+
+func shouldSkipDiskPartition(partition disk.PartitionStat) bool {
+	mountpoint := partition.Mountpoint
+	fstype := strings.ToLower(partition.Fstype)
+
+	if mountpoint == "" {
+		return true
+	}
+
+	switch runtime.GOOS {
+	case "darwin":
+		if fstype == "devfs" || fstype == "autofs" {
+			return true
+		}
+		if mountpoint == "/System/Volumes/Data/home" {
+			return true
+		}
+		if strings.HasPrefix(mountpoint, "/System/Volumes/") {
+			return true
+		}
+	case "linux":
+		if isLinuxPseudoFilesystem(fstype) {
+			return true
+		}
+		for _, prefix := range []string{"/proc", "/sys", "/dev", "/run", "/snap"} {
+			if mountpoint == prefix || strings.HasPrefix(mountpoint, prefix+"/") {
+				return true
+			}
+		}
+	case "windows":
+		if fstype == "cdfs" || fstype == "udf" {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isLinuxPseudoFilesystem(fstype string) bool {
+	switch fstype {
+	case "autofs", "bpf", "binfmt_misc", "cgroup", "cgroup2", "configfs",
+		"debugfs", "devpts", "devtmpfs", "efivarfs", "fusectl", "hugetlbfs",
+		"mqueue", "nsfs", "overlay", "proc", "pstore", "ramfs", "securityfs",
+		"squashfs", "sysfs", "tmpfs", "tracefs":
+		return true
+	}
+	return false
 }
 
 func toGB(bytes uint64) float64 {

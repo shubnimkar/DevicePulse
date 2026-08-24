@@ -4,17 +4,39 @@ import { useState } from 'react';
 import { HistoryEntry } from '@/types';
 import { getDomain, formatVisitTime, formatFullDateTime, faviconUrl, browserEmoji, browserClass } from '@/lib/utils';
 
-interface Props { history: HistoryEntry[]; }
+interface Props {
+  history: HistoryEntry[];
+  canFilterHistory?: boolean;
+  historyRange?: BrowserHistoryRange;
+  historyLoading?: boolean;
+  onHistoryRangeChange?: (range: BrowserHistoryRange) => void;
+}
 
-export default function BrowserTab({ history }: Props) {
+export type BrowserHistoryRange = 'recent' | 'last_day' | 'day_before';
+
+const rangeLabels: Record<BrowserHistoryRange, string> = {
+  recent: 'Recent',
+  last_day: 'Last Day',
+  day_before: 'Day Before',
+};
+
+export default function BrowserTab({
+  history,
+  canFilterHistory = false,
+  historyRange = 'recent',
+  historyLoading = false,
+  onHistoryRangeChange,
+}: Props) {
   const [expanded, setExpanded] = useState(false);
 
-  if (!history.length) return <div className="no-data">No browser history.</div>;
+  const uniqueHistory = dedupeHistory(history);
 
-  const topRecent = history.slice(0, 10);
-  const hasMore   = history.length > 10;
+  if (!uniqueHistory.length && !canFilterHistory) return <div className="no-data">No browser history.</div>;
 
-  const byBrowser = history.reduce((acc, h) => {
+  const topRecent = uniqueHistory.slice(0, 10);
+  const hasMore   = uniqueHistory.length > 10;
+
+  const byBrowser = uniqueHistory.reduce((acc, h) => {
     const b = h.browser || 'Unknown';
     if (!acc[b]) acc[b] = [];
     acc[b].push(h);
@@ -55,16 +77,43 @@ export default function BrowserTab({ history }: Props) {
 
   return (
     <div>
+      {canFilterHistory && (
+        <div className="browser-history-toolbar">
+          <div className="segmented-control compact" role="group" aria-label="Browser history date range">
+            {(['recent', 'last_day', 'day_before'] as const).map(range => (
+              <button
+                key={range}
+                type="button"
+                className={historyRange === range ? 'active' : ''}
+                onClick={() => {
+                  setExpanded(false);
+                  onHistoryRangeChange?.(range);
+                }}
+              >
+                {rangeLabels[range]}
+              </button>
+            ))}
+          </div>
+          {historyLoading && <span className="history-loading">Loading</span>}
+        </div>
+      )}
+
+      {topRecent.length > 0 && (
       <div className="browser-section">
-        <div className="browser-section-title">Recent ({topRecent.length})</div>
+        <div className="browser-section-title">{rangeLabels[historyRange]} ({topRecent.length})</div>
         <ul className="history-list">
           {topRecent.map((h, i) => <HistoryRow key={i} h={h} />)}
         </ul>
       </div>
+      )}
+
+      {!uniqueHistory.length && (
+        <div className="no-data">No browser history for {rangeLabels[historyRange].toLowerCase()}.</div>
+      )}
 
       {hasMore && (
         <button className="view-all-btn" onClick={() => setExpanded(!expanded)}>
-          {expanded ? '▲ Hide full history' : `▼ View all ${history.length} entries`}
+          {expanded ? '▲ Hide full history' : `▼ View all ${uniqueHistory.length} entries`}
         </button>
       )}
 
@@ -113,4 +162,27 @@ export default function BrowserTab({ history }: Props) {
       )}
     </div>
   );
+}
+
+function dedupeHistory(history: HistoryEntry[]): HistoryEntry[] {
+  const seen = new Set<string>();
+  const result: HistoryEntry[] = [];
+  for (const item of history) {
+    const key = `${(item.browser || '').toLowerCase()}\u0000${historyIdentity(item)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(item);
+  }
+  return result;
+}
+
+function historyIdentity(item: HistoryEntry): string {
+  const title = (item.title || '').trim().toLowerCase();
+  if (title) return title;
+  try {
+    const parsed = new URL(item.url);
+    return `${parsed.hostname}${parsed.pathname}`.toLowerCase();
+  } catch {
+    return (item.url || '').trim().toLowerCase();
+  }
 }

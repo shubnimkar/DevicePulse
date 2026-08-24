@@ -38,6 +38,9 @@ export interface RAMStat {
 
 export interface DiskStat {
   mount: string;
+  total_bytes?: number;
+  used_bytes?: number;
+  free_bytes?: number;
   total_gb: number;
   used_gb: number;
   free_gb: number;
@@ -124,10 +127,21 @@ export interface FocusCacheData {
   app_summaries: AppFocusSummary[];
 }
 
+export interface BrowserHistoryArchiveData {
+  device_id: string;
+  from: string;
+  to: string;
+  count: number;
+  entries: HistoryEntry[];
+}
+
 export interface DeviceData {
   SystemInfo?: SystemInfo;
   ProcessMonitor?: { top_processes: ProcessData[] };
-  BrowserHistory?: { top_recent_urls: HistoryEntry[] };
+  BrowserHistory?: {
+    top_recent_urls: HistoryEntry[];
+    new_history_entries?: HistoryEntry[];
+  };
   HardwareStats?: HardwareStats;
   Services?: { services: ServiceEntry[]; source?: string };
   NetworkPorts?: { open_ports: PortEntry[]; source?: string };

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -13,6 +14,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -21,6 +23,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/joho/godotenv"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -36,8 +41,10 @@ var (
 	dbName      = "devicepulse"
 	// adminSecret is loaded from ADMIN_SECRET env var and required for
 	// privileged endpoints: POST /policy and POST /update/release.
-	adminSecret   string
-	sessionSecret string
+	adminSecret    string
+	sessionSecret  string
+	browserArchive *BrowserHistoryArchive
+	telemetryStore *TelemetryArchive
 )
 
 // ─── Focus Cache ──────────────────────────────────────────────────────────────
@@ -196,12 +203,12 @@ func defaultPolicy() map[string]interface{} {
 		"telemetry_retention_days":       30,
 		"delta_upload_enabled":           true,
 		"cache_unchanged_collector_data": true,
-		"browser_history_mode":           "disabled",
+		"browser_history_mode":           "full_url",
 		"browser_history_limit":          10,
 		"collect_system_info":            true,
 		"collect_hardware_stats":         true,
 		"collect_processes":              true,
-		"collect_browser_history":        false,
+		"collect_browser_history":        true,
 		"collect_active_window":          true,
 		"collect_services":               true,
 		"collect_network_ports":          true,
@@ -249,8 +256,9 @@ func normalizePolicy(input map[string]interface{}) map[string]interface{} {
 	}
 
 	if policy["browser_history_mode"] == "disabled" {
-		policy["collect_browser_history"] = false
+		policy["browser_history_mode"] = "full_url"
 	}
+	policy["collect_browser_history"] = true
 
 	return policy
 }
@@ -281,10 +289,533 @@ func currentRetentionDays() int {
 	return int(days)
 }
 
+// ─── Telemetry S3 Archive ──────────────────────────────────────────────────────
+
+type TelemetryArchive struct {
+	client *s3.Client
+	bucket string
+	prefix string
+}
+
+type TelemetryArchiveResult struct {
+	Bucket string `json:"bucket" bson:"bucket"`
+	Key    string `json:"key" bson:"key"`
+}
+
+func initTelemetryArchive(ctx context.Context) *TelemetryArchive {
+	bucket := strings.TrimSpace(os.Getenv("TELEMETRY_S3_BUCKET"))
+	if bucket == "" {
+		bucket = strings.TrimSpace(os.Getenv("S3_BUCKET"))
+	}
+	if bucket == "" {
+		log.Println("Telemetry S3 archive disabled (set TELEMETRY_S3_BUCKET to enable)")
+		return nil
+	}
+
+	cfg, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		log.Printf("Telemetry S3 archive disabled: AWS config error: %v", err)
+		return nil
+	}
+
+	prefix := strings.Trim(strings.TrimSpace(os.Getenv("TELEMETRY_S3_PREFIX")), "/")
+	if prefix == "" {
+		prefix = "telemetry"
+	}
+	endpoint := strings.TrimSpace(os.Getenv("TELEMETRY_S3_ENDPOINT"))
+	if endpoint == "" {
+		endpoint = strings.TrimSpace(os.Getenv("S3_ENDPOINT"))
+	}
+	usePathStyle := strings.EqualFold(os.Getenv("TELEMETRY_S3_PATH_STYLE"), "true") ||
+		strings.EqualFold(os.Getenv("S3_PATH_STYLE"), "true") ||
+		endpoint != ""
+	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		if endpoint != "" {
+			o.BaseEndpoint = aws.String(endpoint)
+		}
+		o.UsePathStyle = usePathStyle
+	})
+
+	log.Printf("Telemetry S3 archive enabled: bucket=%s prefix=%s", bucket, prefix)
+	return &TelemetryArchive{client: client, bucket: bucket, prefix: prefix}
+}
+
+func (a *TelemetryArchive) Archive(ctx context.Context, deviceID string, payload map[string]interface{}) (*TelemetryArchiveResult, error) {
+	if a == nil {
+		return nil, nil
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	eventTime := payloadTime(payload["timestamp"])
+	sum := sha256.Sum256(body)
+	key := fmt.Sprintf("%s/device_id=%s/date=%s/%s-%x.json",
+		a.prefix,
+		safeS3PathSegment(deviceID),
+		eventTime.UTC().Format("2006-01-02"),
+		eventTime.UTC().Format("20060102T150405.000000000Z"),
+		sum[:8],
+	)
+
+	if _, err = a.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(a.bucket),
+		Key:         aws.String(key),
+		Body:        bytes.NewReader(body),
+		ContentType: aws.String("application/json"),
+	}); err != nil {
+		return nil, err
+	}
+
+	return &TelemetryArchiveResult{Bucket: a.bucket, Key: key}, nil
+}
+
+func (a *TelemetryArchive) Read(ctx context.Context, result map[string]interface{}) (bson.M, error) {
+	if a == nil {
+		return nil, fmt.Errorf("telemetry S3 archive is not configured")
+	}
+	key, _ := result["key"].(string)
+	if key == "" {
+		return nil, fmt.Errorf("telemetry archive key is missing")
+	}
+	bucket, _ := result["bucket"].(string)
+	if bucket == "" {
+		bucket = a.bucket
+	}
+
+	raw, err := a.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer raw.Body.Close()
+
+	var payload bson.M
+	if err := json.NewDecoder(raw.Body).Decode(&payload); err != nil {
+		return nil, err
+	}
+	return payload, nil
+}
+
+func (a *TelemetryArchive) DeleteDevice(ctx context.Context, deviceID string) (int, error) {
+	if a == nil {
+		return 0, nil
+	}
+
+	deleted := 0
+	prefix := fmt.Sprintf("%s/device_id=%s/", a.prefix, safeS3PathSegment(deviceID))
+	paginator := s3.NewListObjectsV2Paginator(a.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(a.bucket),
+		Prefix: aws.String(prefix),
+	})
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return deleted, err
+		}
+		for _, obj := range page.Contents {
+			if obj.Key == nil {
+				continue
+			}
+			if _, err := a.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+				Bucket: aws.String(a.bucket),
+				Key:    obj.Key,
+			}); err != nil {
+				return deleted, err
+			}
+			deleted++
+		}
+	}
+	return deleted, nil
+}
+
+func telemetryMetadata(payload map[string]interface{}, archiveResult *TelemetryArchiveResult) bson.M {
+	doc := bson.M{
+		"device_id":             payload["device_id"],
+		"timestamp":             payload["timestamp"],
+		"ingested_at":           payload["ingested_at"],
+		"telemetry_expires_at":  payload["telemetry_expires_at"],
+		"telemetry_archive":     archiveResult,
+		"telemetry_archive_key": archiveResult.Key,
+	}
+	if summaries := focusSummariesFromPayload(payload); len(summaries) > 0 {
+		doc["data"] = bson.M{
+			"ActiveWindowTracker": bson.M{
+				"app_summaries": summaries,
+			},
+		}
+	}
+	return doc
+}
+
+func focusSummariesFromPayload(payload map[string]interface{}) []interface{} {
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	awt, ok := data["ActiveWindowTracker"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	raw, ok := awt["app_summaries"].([]interface{})
+	if !ok || len(raw) == 0 {
+		return nil
+	}
+	return raw
+}
+
+// ─── Browser History S3 Archive ────────────────────────────────────────────────
+
+type BrowserHistoryArchive struct {
+	client *s3.Client
+	bucket string
+	prefix string
+}
+
+type BrowserHistoryArchiveObject struct {
+	DeviceID   string        `json:"device_id"`
+	Timestamp  interface{}   `json:"timestamp"`
+	IngestedAt interface{}   `json:"ingested_at"`
+	SyncType   string        `json:"sync_type"`
+	EntryCount int           `json:"entry_count"`
+	Entries    []interface{} `json:"entries"`
+}
+
+type BrowserHistoryArchiveResult struct {
+	Bucket     string   `json:"bucket" bson:"bucket"`
+	Key        string   `json:"key,omitempty" bson:"key,omitempty"`
+	Keys       []string `json:"keys" bson:"keys"`
+	EntryCount int      `json:"entry_count" bson:"entry_count"`
+}
+
+func initBrowserHistoryArchive(ctx context.Context) *BrowserHistoryArchive {
+	bucket := strings.TrimSpace(os.Getenv("BROWSER_HISTORY_S3_BUCKET"))
+	if bucket == "" {
+		bucket = strings.TrimSpace(os.Getenv("S3_BUCKET"))
+	}
+	if bucket == "" {
+		log.Println("Browser history S3 archive disabled (set BROWSER_HISTORY_S3_BUCKET to enable)")
+		return nil
+	}
+
+	cfg, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		log.Printf("Browser history S3 archive disabled: AWS config error: %v", err)
+		return nil
+	}
+
+	prefix := strings.Trim(strings.TrimSpace(os.Getenv("BROWSER_HISTORY_S3_PREFIX")), "/")
+	if prefix == "" {
+		prefix = "browser-history"
+	}
+	endpoint := strings.TrimSpace(os.Getenv("BROWSER_HISTORY_S3_ENDPOINT"))
+	usePathStyle := strings.EqualFold(os.Getenv("BROWSER_HISTORY_S3_PATH_STYLE"), "true") || endpoint != ""
+	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		if endpoint != "" {
+			o.BaseEndpoint = aws.String(endpoint)
+		}
+		o.UsePathStyle = usePathStyle
+	})
+
+	log.Printf("Browser history S3 archive enabled: bucket=%s prefix=%s", bucket, prefix)
+	return &BrowserHistoryArchive{client: client, bucket: bucket, prefix: prefix}
+}
+
+func (a *BrowserHistoryArchive) Archive(ctx context.Context, deviceID string, payload map[string]interface{}) (*BrowserHistoryArchiveResult, error) {
+	if a == nil {
+		return nil, nil
+	}
+	browserPayload, entries := extractBrowserHistoryEntries(payload)
+	if len(entries) == 0 {
+		return nil, nil
+	}
+
+	syncType, _ := browserPayload["sync_type"].(string)
+	eventTime := payloadTime(payload["timestamp"])
+	groups := map[string][]interface{}{}
+	for _, entry := range entries {
+		visitAt := browserHistoryEntryVisitTime(entry, eventTime)
+		day := visitAt.Format("2006-01-02")
+		groups[day] = append(groups[day], entry)
+	}
+
+	result := &BrowserHistoryArchiveResult{Bucket: a.bucket, EntryCount: len(entries)}
+	for day, group := range groups {
+		doc := BrowserHistoryArchiveObject{
+			DeviceID:   deviceID,
+			Timestamp:  payload["timestamp"],
+			IngestedAt: payload["ingested_at"],
+			SyncType:   syncType,
+			EntryCount: len(group),
+			Entries:    group,
+		}
+		body, err := json.Marshal(doc)
+		if err != nil {
+			return nil, err
+		}
+
+		sum := sha256.Sum256(body)
+		key := fmt.Sprintf("%s/device_id=%s/date=%s/%s-%x.json",
+			a.prefix,
+			safeS3PathSegment(deviceID),
+			day,
+			eventTime.UTC().Format("20060102T150405.000000000Z"),
+			sum[:8],
+		)
+		_, err = a.client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket:      aws.String(a.bucket),
+			Key:         aws.String(key),
+			Body:        bytes.NewReader(body),
+			ContentType: aws.String("application/json"),
+		})
+		if err != nil {
+			return nil, err
+		}
+		result.Keys = append(result.Keys, key)
+	}
+	sort.Strings(result.Keys)
+	if len(result.Keys) > 0 {
+		result.Key = result.Keys[0]
+	}
+	return result, nil
+}
+
+func (a *BrowserHistoryArchive) ReadEntries(ctx context.Context, deviceID string, from, to time.Time, limit int) ([]interface{}, error) {
+	if a == nil {
+		return nil, fmt.Errorf("browser history S3 archive is not configured")
+	}
+	latestByKey := map[string]interface{}{}
+	latestVisitByKey := map[string]int64{}
+	var entries []interface{}
+
+	for day := startOfDay(from); !day.After(startOfDay(to)); day = day.AddDate(0, 0, 1) {
+		prefix := fmt.Sprintf("%s/device_id=%s/date=%s/", a.prefix, safeS3PathSegment(deviceID), day.Format("2006-01-02"))
+		paginator := s3.NewListObjectsV2Paginator(a.client, &s3.ListObjectsV2Input{
+			Bucket: aws.String(a.bucket),
+			Prefix: aws.String(prefix),
+		})
+		for paginator.HasMorePages() {
+			page, err := paginator.NextPage(ctx)
+			if err != nil {
+				return nil, err
+			}
+			for _, obj := range page.Contents {
+				if obj.Key == nil {
+					continue
+				}
+				raw, err := a.client.GetObject(ctx, &s3.GetObjectInput{
+					Bucket: aws.String(a.bucket),
+					Key:    obj.Key,
+				})
+				if err != nil {
+					return nil, err
+				}
+				var archive BrowserHistoryArchiveObject
+				decodeErr := json.NewDecoder(raw.Body).Decode(&archive)
+				closeErr := raw.Body.Close()
+				if decodeErr != nil {
+					return nil, decodeErr
+				}
+				if closeErr != nil {
+					return nil, closeErr
+				}
+				for _, entry := range archive.Entries {
+					m, ok := entry.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					visitTime, ok := toFloat(m["last_visit_time"])
+					if !ok {
+						continue
+					}
+					visitAt := time.Unix(0, int64(visitTime))
+					if visitAt.Before(from) || visitAt.After(to) {
+						continue
+					}
+					dedupeKey := browserHistoryDedupeKey(m)
+					if dedupeKey == "" {
+						entries = append(entries, entry)
+						continue
+					}
+					visitNanos := int64(visitTime)
+					if existing, ok := latestVisitByKey[dedupeKey]; ok && existing >= visitNanos {
+						continue
+					}
+					latestVisitByKey[dedupeKey] = visitNanos
+					latestByKey[dedupeKey] = entry
+				}
+			}
+		}
+	}
+
+	for _, entry := range latestByKey {
+		entries = append(entries, entry)
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return browserHistoryVisitNanos(entries[i]) > browserHistoryVisitNanos(entries[j])
+	})
+	if limit > 0 && len(entries) > limit {
+		entries = entries[:limit]
+	}
+	return entries, nil
+}
+
+func (a *BrowserHistoryArchive) DeleteDevice(ctx context.Context, deviceID string) (int, error) {
+	if a == nil {
+		return 0, nil
+	}
+
+	deleted := 0
+	prefix := fmt.Sprintf("%s/device_id=%s/", a.prefix, safeS3PathSegment(deviceID))
+	paginator := s3.NewListObjectsV2Paginator(a.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(a.bucket),
+		Prefix: aws.String(prefix),
+	})
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return deleted, err
+		}
+		for _, obj := range page.Contents {
+			if obj.Key == nil {
+				continue
+			}
+			if _, err := a.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+				Bucket: aws.String(a.bucket),
+				Key:    obj.Key,
+			}); err != nil {
+				return deleted, err
+			}
+			deleted++
+		}
+	}
+	return deleted, nil
+}
+
+func extractBrowserHistoryEntries(payload map[string]interface{}) (map[string]interface{}, []interface{}) {
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		return nil, nil
+	}
+	rawBrowser, ok := data["BrowserHistory"]
+	if !ok {
+		return nil, nil
+	}
+	browserPayload, ok := rawBrowser.(map[string]interface{})
+	if !ok {
+		return nil, nil
+	}
+	seen := map[string]struct{}{}
+	entries := []interface{}{}
+	appendBrowserHistoryEntries(&entries, seen, browserPayload["new_history_entries"])
+	appendBrowserHistoryEntries(&entries, seen, browserPayload["top_recent_urls"])
+	return browserPayload, entries
+}
+
+func appendBrowserHistoryEntries(entries *[]interface{}, seen map[string]struct{}, raw interface{}) {
+	items, ok := raw.([]interface{})
+	if !ok {
+		return
+	}
+	for _, entry := range items {
+		if m, ok := entry.(map[string]interface{}); ok {
+			if key := browserHistoryDedupeKey(m); key != "" {
+				if _, exists := seen[key]; exists {
+					continue
+				}
+				seen[key] = struct{}{}
+			}
+		}
+		*entries = append(*entries, entry)
+	}
+}
+
+func pruneArchivedBrowserHistory(payload map[string]interface{}, archiveResult *BrowserHistoryArchiveResult) {
+	if archiveResult == nil {
+		return
+	}
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	browserPayload, ok := data["BrowserHistory"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	delete(browserPayload, "new_history_entries")
+	delete(browserPayload, "top_recent_urls")
+	browserPayload["archive"] = archiveResult
+}
+
+func payloadTime(v interface{}) time.Time {
+	if s, ok := v.(string); ok {
+		if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+			return t.UTC()
+		}
+	}
+	return time.Now().UTC()
+}
+
+func safeS3PathSegment(s string) string {
+	replacer := strings.NewReplacer("/", "_", "\\", "_", " ", "_", ":", "_")
+	return replacer.Replace(s)
+}
+
+func startOfDay(t time.Time) time.Time {
+	y, m, d := t.Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, t.Location())
+}
+
+func browserHistoryDedupeKey(entry map[string]interface{}) string {
+	url, _ := entry["url"].(string)
+	title, _ := entry["title"].(string)
+	browser, _ := entry["browser"].(string)
+	if url == "" {
+		return ""
+	}
+	identity := strings.TrimSpace(strings.ToLower(title))
+	if identity == "" {
+		identity = normalizedBrowserHistoryURL(url)
+	}
+	return strings.ToLower(browser) + "|" + identity
+}
+
+func normalizedBrowserHistoryURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return strings.ToLower(strings.TrimSpace(raw))
+	}
+	return strings.ToLower(parsed.Host + parsed.Path)
+}
+
+func browserHistoryVisitNanos(entry interface{}) int64 {
+	m, ok := entry.(map[string]interface{})
+	if !ok {
+		return 0
+	}
+	v, ok := toFloat(m["last_visit_time"])
+	if !ok {
+		return 0
+	}
+	return int64(v)
+}
+
+func browserHistoryEntryVisitTime(entry interface{}, fallback time.Time) time.Time {
+	nanos := browserHistoryVisitNanos(entry)
+	if nanos <= 0 {
+		return fallback.UTC()
+	}
+	return time.Unix(0, nanos).UTC()
+}
+
 // loadPolicyFromMongo reads the persisted policy document from MongoDB.
 // Called once at startup so the last-saved policy survives API restarts.
 func loadPolicyFromMongo() {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	coll := mongoClient.Database(dbName).Collection("config")
@@ -299,6 +830,37 @@ func loadPolicyFromMongo() {
 	globalPolicy.config = normalizePolicy(doc)
 	globalPolicy.mu.Unlock()
 	log.Printf("Policy loaded from MongoDB: %v", globalPolicy.config)
+}
+
+func cleanupBootstrapLocks() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	db := mongoClient.Database(dbName)
+	users, err := db.Collection("users").CountDocuments(ctx, bson.M{})
+	if err != nil {
+		log.Printf("Bootstrap cleanup skipped: users count error: %v", err)
+		return
+	}
+	if users > 0 {
+		if _, err := db.Collection("config").DeleteOne(ctx, bson.M{"_id": "dashboard_bootstrap"}); err != nil {
+			log.Printf("Bootstrap cleanup failed: %v", err)
+		}
+		return
+	}
+
+	staleBefore := time.Now().Add(-15 * time.Minute)
+	res, err := db.Collection("config").DeleteOne(ctx, bson.M{
+		"_id":        "dashboard_bootstrap",
+		"created_at": bson.M{"$lt": staleBefore},
+	})
+	if err != nil {
+		log.Printf("Stale bootstrap cleanup failed: %v", err)
+		return
+	}
+	if res.DeletedCount > 0 {
+		log.Printf("Removed stale dashboard bootstrap lock")
+	}
 }
 
 // savePolicyToMongo persists the current policy config to MongoDB so it
@@ -596,28 +1158,6 @@ func requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// requireRead enforces the X-Dashboard-Token header on read endpoints.
-// This prevents unauthenticated access to device telemetry, browser history,
-// and focus data from anyone who can reach port 8080.
-// Set DASHBOARD_TOKEN to any strong random value (e.g. openssl rand -hex 32).
-// If unset, read endpoints remain open (backwards-compatible default).
-func requireRead(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		token := os.Getenv("DASHBOARD_TOKEN")
-		if token == "" {
-			// Not configured — allow through but log a warning once.
-			// This preserves backwards compatibility for local dev.
-			next(w, r)
-			return
-		}
-		if r.Header.Get("X-Dashboard-Token") != token {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-		next(w, r)
-	}
-}
-
 // requireAgent validates that the request belongs to a registered agent.
 func requireAgent(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -803,7 +1343,7 @@ func authRegisterHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 	user := DashboardUser{
 		ID:           primitive.NewObjectID(),
 		Email:        email,
@@ -822,6 +1362,9 @@ func authRegisterHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
+	}
+	if _, err := mongoClient.Database(dbName).Collection("config").DeleteOne(ctx, bson.M{"_id": "dashboard_bootstrap"}); err != nil {
+		log.Printf("Bootstrap lock cleanup failed: %v", err)
 	}
 	if err := setSessionCookie(w, user); err != nil {
 		http.Error(w, "Session error", http.StatusInternalServerError)
@@ -1171,24 +1714,70 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 	payload["ingested_at"] = now
 	payload["telemetry_expires_at"] = now.AddDate(0, 0, retentionDays)
 
+	if browserArchive != nil {
+		archiveResult, err := browserArchive.Archive(ctx, authDeviceID, payload)
+		if err != nil {
+			log.Printf("Browser history S3 archive error for %s: %v", authDeviceID, err)
+			http.Error(w, "Browser history archive error", http.StatusInternalServerError)
+			return
+		}
+		if archiveResult != nil {
+			payload["browser_history_archive"] = archiveResult
+			pruneArchivedBrowserHistory(payload, archiveResult)
+		}
+	}
+
+	var telemetryArchiveResult *TelemetryArchiveResult
+	if telemetryStore != nil {
+		telemetryArchiveResult, err = telemetryStore.Archive(ctx, authDeviceID, payload)
+		if err != nil {
+			log.Printf("Telemetry S3 archive error for %s: %v", authDeviceID, err)
+			http.Error(w, "Telemetry archive error", http.StatusInternalServerError)
+			return
+		}
+		payload["telemetry_archive"] = telemetryArchiveResult
+	}
+
 	collTelemetry := mongoClient.Database(dbName).Collection("telemetry")
 	collDevices := mongoClient.Database(dbName).Collection("devices")
 
 	// Insert telemetry event
-	if _, err = collTelemetry.InsertOne(ctx, payload); err != nil {
+	telemetryDoc := bson.M(payload)
+	if telemetryArchiveResult != nil {
+		telemetryDoc = telemetryMetadata(payload, telemetryArchiveResult)
+	}
+	if _, err = collTelemetry.InsertOne(ctx, telemetryDoc); err != nil {
 		log.Printf("Error inserting telemetry: %v", err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 
-	// Upsert latest device state (store last-seen snapshot)
+	// Upsert latest device state. Collector payloads are applied as deltas so an
+	// incremental/empty collector result does not erase the last useful snapshot.
 	opts := options.Update().SetUpsert(true)
-	update := bson.M{"$set": bson.M{
+	setDoc := bson.M{
 		"device_id": authDeviceID,
 		"timestamp": payload["timestamp"],
-		"data":      payload["data"],
 		"last_seen": now,
-	}}
+	}
+	if data, ok := payload["data"].(map[string]interface{}); ok {
+		for collectorName, collectorPayload := range data {
+			if collectorName == "BrowserHistory" {
+				applyBrowserHistoryDelta(setDoc, collectorPayload)
+				continue
+			}
+			setDoc["data."+collectorName] = collectorPayload
+		}
+	} else {
+		setDoc["data"] = payload["data"]
+	}
+	update := bson.M{"$set": setDoc}
+	if _, archived := payload["browser_history_archive"]; archived {
+		update["$unset"] = bson.M{
+			"data.BrowserHistory.new_history_entries": "",
+			"data.BrowserHistory.top_recent_urls":     "",
+		}
+	}
 	if _, err = collDevices.UpdateOne(ctx, bson.M{"device_id": authDeviceID}, update, opts); err != nil {
 		log.Printf("Error updating device state: %v", err)
 	}
@@ -1206,6 +1795,22 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Ingested telemetry for %s", authDeviceID)
 	w.WriteHeader(http.StatusOK)
+}
+
+func applyBrowserHistoryDelta(setDoc bson.M, v interface{}) {
+	m, ok := v.(map[string]interface{})
+	if !ok {
+		return
+	}
+	if urls, ok := m["top_recent_urls"].([]interface{}); ok && len(urls) > 0 {
+		setDoc["data.BrowserHistory.top_recent_urls"] = urls
+	}
+	if syncType, ok := m["sync_type"].(string); ok && syncType != "" {
+		setDoc["data.BrowserHistory.sync_type"] = syncType
+	}
+	if archive, ok := m["archive"]; ok {
+		setDoc["data.BrowserHistory.archive"] = archive
+	}
 }
 
 func toFloat(v interface{}) (float64, bool) {
@@ -1252,16 +1857,41 @@ func deviceDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := db.Collection("telemetry").DeleteMany(ctx, bson.M{"device_id": deviceID}); err != nil {
+	telemetryRes, err := db.Collection("telemetry").DeleteMany(ctx, bson.M{"device_id": deviceID})
+	if err != nil {
 		log.Printf("Telemetry cleanup failed for deleted device %s: %v", deviceID, err)
+		http.Error(w, "Device deleted, but telemetry cleanup failed", http.StatusInternalServerError)
+		return
+	}
+
+	telemetryArchiveDeleted, err := telemetryStore.DeleteDevice(ctx, deviceID)
+	if err != nil {
+		log.Printf("Telemetry archive cleanup failed for deleted device %s: %v", deviceID, err)
+		http.Error(w, "Device deleted, but telemetry archive cleanup failed", http.StatusInternalServerError)
+		return
+	}
+
+	browserArchiveDeleted, err := browserArchive.DeleteDevice(ctx, deviceID)
+	if err != nil {
+		log.Printf("Browser history archive cleanup failed for deleted device %s: %v", deviceID, err)
+		http.Error(w, "Device deleted, but browser history archive cleanup failed", http.StatusInternalServerError)
+		return
 	}
 
 	globalFocusCache.mu.Lock()
 	delete(globalFocusCache.data, deviceID)
 	globalFocusCache.mu.Unlock()
 
-	log.Printf("Device deleted: %s", deviceID)
-	w.WriteHeader(http.StatusOK)
+	log.Printf("Device deleted: %s (telemetry=%d telemetry_archive_objects=%d browser_archive_objects=%d)", deviceID, telemetryRes.DeletedCount, telemetryArchiveDeleted, browserArchiveDeleted)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"device_id":                       deviceID,
+		"deleted":                         true,
+		"telemetry_deleted_count":         telemetryRes.DeletedCount,
+		"telemetry_archive_deleted_count": telemetryArchiveDeleted,
+		"browser_archive_deleted_count":   browserArchiveDeleted,
+		"focus_cache_deleted":             true,
+	})
 }
 
 // ─── Devices Handler ───────────────────────────────────────────────────────────
@@ -1341,9 +1971,108 @@ func historyHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Parsing error", http.StatusInternalServerError)
 		return
 	}
+	for i, doc := range history {
+		archive, ok := doc["telemetry_archive"].(bson.M)
+		if !ok {
+			continue
+		}
+		if telemetryStore == nil {
+			log.Printf("Telemetry history read failed for %s: archive is configured in Mongo but S3 store is disabled", deviceID)
+			http.Error(w, "Telemetry S3 archive is not configured", http.StatusServiceUnavailable)
+			return
+		}
+		payload, err := telemetryStore.Read(ctx, archive)
+		if err != nil {
+			log.Printf("Telemetry S3 read error for %s: %v", deviceID, err)
+			http.Error(w, "S3 archive read error", http.StatusInternalServerError)
+			return
+		}
+		payload["_id"] = doc["_id"]
+		payload["telemetry_archive"] = doc["telemetry_archive"]
+		history[i] = payload
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(history)
+}
+
+// GET /devices/{device_id}/browser-history?from=YYYY-MM-DD&to=YYYY-MM-DD&limit=N
+func browserHistoryHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if browserArchive == nil {
+		http.Error(w, "Browser history S3 archive is not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 4 {
+		http.Error(w, "Invalid URL", http.StatusBadRequest)
+		return
+	}
+	deviceID := parts[2]
+
+	now := time.Now()
+	defaultFrom := startOfDay(now.AddDate(0, 0, -currentRetentionDays()+1))
+	defaultTo := startOfDay(now).AddDate(0, 0, 1).Add(-time.Nanosecond)
+	from, err := parseDateQuery(r.URL.Query().Get("from"), defaultFrom, false)
+	if err != nil {
+		http.Error(w, "Invalid from date. Use YYYY-MM-DD.", http.StatusBadRequest)
+		return
+	}
+	to, err := parseDateQuery(r.URL.Query().Get("to"), defaultTo, true)
+	if err != nil {
+		http.Error(w, "Invalid to date. Use YYYY-MM-DD.", http.StatusBadRequest)
+		return
+	}
+	if to.Before(from) {
+		http.Error(w, "to must be on or after from", http.StatusBadRequest)
+		return
+	}
+
+	limit := 0
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			http.Error(w, "Invalid limit", http.StatusBadRequest)
+			return
+		}
+		limit = parsed
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	entries, err := browserArchive.ReadEntries(ctx, deviceID, from, to, limit)
+	if err != nil {
+		log.Printf("Browser history S3 read error for %s: %v", deviceID, err)
+		http.Error(w, "S3 archive read error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"device_id": deviceID,
+		"from":      from.Format(time.RFC3339),
+		"to":        to.Format(time.RFC3339),
+		"count":     len(entries),
+		"entries":   entries,
+	})
+}
+
+func parseDateQuery(raw string, fallback time.Time, endOfDay bool) (time.Time, error) {
+	if raw == "" {
+		return fallback, nil
+	}
+	t, err := time.ParseInLocation("2006-01-02", raw, time.UTC)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if endOfDay {
+		return t.AddDate(0, 0, 1).Add(-time.Nanosecond), nil
+	}
+	return t, nil
 }
 
 // ─── Policy Handler ────────────────────────────────────────────────────────────
@@ -1638,6 +2367,10 @@ func main() {
 
 	// Restore persisted policy so sync intervals survive restarts.
 	loadPolicyFromMongo()
+	cleanupBootstrapLocks()
+
+	telemetryStore = initTelemetryArchive(ctx)
+	browserArchive = initBrowserHistoryArchive(ctx)
 
 	// Build focus cache from existing telemetry data
 	go buildFocusCacheFromMongo()
@@ -1653,7 +2386,9 @@ func main() {
 	http.HandleFunc("/users/", corsMiddleware(requireRole(RoleAdmin, userDetailHandler)))
 	http.HandleFunc("/users", corsMiddleware(requireRole(RoleAdmin, usersHandler)))
 	http.HandleFunc("/devices/", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/history") {
+		if strings.HasSuffix(r.URL.Path, "/browser-history") {
+			requireRole(RoleViewer, browserHistoryHandler)(w, r)
+		} else if strings.HasSuffix(r.URL.Path, "/history") {
 			requireRole(RoleViewer, historyHandler)(w, r)
 		} else if r.Method == http.MethodDelete {
 			requireRole(RoleAdmin, deviceDeleteHandler)(w, r)
@@ -1668,6 +2403,8 @@ func main() {
 	http.HandleFunc("/policy", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			requireRole(RoleManager, policyHandler)(w, r)
+		} else if r.Header.Get("X-API-Key") != "" {
+			requireAgent(policyHandler)(w, r)
 		} else {
 			requireRole(RoleViewer, policyHandler)(w, r)
 		}

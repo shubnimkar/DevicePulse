@@ -83,9 +83,9 @@ export function browserClass(browser: string): string {
 }
 
 export function metricColor(pct: number): string {
-  if (pct > 85) return 'var(--danger-color)';
-  if (pct > 65) return 'var(--warning-color)';
-  return 'var(--success-color)';
+  if (pct > 85) return 'var(--red)';
+  if (pct > 65) return 'var(--yellow)';
+  return 'var(--green)';
 }
 
 export function getOSIcon(os?: string): string {

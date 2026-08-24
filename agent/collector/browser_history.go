@@ -22,6 +22,7 @@ package collector
 import (
 	"bufio"
 	"database/sql"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -34,13 +35,25 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-type BrowserHistory struct{}
+type BrowserHistory struct {
+	statePath      string
+	stateLoaded    bool
+	sentEntries    map[string]int64
+	pendingEntries []HistoryEntry
+}
 
 func (b *BrowserHistory) Name() string { return "BrowserHistory" }
 func (b *BrowserHistory) Start() error { return nil }
 func (b *BrowserHistory) Stop() error  { return nil }
 
-const maxBrowserHistoryEntries = 200
+const maxBrowserHistoryScanEntries = 5000
+const maxBrowserHistoryUploadEntries = 200
+const maxBrowserHistorySentStateEntries = 10000
+
+type browserHistoryState struct {
+	LastSyncedVisit int64            `json:"last_synced_visit,omitempty"`
+	SentEntries     map[string]int64 `json:"sent_entries,omitempty"`
+}
 
 type HistoryEntry struct {
 	URL           string `json:"url"`
@@ -49,10 +62,21 @@ type HistoryEntry struct {
 	Browser       string `json:"browser"`
 }
 
+func NewBrowserHistory(statePath string) *BrowserHistory {
+	return &BrowserHistory{statePath: statePath}
+}
+
 func (b *BrowserHistory) Collect() (map[string]interface{}, error) {
+	b.loadState()
+
 	homeDirs := resolveHomeDirs()
 	if len(homeDirs) == 0 {
-		return map[string]interface{}{"top_recent_urls": []HistoryEntry{}}, nil
+		b.pendingEntries = nil
+		return map[string]interface{}{
+			"top_recent_urls":     []HistoryEntry{},
+			"new_history_entries": []HistoryEntry{},
+			"sync_type":           "incremental",
+		}, nil
 	}
 
 	var allEntries []HistoryEntry
@@ -76,17 +100,130 @@ func (b *BrowserHistory) Collect() (map[string]interface{}, error) {
 	}
 
 	if len(allEntries) == 0 {
-		return map[string]interface{}{"top_recent_urls": []HistoryEntry{}}, nil
+		b.pendingEntries = nil
+		return map[string]interface{}{
+			"top_recent_urls":     []HistoryEntry{},
+			"new_history_entries": []HistoryEntry{},
+			"sync_type":           "incremental",
+		}, nil
 	}
 
 	sort.Slice(allEntries, func(i, j int) bool {
 		return allEntries[i].LastVisitTime > allEntries[j].LastVisitTime
 	})
-	if len(allEntries) > maxBrowserHistoryEntries {
-		allEntries = allEntries[:maxBrowserHistoryEntries]
+	recentSnapshot := append([]HistoryEntry(nil), allEntries...)
+	if len(recentSnapshot) > maxBrowserHistoryUploadEntries {
+		recentSnapshot = recentSnapshot[:maxBrowserHistoryUploadEntries]
 	}
 
-	return map[string]interface{}{"top_recent_urls": allEntries}, nil
+	filtered := allEntries[:0]
+	for _, entry := range allEntries {
+		if !b.hasSent(entry) {
+			filtered = append(filtered, entry)
+		}
+	}
+	allEntries = filtered
+
+	sort.Slice(allEntries, func(i, j int) bool {
+		return allEntries[i].LastVisitTime < allEntries[j].LastVisitTime
+	})
+	if len(allEntries) > maxBrowserHistoryUploadEntries {
+		allEntries = allEntries[:maxBrowserHistoryUploadEntries]
+	}
+
+	b.pendingEntries = append([]HistoryEntry(nil), allEntries...)
+	sort.Slice(allEntries, func(i, j int) bool {
+		return allEntries[i].LastVisitTime > allEntries[j].LastVisitTime
+	})
+
+	return map[string]interface{}{
+		"top_recent_urls":     recentSnapshot,
+		"new_history_entries": allEntries,
+		"sync_type":           "incremental",
+	}, nil
+}
+
+func (b *BrowserHistory) Commit() error {
+	if len(b.pendingEntries) == 0 {
+		return nil
+	}
+	if b.sentEntries == nil {
+		b.sentEntries = map[string]int64{}
+	}
+	for _, entry := range b.pendingEntries {
+		b.sentEntries[b.sentKey(entry)] = entry.LastVisitTime
+	}
+	b.pendingEntries = nil
+	b.pruneSentEntries()
+	if b.statePath == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(b.statePath), 0755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(browserHistoryState{SentEntries: b.sentEntries}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(b.statePath, data, 0600)
+}
+
+func (b *BrowserHistory) hasSent(entry HistoryEntry) bool {
+	if b.sentEntries == nil {
+		return false
+	}
+	_, ok := b.sentEntries[b.sentKey(entry)]
+	return ok
+}
+
+func (b *BrowserHistory) sentKey(entry HistoryEntry) string {
+	return strings.ToLower(entry.Browser) + "\x00" + entry.URL + "\x00" + strconv.FormatInt(entry.LastVisitTime, 10)
+}
+
+func (b *BrowserHistory) pruneSentEntries() {
+	if len(b.sentEntries) <= maxBrowserHistorySentStateEntries {
+		return
+	}
+	type stateEntry struct {
+		key       string
+		visitTime int64
+	}
+	entries := make([]stateEntry, 0, len(b.sentEntries))
+	for key, visitTime := range b.sentEntries {
+		entries = append(entries, stateEntry{key: key, visitTime: visitTime})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].visitTime > entries[j].visitTime })
+	keep := map[string]int64{}
+	for i, entry := range entries {
+		if i >= maxBrowserHistorySentStateEntries {
+			break
+		}
+		keep[entry.key] = entry.visitTime
+	}
+	b.sentEntries = keep
+}
+
+func (b *BrowserHistory) loadState() {
+	if b.stateLoaded {
+		return
+	}
+	b.stateLoaded = true
+	if b.statePath == "" {
+		return
+	}
+	data, err := os.ReadFile(b.statePath)
+	if err != nil {
+		return
+	}
+	var state browserHistoryState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return
+	}
+	if state.SentEntries != nil {
+		b.sentEntries = state.SentEntries
+	} else {
+		b.sentEntries = map[string]int64{}
+	}
 }
 
 // resolveHomeDirs returns the list of home directories to scan for browser history.
@@ -283,19 +420,19 @@ func queryChromiumDB(historyPath, browserName string) []HistoryEntry {
 	}
 	tmpPath := tmp.Name()
 	tmp.Close()
-	defer os.Remove(tmpPath)
+	defer removeSQLiteTempFiles(tmpPath)
 
-	if err := copyFile(historyPath, tmpPath); err != nil {
+	if err := copySQLiteDatabase(historyPath, tmpPath); err != nil {
 		return nil
 	}
 
-	db, err := sql.Open("sqlite", tmpPath+"?mode=ro&immutable=1")
+	db, err := sql.Open("sqlite", "file:"+tmpPath+"?mode=ro")
 	if err != nil {
 		return nil
 	}
 	defer db.Close()
 
-	rows, err := db.Query(`SELECT url, title, last_visit_time FROM urls ORDER BY last_visit_time DESC LIMIT ?`, maxBrowserHistoryEntries)
+	rows, err := db.Query(`SELECT url, title, last_visit_time FROM urls ORDER BY last_visit_time DESC LIMIT ?`, maxBrowserHistoryScanEntries)
 	if err != nil {
 		return nil
 	}
@@ -367,13 +504,13 @@ func queryFirefoxDB(historyPath string) []HistoryEntry {
 	}
 	tmpPath := tmp.Name()
 	tmp.Close()
-	defer os.Remove(tmpPath)
+	defer removeSQLiteTempFiles(tmpPath)
 
-	if err := copyFile(historyPath, tmpPath); err != nil {
+	if err := copySQLiteDatabase(historyPath, tmpPath); err != nil {
 		return nil
 	}
 
-	db, err := sql.Open("sqlite", tmpPath+"?mode=ro&immutable=1")
+	db, err := sql.Open("sqlite", "file:"+tmpPath+"?mode=ro")
 	if err != nil {
 		return nil
 	}
@@ -384,7 +521,7 @@ func queryFirefoxDB(historyPath string) []HistoryEntry {
 		FROM moz_places
 		WHERE last_visit_date IS NOT NULL
 		ORDER BY last_visit_date DESC
-		LIMIT ?`, maxBrowserHistoryEntries)
+			LIMIT ?`, maxBrowserHistoryScanEntries)
 	if err != nil {
 		return nil
 	}
@@ -424,13 +561,13 @@ func fetchSafariHistory(safariPath string) []HistoryEntry {
 	}
 	tmpPath := tmp.Name()
 	tmp.Close()
-	defer os.Remove(tmpPath)
+	defer removeSQLiteTempFiles(tmpPath)
 
-	if err := copyFile(safariPath, tmpPath); err != nil {
+	if err := copySQLiteDatabase(safariPath, tmpPath); err != nil {
 		return nil
 	}
 
-	db, err := sql.Open("sqlite", tmpPath+"?mode=ro&immutable=1")
+	db, err := sql.Open("sqlite", "file:"+tmpPath+"?mode=ro")
 	if err != nil {
 		return nil
 	}
@@ -441,7 +578,7 @@ func fetchSafariHistory(safariPath string) []HistoryEntry {
 		FROM history_items i
 		JOIN history_visits v ON i.id = v.history_item
 		ORDER BY v.visit_time DESC
-		LIMIT ?`, maxBrowserHistoryEntries)
+		LIMIT ?`, maxBrowserHistoryScanEntries)
 	if err != nil {
 		return nil
 	}
@@ -471,6 +608,27 @@ func fetchSafariHistory(safariPath string) []HistoryEntry {
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
+
+func copySQLiteDatabase(src, dst string) error {
+	if err := copyFile(src, dst); err != nil {
+		return err
+	}
+
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if _, err := os.Stat(src + suffix); err == nil {
+			if err := copyFile(src+suffix, dst+suffix); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func removeSQLiteTempFiles(path string) {
+	_ = os.Remove(path)
+	_ = os.Remove(path + "-wal")
+	_ = os.Remove(path + "-shm")
+}
 
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)

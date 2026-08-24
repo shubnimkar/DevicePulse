@@ -1,6 +1,6 @@
 'use client';
 
-import { HardwareStats, BatteryStat } from '@/types';
+import { HardwareStats, BatteryStat, DiskStat } from '@/types';
 import { formatBytes, metricColor } from '@/lib/utils';
 import GaugeBar from '@/components/GaugeBar';
 
@@ -31,6 +31,41 @@ function BatteryCard({ battery }: { battery?: BatteryStat }) {
 
 interface Props { hw?: HardwareStats; }
 
+function diskUsagePercent(disk?: DiskStat): number | null {
+  if (!disk) return null;
+  if (
+    typeof disk.used_bytes === 'number' &&
+    typeof disk.total_bytes === 'number' &&
+    Number.isFinite(disk.used_bytes) &&
+    Number.isFinite(disk.total_bytes) &&
+    disk.total_bytes > 0
+  ) {
+    return Math.min(Math.max((disk.used_bytes / disk.total_bytes) * 100, 0), 100);
+  }
+  if (disk.total_gb > 0 && disk.used_gb >= 0) {
+    return Math.min(Math.max((disk.used_gb / disk.total_gb) * 100, 0), 100);
+  }
+  return null;
+}
+
+function diskSize(disk: DiskStat, kind: 'total' | 'used' | 'free'): string {
+  const bytes = disk[`${kind}_bytes` as keyof DiskStat];
+  if (typeof bytes === 'number' && Number.isFinite(bytes)) {
+    return formatBytes(bytes);
+  }
+
+  const gb = disk[`${kind}_gb` as keyof DiskStat];
+  if (typeof gb !== 'number' || !Number.isFinite(gb)) return '—';
+  if (gb > 0 && gb < 1) return formatBytes(gb * 1024 * 1024 * 1024);
+  if (gb === 0 && disk.total_gb > 0 && disk.total_gb < 1 && disk.used_percent > 0) {
+    const totalBytes = disk.total_gb * 1024 * 1024 * 1024;
+    const usedBytes = totalBytes * Math.min(Math.max(disk.used_percent, 0), 100) / 100;
+    if (kind === 'used') return `~${formatBytes(usedBytes)}`;
+    if (kind === 'free') return `~${formatBytes(Math.max(totalBytes - usedBytes, 0))}`;
+  }
+  return `${gb.toFixed(1)} GB`;
+}
+
 export default function HardwareTab({ hw }: Props) {
   if (!hw) return <div className="no-data">No hardware data yet.</div>;
 
@@ -38,6 +73,7 @@ export default function HardwareTab({ hw }: Props) {
   const ram  = hw.ram;
   const disk = hw.disks?.[0];
   const net  = hw.network?.[0];
+  const diskPct = diskUsagePercent(disk);
 
   return (
     <div>
@@ -65,11 +101,11 @@ export default function HardwareTab({ hw }: Props) {
         {/* Disk */}
         <div className="hw-card">
           <div className="hw-label">Disk {disk?.mount}</div>
-          <div className="hw-value" style={{ color: metricColor(disk?.used_percent ?? 0) }}>
-            {disk?.used_percent?.toFixed(1) ?? '—'}%
+          <div className="hw-value" style={{ color: metricColor(diskPct ?? 0) }}>
+            {diskPct !== null ? diskPct.toFixed(1) : '—'}%
           </div>
-          <GaugeBar value={disk?.used_percent ?? 0} color={metricColor(disk?.used_percent ?? 0)} />
-          <div className="hw-sub">{disk ? `${disk.used_gb.toFixed(1)} / ${disk.total_gb.toFixed(1)} GB` : '—'}</div>
+          <GaugeBar value={diskPct ?? 0} color={metricColor(diskPct ?? 0)} />
+          <div className="hw-sub">{disk ? `${diskSize(disk, 'used')} / ${diskSize(disk, 'total')}` : '—'}</div>
         </div>
 
         {/* Network */}
@@ -101,24 +137,27 @@ export default function HardwareTab({ hw }: Props) {
                 <tr><th>Mount</th><th>Total</th><th>Used</th><th>Free</th><th>Usage</th></tr>
               </thead>
               <tbody>
-                {hw.disks.map((d, i) => (
-                  <tr key={i}>
-                    <td><span className="mono">{d.mount}</span></td>
-                    <td><span className="mono">{d.total_gb.toFixed(1)} GB</span></td>
-                    <td><span className="mono" style={{ color: metricColor(d.used_percent) }}>{d.used_gb.toFixed(1)} GB</span></td>
-                    <td><span className="mono">{d.free_gb.toFixed(1)} GB</span></td>
-                    <td style={{ minWidth: 120 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                        <div style={{ flex: 1 }}>
-                          <GaugeBar value={d.used_percent} color={metricColor(d.used_percent)} height={3} />
+                {hw.disks.map((d, i) => {
+                  const pct = diskUsagePercent(d);
+                  return (
+                    <tr key={i}>
+                      <td><span className="mono">{d.mount}</span></td>
+                      <td><span className="mono">{diskSize(d, 'total')}</span></td>
+                      <td><span className="mono" style={{ color: metricColor(pct ?? 0) }}>{diskSize(d, 'used')}</span></td>
+                      <td><span className="mono">{diskSize(d, 'free')}</span></td>
+                      <td style={{ minWidth: 120 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                          <div style={{ flex: 1 }}>
+                            <GaugeBar value={pct ?? 0} color={metricColor(pct ?? 0)} height={3} />
+                          </div>
+                          <span className="mono" style={{ fontSize: '0.6875rem', color: metricColor(pct ?? 0), minWidth: 32 }}>
+                            {pct !== null ? `${pct.toFixed(0)}%` : '—'}
+                          </span>
                         </div>
-                        <span className="mono" style={{ fontSize: '0.6875rem', color: metricColor(d.used_percent), minWidth: 32 }}>
-                          {d.used_percent.toFixed(0)}%
-                        </span>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

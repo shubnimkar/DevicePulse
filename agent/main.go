@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -44,9 +45,12 @@ var (
 	apiKey   string
 	deviceID string
 
-	policyMu     sync.RWMutex
-	syncInterval = 10 * time.Second
-	registerMu   sync.Mutex
+	policyMu              sync.RWMutex
+	syncInterval          = 10 * time.Second
+	collectBrowserHistory = true
+	browserHistoryMode    = "full_url"
+	browserHistoryLimit   = 10
+	registerMu            sync.Mutex
 )
 
 // resolveDataDir returns the absolute path to the agent's data directory.
@@ -141,7 +145,7 @@ func runAgent() {
 	// ── Collectors ──────────────────────────────────────────────────────────────
 	sysInfo := &collector.SystemInfo{}
 	procMon := &collector.ProcessMonitor{}
-	browserHist := &collector.BrowserHistory{}
+	browserHist := collector.NewBrowserHistory(filepath.Join(dataDir, "browser_history_state.json"))
 	hwStats := &collector.HardwareStats{}
 	activeWin := &collector.ActiveWindowTracker{}
 	if err := activeWin.Start(); err != nil {
@@ -202,9 +206,26 @@ func runAgent() {
 			log.Printf("Error collecting process info: %v", err)
 		}
 
-		histPayload, err := browserHist.Collect()
-		if err != nil {
-			log.Printf("Error collecting browser history: %v", err)
+		policyMu.RLock()
+		collectHistory := collectBrowserHistory
+		historyMode := browserHistoryMode
+		historyLimit := browserHistoryLimit
+		policyMu.RUnlock()
+
+		var histPayload map[string]interface{}
+		if collectHistory {
+			histPayload, err = browserHist.Collect()
+			if err != nil {
+				log.Printf("Error collecting browser history: %v", err)
+			} else {
+				applyBrowserHistoryPolicy(histPayload, historyMode, historyLimit)
+			}
+		} else {
+			histPayload = map[string]interface{}{
+				"top_recent_urls":     []collector.HistoryEntry{},
+				"new_history_entries": []collector.HistoryEntry{},
+				"sync_type":           "disabled",
+			}
 		}
 
 		hwPayload, err := hwStats.Collect()
@@ -265,6 +286,9 @@ func runAgent() {
 		if err := q.Push(finalPayload); err != nil {
 			log.Printf("Failed to push to local queue: %v", err)
 		} else {
+			if err := browserHist.Commit(); err != nil {
+				log.Printf("Failed to commit browser history cursor: %v", err)
+			}
 			log.Printf("Saved telemetry to local queue")
 		}
 
@@ -388,15 +412,28 @@ func policyPoller() {
 		if err == nil && resp.StatusCode == http.StatusOK {
 			var pol map[string]interface{}
 			if err := json.NewDecoder(resp.Body).Decode(&pol); err == nil {
+				policyMu.Lock()
 				if v, ok := pol["sync_interval_seconds"].(float64); ok {
 					newInterval := time.Duration(v) * time.Second
-					policyMu.Lock()
 					if syncInterval != newInterval {
 						log.Printf("Policy Update: sync interval -> %v", newInterval)
 						syncInterval = newInterval
 					}
-					policyMu.Unlock()
 				}
+				if v, ok := pol["collect_browser_history"].(bool); ok {
+					collectBrowserHistory = v
+				}
+				if v, ok := pol["browser_history_mode"].(string); ok {
+					browserHistoryMode = v
+				}
+				if v, ok := pol["browser_history_limit"].(float64); ok {
+					browserHistoryLimit = int(v)
+				}
+				if browserHistoryMode == "disabled" {
+					browserHistoryMode = "full_url"
+				}
+				collectBrowserHistory = true
+				policyMu.Unlock()
 			}
 			resp.Body.Close()
 		}
@@ -404,7 +441,38 @@ func policyPoller() {
 	}
 }
 
-// syncEngine drains the local SQLite queue and uploads to the API
+func applyBrowserHistoryPolicy(payload map[string]interface{}, mode string, limit int) {
+	if limit < 0 {
+		limit = 0
+	}
+	for _, key := range []string{"top_recent_urls", "new_history_entries"} {
+		entries, ok := payload[key].([]collector.HistoryEntry)
+		if !ok {
+			continue
+		}
+		if mode == "domain_only" {
+			for i := range entries {
+				entries[i].URL = domainOnlyURL(entries[i].URL)
+				entries[i].Title = ""
+			}
+		}
+		if limit > 0 && len(entries) > limit {
+			entries = entries[:limit]
+		}
+		payload[key] = entries
+	}
+}
+
+func domainOnlyURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return raw
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
+
+// syncEngine drains the local SQLite queue and uploads newest telemetry first so
+// the live dashboard recovers quickly after API downtime.
 func syncEngine(q *queue.Queue) {
 	for {
 		items, err := q.PopBatch(50)
@@ -494,10 +562,9 @@ func uploadQueuedItem(client *http.Client, item queue.TelemetryItem) (int, bool)
 }
 
 // runWindowOnlyMode is entered when DEVICEPULSE_MODE=window_only.
-// Used by the Linux per-user systemd service (devicepulse-agent-window.service)
-// which runs as the logged-in desktop user and has access to $DISPLAY /
-// $WAYLAND_DISPLAY. It collects ONLY active window focus data and pushes it
-// to the same shared SQLite queue that the root service drains.
+// Used by the per-user desktop service which runs as the logged-in user and has
+// access to the GUI session. It collects active window focus data, then pushes
+// it to the shared SQLite queue that the root service drains.
 //
 // All other collectors are disabled to avoid duplicate telemetry.
 func runWindowOnlyMode() {
@@ -559,7 +626,6 @@ func runWindowOnlyMode() {
 			time.Sleep(interval)
 			continue
 		}
-
 		finalPayload := map[string]interface{}{
 			"device_id": deviceID,
 			"timestamp": time.Now().Format(time.RFC3339),
