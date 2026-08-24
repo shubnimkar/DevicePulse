@@ -16,3 +16,6 @@ agent/agent_bin
 agent/main
 api/api
 api/api_bin
+devicepulse.db
+devicepulse.db-shm
+devicepulse.db-wal

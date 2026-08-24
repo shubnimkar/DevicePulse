@@ -17,7 +17,7 @@ Enterprise endpoint telemetry platform. Deploy a lightweight Go agent on any mac
 | Component | Stack | Default port |
 |-----------|-------|--------------|
 | `agent/`  | Go 1.25, gopsutil, modernc/sqlite | — |
-| `api/`    | Go 1.23, stdlib net/http, MongoDB driver | 8080 |
+| `api/`    | Go 1.23, stdlib net/http, MongoDB driver | 8000 |
 | `dashboard/` | Next.js 16, React 19, TypeScript, Tailwind 4 | 3000 |
 
 ---
@@ -37,7 +37,7 @@ cd api
 cp .env.example .env          # or create api/.env manually
 # Set MONGO_URI in api/.env
 go run .
-# Listening on :8080
+# Listening on :8000
 ```
 
 **`api/.env`**
@@ -127,7 +127,7 @@ The agent polls `GET /update/check` every hour (with a 30-second startup delay).
 ```bash
 cd agent
 
-# Local development (hits http://localhost:8080)
+# Local development (hits http://localhost:8000)
 go build -o agent_bin .
 
 # Production build — bake in the remote API URL and version
@@ -147,12 +147,12 @@ DEVICEPULSE_API_URL=https://your-ec2-domain.com ./agent_bin
 
 ## API
 
-Listens on `:8080`. All endpoints support CORS.
+Listens on `:8000`. All endpoints support CORS.
 
 In production the API sits behind nginx on EC2, which handles TLS termination:
 
 ```
-Agent ──HTTPS──► nginx (EC2, port 443) ──HTTP──► Go API (localhost:8080)
+Agent ──HTTPS──► nginx (EC2, port 443) ──HTTP──► Go API (localhost:8000)
 ```
 
 Get a free TLS certificate with Certbot:
@@ -328,8 +328,8 @@ DevicePulse/
 | `BROWSER_HISTORY_S3_PREFIX` | API | `browser-history` | S3 key prefix for browser-history archive objects |
 | `BROWSER_HISTORY_S3_ENDPOINT` | API | — | Optional S3-compatible endpoint, for example MinIO |
 | `BROWSER_HISTORY_S3_PATH_STYLE` | API | `false` | Force path-style S3 requests; automatically enabled when endpoint is set |
-| `DEVICEPULSE_API_URL` | Agent | `http://localhost:8080` | API endpoint override at runtime |
-| `NEXT_PUBLIC_API_URL` | Dashboard | `http://localhost:8080` | API URL used by the browser dashboard |
+| `DEVICEPULSE_API_URL` | Agent | `http://localhost:8000` | API endpoint override at runtime |
+| `NEXT_PUBLIC_API_URL` | Dashboard | `http://localhost:8000` | API URL used by the browser dashboard |
 | `NEXT_PUBLIC_DASHBOARD_TOKEN` | Dashboard | — | Dashboard token sent to read endpoints when `DASHBOARD_TOKEN` is configured |
 | `NEXT_PUBLIC_ADMIN_SECRET` | Dashboard | — | Admin secret sent for policy updates in simple dashboard deployments |
 
@@ -347,7 +347,7 @@ go build -ldflags "-X main.defaultAPIURL=https://your-ec2-domain.com" -o agent_b
 Agents ──HTTPS:443──► │  nginx (TLS)        │
                       │    │                │
                       │    ▼                │
-                      │  Go API :8080       │
+                      │  Go API :8000       │
                       │    │                │
                       │    ▼                │
                       │  MongoDB Atlas      │
@@ -358,8 +358,8 @@ Agents ──HTTPS:443──► │  nginx (TLS)        │
 ```
 
 1. Launch an EC2 instance (Ubuntu 22.04 recommended).
-2. Install Go, build the API binary, run it as a systemd service on `:8080`.
-3. Install nginx, point it at `localhost:8080`.
+2. Install Go, build the API binary, run it as a systemd service on `:8000`.
+3. Install nginx, point it at `localhost:8000`.
 4. Run `sudo certbot --nginx -d your-domain.com` for free TLS.
 5. Build agent binaries with `defaultAPIURL` set to `https://your-domain.com`.
 6. Distribute agent binaries to endpoint machines.

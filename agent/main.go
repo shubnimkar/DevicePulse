@@ -23,7 +23,7 @@ import (
 // defaultAPIURL is the fallback API endpoint. Override at build time with:
 //
 //	go build -ldflags "-X main.defaultAPIURL=https://your-ec2-domain.com"
-var defaultAPIURL = "http://localhost:8080"
+var defaultAPIURL = "http://localhost:8000"
 
 // agentVersion is the current binary version. Override at build time with:
 //

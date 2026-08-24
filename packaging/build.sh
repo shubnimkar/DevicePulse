@@ -10,7 +10,7 @@
 #
 # Options:
 #   --version   VERSION     Agent version string  (default: 0.0.1-dev)
-#   --api-url   URL         API endpoint to bake in (default: http://localhost:8080)
+#   --api-url   URL         API endpoint to bake in (default: http://localhost:8000)
 #   --package               Also build OS-specific installers (.pkg/.deb/.rpm)
 #   --platform  PLATFORM    Only build one platform: darwin|linux|windows
 #   --help                  Show this help
@@ -30,7 +30,7 @@ set -euo pipefail
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 VERSION="0.0.1-dev"
-API_URL="http://localhost:8080"
+API_URL="http://localhost:8000"
 DO_PACKAGE=false
 PLATFORM_FILTER=""
 

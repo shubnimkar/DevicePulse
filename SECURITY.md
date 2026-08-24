@@ -12,7 +12,7 @@ MONGO_URI=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/
 ADMIN_SECRET=<random-32-char-hex>
 
 # Optional
-PORT=8080
+PORT=8000
 ```
 
 **Generate a secure admin secret:**
@@ -27,7 +27,7 @@ openssl rand -hex 32
 ### Dashboard Environment (`dashboard/.env.local`)
 
 ```bash
-NEXT_PUBLIC_API_URL=http://localhost:8080
+NEXT_PUBLIC_API_URL=http://localhost:8000
 NEXT_PUBLIC_DASHBOARD_TOKEN=<same-value-as-api-DASHBOARD_TOKEN-if-configured>
 NEXT_PUBLIC_ADMIN_SECRET=<same-value-as-api-ADMIN_SECRET-for-policy-updates>
 ```
@@ -68,7 +68,7 @@ The following endpoints require the `X-Admin-Secret` header:
 
 **Example authenticated request:**
 ```bash
-curl -X POST http://localhost:8080/policy \
+curl -X POST http://localhost:8000/policy \
   -H "Content-Type: application/json" \
   -H "X-Admin-Secret: your-secret-here" \
   -d '{"sync_interval_seconds": 15}'
