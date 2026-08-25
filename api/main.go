@@ -2595,7 +2595,7 @@ func validateAgentBuildRequest(req *AgentBuildRequest) error {
 }
 
 func validateAgentReleaseS3Config() error {
-	if strings.TrimSpace(os.Getenv("AGENT_RELEASE_S3_BUCKET")) == "" && strings.TrimSpace(os.Getenv("S3_BUCKET")) == "" {
+	if agentReleaseBucketName() == "" {
 		return fmt.Errorf("agent release S3 bucket is not configured")
 	}
 	return nil
@@ -2684,10 +2684,7 @@ func publishAgentArtifacts(ctx context.Context, version string, artifacts []Agen
 }
 
 func agentReleaseS3Client(ctx context.Context) (*s3.Client, string, string, string, error) {
-	bucket := strings.TrimSpace(os.Getenv("AGENT_RELEASE_S3_BUCKET"))
-	if bucket == "" {
-		bucket = strings.TrimSpace(os.Getenv("S3_BUCKET"))
-	}
+	bucket := agentReleaseBucketName()
 	if bucket == "" {
 		return nil, "", "", "", fmt.Errorf("agent release S3 bucket is not configured")
 	}
@@ -2714,6 +2711,15 @@ func agentReleaseS3Client(ctx context.Context) (*s3.Client, string, string, stri
 	}
 	publicBase := strings.TrimRight(strings.TrimSpace(os.Getenv("AGENT_RELEASE_PUBLIC_BASE_URL")), "/")
 	return client, bucket, prefix, publicBase, nil
+}
+
+func agentReleaseBucketName() string {
+	for _, key := range []string{"AGENT_RELEASE_S3_BUCKET", "AGENT_RELEASE_BUCKET", "S3_BUCKET"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func artifactSuffix(platform, arch string) string {
