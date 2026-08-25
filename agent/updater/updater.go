@@ -26,9 +26,9 @@ import (
 // CheckResponse is the JSON returned by GET /update/check.
 type CheckResponse struct {
 	UpdateAvailable bool   `json:"update_available"`
-	Version         string `json:"version"`          // e.g. "1.2.0"
-	DownloadURL     string `json:"download_url"`     // full URL to new binary
-	Checksum        string `json:"checksum_sha256"`  // hex-encoded SHA-256 of the binary
+	Version         string `json:"version"`         // e.g. "1.2.0"
+	DownloadURL     string `json:"download_url"`    // full URL to new binary
+	Checksum        string `json:"checksum_sha256"` // hex-encoded SHA-256 of the binary
 }
 
 // Poller runs in a goroutine and checks for updates on the given interval.
@@ -38,7 +38,7 @@ type CheckResponse struct {
 //   - apiURL:        base URL of the DevicePulse API, e.g. "https://api.example.com"
 //   - apiKey:        X-API-Key header value for authentication
 //   - currentVersion: the version string baked into the running binary, e.g. "1.0.0"
-//   - interval:      how often to poll (recommended: 1h in production, 30s for dev)
+//   - interval:      how often to poll (recommended: 5m in production, 30s for dev)
 func Poller(apiURL, apiKey, currentVersion string, interval time.Duration) {
 	log.Printf("Updater: running version %s, polling every %v", currentVersion, interval)
 

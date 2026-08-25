@@ -2940,6 +2940,50 @@ func markAgentUpdateStatus(ctx context.Context, r *http.Request, status string) 
 	}
 }
 
+func compareAgentVersions(a, b string) int {
+	ap := agentVersionParts(a)
+	bp := agentVersionParts(b)
+	maxLen := len(ap)
+	if len(bp) > maxLen {
+		maxLen = len(bp)
+	}
+	for i := 0; i < maxLen; i++ {
+		av, bv := 0, 0
+		if i < len(ap) {
+			av = ap[i]
+		}
+		if i < len(bp) {
+			bv = bp[i]
+		}
+		if av > bv {
+			return 1
+		}
+		if av < bv {
+			return -1
+		}
+	}
+	return strings.Compare(a, b)
+}
+
+func agentVersionParts(v string) []int {
+	base := strings.FieldsFunc(v, func(r rune) bool {
+		return r == '-' || r == '+'
+	})
+	if len(base) == 0 {
+		return nil
+	}
+	rawParts := strings.Split(base[0], ".")
+	parts := make([]int, 0, len(rawParts))
+	for _, raw := range rawParts {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			break
+		}
+		parts = append(parts, n)
+	}
+	return parts
+}
+
 // ─── Release Publish Handler ───────────────────────────────────────────────────
 
 // POST /update/release  (admin use — publish a new agent release)
@@ -3082,6 +3126,90 @@ func releaseActivateHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(rel)
+}
+
+// POST /update/release/rollout-latest
+//
+// Makes the highest published version active for every OS/arch target and marks
+// older matching devices as waiting for update. Agents install it on their next
+// update check.
+func releaseRolloutLatestHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	db := mongoClient.Database(dbName)
+	coll := db.Collection("agent_releases")
+	cur, err := coll.Find(ctx, bson.M{})
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	defer cur.Close(ctx)
+
+	latestByTarget := map[string]AgentRelease{}
+	for cur.Next(ctx) {
+		var rel AgentRelease
+		if err := cur.Decode(&rel); err != nil {
+			continue
+		}
+		key := rel.OS + "/" + rel.Arch
+		existing, ok := latestByTarget[key]
+		if !ok || compareAgentVersions(rel.Version, existing.Version) > 0 ||
+			(compareAgentVersions(rel.Version, existing.Version) == 0 && rel.PublishedAt.After(existing.PublishedAt)) {
+			latestByTarget[key] = rel
+		}
+	}
+	if err := cur.Err(); err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	if len(latestByTarget) == 0 {
+		http.Error(w, "No agent releases are available", http.StatusNotFound)
+		return
+	}
+
+	now := time.Now()
+	activated := make([]AgentRelease, 0, len(latestByTarget))
+	devicesMarked := int64(0)
+	for _, rel := range latestByTarget {
+		rel.PublishedAt = now
+		if _, err := coll.InsertOne(ctx, rel); err != nil {
+			http.Error(w, "Database error", http.StatusInternalServerError)
+			return
+		}
+		activated = append(activated, rel)
+		res, err := db.Collection("devices").UpdateMany(ctx, bson.M{
+			"agent_os":      rel.OS,
+			"agent_arch":    rel.Arch,
+			"agent_version": bson.M{"$ne": rel.Version},
+		}, bson.M{"$set": bson.M{
+			"agent_update_status":       "update_requested",
+			"agent_update_requested_at": now,
+			"agent_target_version":      rel.Version,
+		}})
+		if err == nil {
+			devicesMarked += res.ModifiedCount
+		} else {
+			log.Printf("Rollout device mark failed for %s/%s: %v", rel.OS, rel.Arch, err)
+		}
+	}
+	sort.Slice(activated, func(i, j int) bool {
+		if activated[i].OS == activated[j].OS {
+			return activated[i].Arch < activated[j].Arch
+		}
+		return activated[i].OS < activated[j].OS
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"activated":      activated,
+		"devices_marked": devicesMarked,
+	})
 }
 
 func agentBuildsHandler(w http.ResponseWriter, r *http.Request) {
@@ -3842,6 +3970,7 @@ func registerRoutes(mux *http.ServeMux) {
 
 	mux.HandleFunc("/update/check", corsMiddleware(requireAgent(updateCheckHandler)))
 	mux.HandleFunc("/update/releases", corsMiddleware(requireRole(RoleAdmin, releaseListHandler)))
+	mux.HandleFunc("/update/release/rollout-latest", corsMiddleware(requireRole(RoleAdmin, releaseRolloutLatestHandler)))
 	mux.HandleFunc("/update/release/activate", corsMiddleware(requireRole(RoleAdmin, releaseActivateHandler)))
 	mux.HandleFunc("/update/release", corsMiddleware(requireRole(RoleAdmin, releasePublishHandler)))
 	mux.HandleFunc("/update/builds", corsMiddleware(requireRole(RoleAdmin, agentBuildsHandler)))

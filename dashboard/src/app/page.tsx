@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import type { FormEvent } from 'react';
-import { Device, AppFocusSummary, FocusCacheData, DeviceTab, EnterprisePolicy, DashboardUser, UserRole, HistoryEntry, BrowserHistoryArchiveData, DailyAppUsageData, AgentRelease, AgentBuildJob } from '@/types';
+import { Device, AppFocusSummary, FocusCacheData, DeviceTab, EnterprisePolicy, DashboardUser, UserRole, HistoryEntry, BrowserHistoryArchiveData, DailyAppUsageData, AgentRelease, AgentBuildJob, AgentRolloutResponse } from '@/types';
 import { API, readHeaders, adminHeaders, isOnline, timeAgo, primaryDisk } from '@/lib/utils';
 import DeviceCard from '@/components/DeviceCard';
 import type { BrowserHistoryRange } from '@/components/tabs/BrowserTab';
@@ -175,6 +175,7 @@ export default function Home() {
   const [agentBuildJobs, setAgentBuildJobs] = useState<AgentBuildJob[]>([]);
   const [buildForm, setBuildForm] = useState<AgentBuildForm>(DEFAULT_BUILD_FORM);
   const [releaseStatus, setReleaseStatus] = useState('');
+  const [rolloutSaving, setRolloutSaving] = useState(false);
   const [activeTab, setActiveTab]     = useState<Record<string, DeviceTab>>({});
   const [focusCache, setFocusCache]   = useState<Record<string, AppFocusSummary[]>>({});
   const [browserHistoryCache, setBrowserHistoryCache] = useState<BrowserHistoryCache>({});
@@ -626,6 +627,31 @@ export default function Home() {
       await fetchAgentReleases();
     } catch {
       setReleaseStatus('Could not activate agent release.');
+    }
+  };
+
+  const rolloutLatestAgents = async () => {
+    if (!canManageReleases || rolloutSaving) return;
+    setReleaseStatus('');
+    setRolloutSaving(true);
+    try {
+      const res = await apiFetch('/update/release/rollout-latest', {
+        method: 'POST',
+        headers: adminHeaders(),
+      });
+      if (!res.ok) {
+        setReleaseStatus(await readApiError(res));
+        return;
+      }
+      const data: AgentRolloutResponse = await res.json();
+      const targets = data.activated.map(rel => `${rel.os}/${rel.arch} ${rel.version}`).join(', ');
+      setReleaseStatus(`Rollout started for ${targets}. ${data.devices_marked} device${data.devices_marked === 1 ? '' : 's'} marked for update.`);
+      await fetchAgentReleases();
+      await fetchAll();
+    } catch {
+      setReleaseStatus('Could not start agent rollout.');
+    } finally {
+      setRolloutSaving(false);
     }
   };
 
@@ -1427,9 +1453,19 @@ export default function Home() {
                       <h2>Agent Rollouts</h2>
                       <p>Build, upload, publish, and roll back agent binaries for supported targets.</p>
                     </div>
-                    <button type="button" className="action-btn" onClick={() => { void fetchAgentReleases(); void fetchAgentBuildJobs(); }}>
-                      Refresh
-                    </button>
+                    <div className="release-header-actions">
+                      <button
+                        type="button"
+                        className="action-btn primary"
+                        onClick={() => void rolloutLatestAgents()}
+                        disabled={rolloutSaving || allAgentReleases.length === 0}
+                      >
+                        {rolloutSaving ? 'Starting...' : 'Update Agents'}
+                      </button>
+                      <button type="button" className="action-btn" onClick={() => { void fetchAgentReleases(); void fetchAgentBuildJobs(); }}>
+                        Refresh
+                      </button>
+                    </div>
                   </div>
 
                   <div className="release-grid">

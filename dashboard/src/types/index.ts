@@ -209,6 +209,11 @@ export interface AgentRelease {
   published_at?: string;
 }
 
+export interface AgentRolloutResponse {
+  activated: AgentRelease[];
+  devices_marked: number;
+}
+
 export interface AgentBuildArtifact {
   os: AgentRelease['os'];
   arch: string;

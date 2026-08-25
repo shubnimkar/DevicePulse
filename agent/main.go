@@ -144,8 +144,8 @@ func runAgent() {
 	}
 	log.Printf("Registered as device_id=%s", deviceID)
 
-	// 3. Start Update Poller — checks for new binary every hour
-	go updater.Poller(apiURL, apiKey, agentVersion, 1*time.Hour)
+	// 3. Start Update Poller — checks for new binary every few minutes
+	go updater.Poller(apiURL, apiKey, agentVersion, 5*time.Minute)
 
 	// 4. Start Policy Poller
 	go policyPoller()

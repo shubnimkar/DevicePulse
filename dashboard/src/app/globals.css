@@ -666,6 +666,14 @@ body {
   margin-top: 0.25rem;
 }
 
+.release-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
 .save-state {
   color: var(--green);
   background: var(--green-dim);
