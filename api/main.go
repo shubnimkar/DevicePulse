@@ -2916,7 +2916,7 @@ func updateCheckHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("Update available for %s/%s: %s → %s", agentOS, agentArch, currentVersion, latest.Version)
-	markAgentUpdateStatus(ctx, r, "update_available")
+	markAgentUpdateStatus(ctx, r, "update_available", latest.Version)
 	downloadURL := agentReleaseDownloadURL(ctx, latest)
 	log.Printf("Update check: device=%s %s/%s current=%s latest=%s update=true", checkingDeviceID, agentOS, agentArch, currentVersion, latest.Version)
 
@@ -2929,12 +2929,23 @@ func updateCheckHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func markAgentUpdateStatus(ctx context.Context, r *http.Request, status string) {
+func markAgentUpdateStatus(ctx context.Context, r *http.Request, status string, targetVersion ...string) {
 	deviceID, ok := resolveAPIKey(ctx, r.Header.Get("X-API-Key"))
 	if !ok {
 		return
 	}
-	update := bson.M{"$set": bson.M{"agent_update_status": status, "agent_last_checked": time.Now()}}
+	set := bson.M{"agent_update_status": status, "agent_last_checked": time.Now()}
+	unset := bson.M{}
+	if len(targetVersion) > 0 && targetVersion[0] != "" {
+		set["agent_target_version"] = targetVersion[0]
+	} else if status == "up_to_date" {
+		unset["agent_target_version"] = ""
+		unset["agent_update_requested_at"] = ""
+	}
+	update := bson.M{"$set": set}
+	if len(unset) > 0 {
+		update["$unset"] = unset
+	}
 	if _, err := mongoClient.Database(dbName).Collection("devices").UpdateOne(ctx, bson.M{"device_id": deviceID}, update); err != nil {
 		log.Printf("Agent update status failed for %s: %v", deviceID, err)
 	}
@@ -3183,6 +3194,7 @@ func releaseRolloutLatestHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		activated = append(activated, rel)
+		log.Printf("Agent rollout: activated %s for %s/%s", rel.Version, rel.OS, rel.Arch)
 		res, err := db.Collection("devices").UpdateMany(ctx, bson.M{
 			"agent_os":      rel.OS,
 			"agent_arch":    rel.Arch,
@@ -3194,6 +3206,7 @@ func releaseRolloutLatestHandler(w http.ResponseWriter, r *http.Request) {
 		}})
 		if err == nil {
 			devicesMarked += res.ModifiedCount
+			log.Printf("Agent rollout: marked %d device(s) for %s/%s -> %s", res.ModifiedCount, rel.OS, rel.Arch, rel.Version)
 		} else {
 			log.Printf("Rollout device mark failed for %s/%s: %v", rel.OS, rel.Arch, err)
 		}
@@ -3205,6 +3218,7 @@ func releaseRolloutLatestHandler(w http.ResponseWriter, r *http.Request) {
 		return activated[i].OS < activated[j].OS
 	})
 
+	log.Printf("Agent rollout: latest rollout requested, activated_targets=%d devices_marked=%d", len(activated), devicesMarked)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"activated":      activated,

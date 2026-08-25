@@ -185,6 +185,8 @@ export interface Device {
   agent_arch?: string;
   agent_last_checked?: string;
   agent_update_status?: 'checking' | 'up_to_date' | 'update_available' | string;
+  agent_update_requested_at?: string;
+  agent_target_version?: string;
   data?: DeviceData;
 }
 

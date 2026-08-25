@@ -1727,9 +1727,15 @@ export default function Home() {
                                   : online ? 'DevicePulse Agent' : 'Unknown agent'}
                               </strong>
                               <span>
-                                {[device.agent_os, device.agent_arch].filter(Boolean).join(', ') ||
-                                  device.agent_update_status ||
-                                  (online ? 'Waiting for version' : 'No check-in')}
+                                {device.agent_update_status === 'update_requested'
+                                  ? `Update requested${device.agent_target_version ? ` -> ${device.agent_target_version}` : ''}`
+                                  : device.agent_update_status === 'update_available'
+                                    ? `Update available${device.agent_target_version ? ` -> ${device.agent_target_version}` : ''}`
+                                    : device.agent_update_status === 'checking'
+                                      ? 'Checking for update'
+                                      : [device.agent_os, device.agent_arch].filter(Boolean).join(', ') ||
+                                        device.agent_update_status ||
+                                        (online ? 'Waiting for version' : 'No check-in')}
                               </span>
                             </div>
                           </td>
