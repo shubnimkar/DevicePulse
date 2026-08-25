@@ -646,6 +646,17 @@ func uploadQueuedItem(client *http.Client, item queue.TelemetryItem) (int, bool)
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusOK {
+		var result struct {
+			CheckUpdateNow bool `json:"check_update_now"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err == nil && result.CheckUpdateNow {
+			log.Printf("SyncEngine: server requested immediate agent update check")
+			go func() {
+				if err := updater.CheckAndUpdate(apiURL, apiKey, agentVersion); err != nil {
+					log.Printf("Updater: immediate check failed: %v", err)
+				}
+			}()
+		}
 		return resp.StatusCode, true
 	}
 

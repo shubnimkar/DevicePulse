@@ -40,14 +40,17 @@ func linuxProcFallbackActiveWindow() string {
 
 	type candidate struct {
 		name         string
-		rss          int64  // resident set size in pages (higher = more likely "active")
-		tty          int    // controlling tty (0 = no tty / daemon)
-		pgid         int    // process group ID
-		tpgid        int    // foreground process group of the tty
-		isForeground bool   // true when pgid == tpgid and tty != 0
+		rss          int64 // resident set size in pages (higher = more likely "active")
+		cpuJiffies   int64 // recent-ish process CPU from /proc stat totals
+		tty          int   // controlling tty (0 = no tty / daemon)
+		pgid         int   // process group ID
+		tpgid        int   // foreground process group of the tty
+		isForeground bool  // true when pgid == tpgid and tty != 0
+		isDesktopApp bool
 	}
 
 	var best candidate
+	var bestDesktop candidate
 
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -89,9 +92,11 @@ func linuxProcFallbackActiveWindow() string {
 		}
 
 		ttyNr, _ := strconv.Atoi(stat[6])
-		tpgid, _  := strconv.Atoi(stat[7])
-		pgid, _   := strconv.Atoi(stat[4])
-		rss, _    := strconv.ParseInt(stat[23], 10, 64)
+		tpgid, _ := strconv.Atoi(stat[7])
+		pgid, _ := strconv.Atoi(stat[4])
+		rss, _ := strconv.ParseInt(stat[23], 10, 64)
+		utime, _ := strconv.ParseInt(stat[13], 10, 64)
+		stime, _ := strconv.ParseInt(stat[14], 10, 64)
 
 		// A foreground process has pgid == tpgid of its tty.
 		isForeground := ttyNr != 0 && pgid == tpgid
@@ -103,16 +108,93 @@ func linuxProcFallbackActiveWindow() string {
 		if comm == "" {
 			continue
 		}
+		if cleanLinuxForegroundApp(comm) == "" {
+			continue
+		}
+
+		isDesktopApp := isLikelyLinuxDesktopApp(comm)
+		next := candidate{
+			name:         comm,
+			rss:          rss,
+			cpuJiffies:   utime + stime,
+			tty:          ttyNr,
+			pgid:         pgid,
+			tpgid:        tpgid,
+			isForeground: isForeground,
+			isDesktopApp: isDesktopApp,
+		}
 
 		// Prefer foreground processes; among those, the one with the largest RSS.
 		if isForeground && (!best.isForeground || rss > best.rss) {
-			best = candidate{name: comm, rss: rss, tty: ttyNr, pgid: pgid, tpgid: tpgid, isForeground: true}
+			best = next
 		} else if !best.isForeground && rss > best.rss {
-			best = candidate{name: comm, rss: rss}
+			best = next
+		}
+
+		if isDesktopApp && betterLinuxDesktopCandidate(next, bestDesktop) {
+			bestDesktop = next
 		}
 	}
 
+	if best.isForeground {
+		return best.name
+	}
+	if bestDesktop.name != "" {
+		return bestDesktop.name
+	}
+	if best.name != "" && best.tty != 0 {
+		return best.name
+	}
 	return best.name
+}
+
+func isLikelyLinuxDesktopApp(name string) bool {
+	key := strings.ToLower(strings.TrimSpace(name))
+	if key == "" {
+		return false
+	}
+	known := map[string]struct{}{
+		"chrome":          {},
+		"chromium":        {},
+		"firefox":         {},
+		"code":            {},
+		"code-insiders":   {},
+		"mongodb compass": {},
+		"mongodb-compass": {},
+		"slack":           {},
+		"teams":           {},
+		"zoom":            {},
+		"discord":         {},
+		"notion":          {},
+		"postman":         {},
+		"pgadmin4":        {},
+		"libreoffice":     {},
+		"soffice.bin":     {},
+		"gnome-terminal-": {},
+		"gnome-terminal":  {},
+		"konsole":         {},
+		"tilix":           {},
+		"alacritty":       {},
+		"kitty":           {},
+		"terminator":      {},
+	}
+	if _, ok := known[key]; ok {
+		return true
+	}
+	return strings.Contains(key, "chrome") ||
+		strings.Contains(key, "firefox") ||
+		strings.Contains(key, "mongodb") ||
+		strings.Contains(key, "code")
+}
+
+func betterLinuxDesktopCandidate(next, current candidate) bool {
+	if current.name == "" {
+		return true
+	}
+	if next.cpuJiffies != current.cpuJiffies {
+		return next.cpuJiffies > current.cpuJiffies
+	}
+	return next.rss > current.rss
 }
 
 // ── /proc helpers ─────────────────────────────────────────────────────────────
@@ -173,9 +255,9 @@ func readProcStat(path string) []string {
 		return nil
 	}
 
-	pid   := strings.TrimSpace(s[:lp])
-	comm  := s[lp+1 : rp]
-	rest  := strings.TrimSpace(s[rp+1:])
+	pid := strings.TrimSpace(s[:lp])
+	comm := s[lp+1 : rp]
+	rest := strings.TrimSpace(s[rp+1:])
 	fields := strings.Fields(rest)
 
 	// Reconstruct: pid, comm, <rest fields...>

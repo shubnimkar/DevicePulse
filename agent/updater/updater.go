@@ -46,14 +46,14 @@ func Poller(apiURL, apiKey, currentVersion string, interval time.Duration) {
 	time.Sleep(30 * time.Second)
 
 	for {
-		if err := checkAndUpdate(apiURL, apiKey, currentVersion); err != nil {
+		if err := CheckAndUpdate(apiURL, apiKey, currentVersion); err != nil {
 			log.Printf("Updater: check failed: %v", err)
 		}
 		time.Sleep(interval)
 	}
 }
 
-func checkAndUpdate(apiURL, apiKey, currentVersion string) error {
+func CheckAndUpdate(apiURL, apiKey, currentVersion string) error {
 	// Build check URL with current version + platform so the server can
 	// return the right binary for this OS/arch.
 	url := fmt.Sprintf("%s/update/check?version=%s&os=%s&arch=%s",

@@ -199,6 +199,7 @@ export default function Home() {
   const [buildForm, setBuildForm] = useState<AgentBuildForm>(DEFAULT_BUILD_FORM);
   const [releaseStatus, setReleaseStatus] = useState('');
   const [rolloutSaving, setRolloutSaving] = useState(false);
+  const [showAllBuildHistory, setShowAllBuildHistory] = useState(false);
   const [activeTab, setActiveTab]     = useState<Record<string, DeviceTab>>({});
   const [focusCache, setFocusCache]   = useState<Record<string, AppFocusSummary[]>>({});
   const [browserHistoryCache, setBrowserHistoryCache] = useState<BrowserHistoryCache>({});
@@ -715,7 +716,7 @@ export default function Home() {
       }
       const data: AgentRolloutResponse = await res.json();
       const targets = data.activated.map(rel => `${rel.os}/${rel.arch} ${rel.version}`).join(', ');
-      setReleaseStatus(`Rollout started for ${targets}. ${data.devices_marked} device${data.devices_marked === 1 ? '' : 's'} marked for update.`);
+      setReleaseStatus(`Immediate rollout started for ${targets}. ${data.devices_marked} device${data.devices_marked === 1 ? '' : 's'} will check on their next heartbeat.`);
       await fetchAgentReleases();
       await fetchAll();
     } catch {
@@ -928,6 +929,8 @@ export default function Home() {
         return true;
       });
   };
+  const visibleBuildJobs = showAllBuildHistory ? agentBuildJobs : agentBuildJobs.slice(0, 2);
+  const hiddenBuildJobCount = Math.max(0, agentBuildJobs.length - visibleBuildJobs.length);
 
   const toggleBuildPlatform = (os: AgentRelease['os'], checked: boolean) => {
     setBuildForm(form => ({
@@ -1631,8 +1634,19 @@ export default function Home() {
 
                   {agentBuildJobs.length > 0 && (
                     <div className="build-history">
-                      <div className="sub-section-title">Build History</div>
-                      {agentBuildJobs.map(job => (
+                      <div className="build-history-head">
+                        <div className="sub-section-title">Build History</div>
+                        {agentBuildJobs.length > 2 && (
+                          <button
+                            type="button"
+                            className="action-btn compact"
+                            onClick={() => setShowAllBuildHistory(value => !value)}
+                          >
+                            {showAllBuildHistory ? 'Hide Older' : `Show ${hiddenBuildJobCount} Older`}
+                          </button>
+                        )}
+                      </div>
+                      {visibleBuildJobs.map(job => (
                         <div key={job.id} className={`build-job build-${job.status}`}>
                           <div className="build-job-head">
                             <strong>{job.version}</strong>

@@ -2249,7 +2249,18 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	log.Printf("Ingested telemetry for %s", authDeviceID)
-	w.WriteHeader(http.StatusOK)
+	response := bson.M{"ok": true}
+	var deviceState bson.M
+	if err := collDevices.FindOne(ctx, bson.M{"device_id": authDeviceID}).Decode(&deviceState); err == nil {
+		if status, _ := deviceState["agent_update_status"].(string); status == "update_requested" {
+			response["check_update_now"] = true
+			if target, _ := deviceState["agent_target_version"].(string); target != "" {
+				response["target_version"] = target
+			}
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
 }
 
 func applyBrowserHistoryDelta(setDoc bson.M, v interface{}) {

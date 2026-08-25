@@ -9,6 +9,23 @@ interface Props {
   cachedFocus: AppFocusSummary[];
 }
 
+const IGNORED_APP_USAGE_NAMES = new Set([
+  'apt-check',
+  'apt.systemd.daily',
+  'packagekitd',
+  'snapd',
+  'fwupd',
+  'devicepulse-age',
+  'devicepulse-agent',
+]);
+
+function isVisibleAppUsageName(name: string): boolean {
+  const key = name.trim().toLowerCase().replace(/\.service$/, '');
+  if (!key) return false;
+  if (IGNORED_APP_USAGE_NAMES.has(key)) return false;
+  return !key.startsWith('devicepulse-');
+}
+
 export default function OverviewTab({ data, cachedFocus }: Props) {
   const hw      = data?.HardwareStats;
   const cpu     = hw?.cpu;
@@ -23,10 +40,12 @@ export default function OverviewTab({ data, cachedFocus }: Props) {
   const activeWin = data?.ActiveWindowTracker;
 
   // Merge focus summaries
-  const liveSummaries = activeWin?.cumulative_summaries ?? activeWin?.app_summaries ?? [];
+  const liveSummaries = (activeWin?.cumulative_summaries ?? activeWin?.app_summaries ?? [])
+    .filter(e => isVisibleAppUsageName(e.app_name));
   const merged = new Map<string, AppFocusSummary>();
   for (const e of liveSummaries) merged.set(e.app_name, { ...e });
   for (const e of cachedFocus) {
+    if (!isVisibleAppUsageName(e.app_name)) continue;
     const ex = merged.get(e.app_name);
     if (!ex || e.total_focus_seconds > ex.total_focus_seconds) merged.set(e.app_name, { ...e });
   }
@@ -166,7 +185,7 @@ export default function OverviewTab({ data, cachedFocus }: Props) {
         <div>
           <div className="section-title">
             App Usage
-            {activeWin?.current_app && (
+            {activeWin?.current_app && isVisibleAppUsageName(activeWin.current_app) && (
               <span className="focus-live-tag">
                 <span className="live-dot" />
                 {activeWin.current_app}
