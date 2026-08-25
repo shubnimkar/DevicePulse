@@ -6,16 +6,30 @@ dashboard/.env.local
 **/.env.*.local
 
 # ── Agent runtime data (contains api_key + telemetry) ────────────────────────
+agent/data/
 agent/data/registration.json
 agent/data/devicepulse.db
 agent/data/devicepulse.db-shm
 agent/data/devicepulse.db-wal
+agent/data/browser_history_state.json
+agent/data/*.log
 
 # ── Build artifacts ───────────────────────────────────────────────────────────
+dist/
+dashboard/node_modules/
+dashboard/.next/
+node_modules/
+.next/
 agent/agent_bin
 agent/main
 api/api
 api/api_bin
+*.deb
+*.rpm
+*.pkg
+*.msi
+*.exe
+*.sha256
 devicepulse.db
 devicepulse.db-shm
 devicepulse.db-wal

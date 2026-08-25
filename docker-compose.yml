@@ -1,0 +1,28 @@
+services:
+  api:
+    build:
+      context: ./api
+    image: devicepulse-api:local
+    env_file:
+      - ./api/.env
+    environment:
+      PORT: "8000"
+      DASHBOARD_ORIGIN: ${DASHBOARD_ORIGIN:-http://localhost:3000}
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: ./dashboard
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL-http://localhost:8000}
+    image: devicepulse-dashboard:local
+    environment:
+      PORT: "3000"
+      NODE_ENV: production
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    restart: unless-stopped

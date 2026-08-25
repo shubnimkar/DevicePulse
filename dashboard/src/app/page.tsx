@@ -65,6 +65,15 @@ function browserHistoryQuery(range: BrowserHistoryRange): string {
   return params.toString();
 }
 
+async function readApiError(res: Response): Promise<string> {
+  const text = await res.text();
+  const trimmed = text.trim();
+  if (trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html')) {
+    return `API route returned ${res.status}. Check that nginx proxies API paths to the DevicePulse API.`;
+  }
+  return trimmed || `Request failed with status ${res.status}.`;
+}
+
 // ── SVG icons ────────────────────────────────────────────────────────────────
 const IconGrid = () => (
   <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
@@ -285,7 +294,7 @@ export default function Home() {
         body: JSON.stringify(authForm),
       });
       if (!res.ok) {
-        setAuthError(await res.text());
+        setAuthError(await readApiError(res));
         return;
       }
       const data = await res.json();

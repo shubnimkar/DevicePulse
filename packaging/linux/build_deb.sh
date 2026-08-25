@@ -21,10 +21,31 @@ if [[ ! -f "$BINARY" ]]; then
   exit 1
 fi
 
-if ! command -v dpkg-deb &>/dev/null; then
-  echo "  ✗ dpkg-deb not found. Install with: sudo apt-get install dpkg"
+HAS_DPKG_DEB=false
+if command -v dpkg-deb &>/dev/null; then
+  HAS_DPKG_DEB=true
+elif ! command -v tar &>/dev/null; then
+  echo "  ✗ dpkg-deb not found, and fallback tool tar is unavailable."
+  echo "    Install with: sudo apt-get install dpkg"
   exit 1
 fi
+
+file_size() {
+  stat -f%z "$1" 2>/dev/null || stat -c%s "$1"
+}
+
+append_ar_member() {
+  local archive="$1"
+  local file="$2"
+  local name="$3"
+  local size
+  size="$(file_size "$file")"
+  printf '%-16.16s%-12s%-6s%-6s%-8s%-10s`\n' "$name" 0 0 0 100644 "$size" >> "$archive"
+  cat "$file" >> "$archive"
+  if (( size % 2 == 1 )); then
+    printf '\n' >> "$archive"
+  fi
+}
 
 # ── Directory layout ──────────────────────────────────────────────────────────
 rm -rf "$PKG_DIR"
@@ -130,7 +151,22 @@ chmod 0755 "$PKG_DIR/DEBIAN/postrm"
 
 # ── Build the .deb ────────────────────────────────────────────────────────────
 OUTPUT="$DIST_DIR/${PKG_NAME}_${VERSION}_${ARCH}.deb"
-dpkg-deb --build --root-owner-group "$PKG_DIR" "$OUTPUT"
+if [[ "$HAS_DPKG_DEB" == true ]]; then
+  dpkg-deb --build --root-owner-group "$PKG_DIR" "$OUTPUT"
+else
+  BUILD_DIR="$DIST_DIR/deb-archive-${VERSION}"
+  rm -rf "$BUILD_DIR"
+  mkdir -p "$BUILD_DIR/control" "$BUILD_DIR/data"
+  cp -R "$PKG_DIR/DEBIAN/." "$BUILD_DIR/control/"
+  (cd "$PKG_DIR" && tar --exclude='./DEBIAN' -czf "$BUILD_DIR/data.tar.gz" .)
+  (cd "$BUILD_DIR/control" && tar -czf "$BUILD_DIR/control.tar.gz" .)
+  printf '2.0\n' > "$BUILD_DIR/debian-binary"
+  printf '!<arch>\n' > "$OUTPUT"
+  append_ar_member "$OUTPUT" "$BUILD_DIR/debian-binary" debian-binary
+  append_ar_member "$OUTPUT" "$BUILD_DIR/control.tar.gz" control.tar.gz
+  append_ar_member "$OUTPUT" "$BUILD_DIR/data.tar.gz" data.tar.gz
+  rm -rf "$BUILD_DIR"
+fi
 rm -rf "$PKG_DIR"
 
 echo "  ✓ $OUTPUT"

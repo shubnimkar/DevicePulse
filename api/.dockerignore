@@ -1,0 +1,6 @@
+.env
+.env.*
+api
+api_bin
+*.test
+Dockerfile
