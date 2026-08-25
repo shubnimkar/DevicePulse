@@ -1,5 +1,7 @@
 // ─── Utility helpers ──────────────────────────────────────────────────────────
 
+import type { DiskStat } from '@/types';
+
 export const API = process.env.NEXT_PUBLIC_API_URL ?? '';
 
 export function readHeaders(): HeadersInit {
@@ -86,6 +88,20 @@ export function metricColor(pct: number): string {
   if (pct > 85) return 'var(--red)';
   if (pct > 65) return 'var(--yellow)';
   return 'var(--green)';
+}
+
+export function isSystemDiskMount(mount?: string): boolean {
+  if (!mount) return true;
+  return ['/proc', '/sys', '/dev', '/run', '/snap'].some(prefix => mount === prefix || mount.startsWith(`${prefix}/`));
+}
+
+export function displayDisks(disks?: DiskStat[]): DiskStat[] {
+  return (disks ?? []).filter(disk => !isSystemDiskMount(disk.mount));
+}
+
+export function primaryDisk(disks?: DiskStat[]): DiskStat | undefined {
+  const visible = displayDisks(disks);
+  return visible.find(disk => disk.mount === '/') ?? visible[0];
 }
 
 export function getOSIcon(os?: string): string {

@@ -1,7 +1,7 @@
 'use client';
 
 import { AppFocusSummary, DeviceData } from '@/types';
-import { formatBytes, formatDuration, metricColor } from '@/lib/utils';
+import { formatBytes, formatDuration, metricColor, primaryDisk } from '@/lib/utils';
 import GaugeBar from '@/components/GaugeBar';
 
 interface Props {
@@ -13,7 +13,7 @@ export default function OverviewTab({ data, cachedFocus }: Props) {
   const hw      = data?.HardwareStats;
   const cpu     = hw?.cpu;
   const ram     = hw?.ram;
-  const disk    = hw?.disks?.[0];
+  const disk    = primaryDisk(hw?.disks);
   const battery = hw?.battery;
   const procs   = data?.ProcessMonitor?.top_processes ?? [];
   const services = data?.Services?.services ?? [];
@@ -161,11 +161,11 @@ export default function OverviewTab({ data, cachedFocus }: Props) {
         </div>
       )}
 
-      {/* Focus */}
+      {/* App Usage */}
       {topApps.length > 0 && (
         <div>
           <div className="section-title">
-            App Focus
+            App Usage
             {activeWin?.current_app && (
               <span className="focus-live-tag">
                 <span className="live-dot" />

@@ -1,23 +1,26 @@
 FROM golang:1.24-bookworm AS builder
 
-WORKDIR /src
+WORKDIR /src/api
 
-COPY go.mod go.sum ./
+COPY api/go.mod api/go.sum ./
 RUN go mod download
 
-COPY . .
+COPY api/. .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/devicepulse-api .
 
-FROM debian:bookworm-slim AS runtime
+FROM golang:1.24-bookworm AS runtime
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates \
+  && apt-get install -y --no-install-recommends ca-certificates bash \
   && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+WORKDIR /workspace
 COPY --from=builder /out/devicepulse-api /usr/local/bin/devicepulse-api
+COPY agent ./agent
+COPY packaging ./packaging
 
 ENV PORT=8000
+ENV AGENT_BUILD_ROOT=/workspace
 EXPOSE 8000
 
 CMD ["devicepulse-api"]

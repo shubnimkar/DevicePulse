@@ -31,7 +31,7 @@ export default function FocusTab({ data, cachedSummaries }: Props) {
       {currentApp && (
         <div className="focus-current">
           <span className="live-dot" />
-          <span className="focus-current-label">Currently in focus:</span>
+          <span className="focus-current-label">Current app:</span>
           <span className="focus-current-app">{currentApp}</span>
         </div>
       )}
@@ -58,7 +58,7 @@ export default function FocusTab({ data, cachedSummaries }: Props) {
                   color={isActive ? 'var(--green)' : 'var(--blue)'}
                   height={3}
                 />
-                <div className="focus-pct">{pct.toFixed(1)}% of tracked time</div>
+                <div className="focus-pct">{pct.toFixed(1)}% of app usage time</div>
               </div>
             );
           })}

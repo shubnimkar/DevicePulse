@@ -16,7 +16,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -2153,6 +2155,46 @@ type AgentRelease struct {
 	PublishedAt time.Time `bson:"published_at"     json:"published_at"`
 }
 
+type AgentBuildArtifact struct {
+	OS          string `bson:"os"              json:"os"`
+	Arch        string `bson:"arch"            json:"arch"`
+	FileName    string `bson:"file_name"       json:"file_name"`
+	S3Key       string `bson:"s3_key"          json:"s3_key"`
+	DownloadURL string `bson:"download_url"    json:"download_url"`
+	Checksum    string `bson:"checksum_sha256" json:"checksum_sha256"`
+	SizeBytes   int64  `bson:"size_bytes"      json:"size_bytes"`
+}
+
+type AgentBuildJob struct {
+	ID         primitive.ObjectID   `bson:"_id,omitempty"    json:"id"`
+	Version    string               `bson:"version"          json:"version"`
+	APIURL     string               `bson:"api_url"          json:"api_url"`
+	Platforms  []string             `bson:"platforms"        json:"platforms"`
+	Archs      []string             `bson:"archs"            json:"archs"`
+	Status     string               `bson:"status"           json:"status"`
+	Error      string               `bson:"error,omitempty"  json:"error,omitempty"`
+	Logs       []string             `bson:"logs"             json:"logs"`
+	Artifacts  []AgentBuildArtifact `bson:"artifacts"        json:"artifacts"`
+	CreatedAt  time.Time            `bson:"created_at"       json:"created_at"`
+	UpdatedAt  time.Time            `bson:"updated_at"       json:"updated_at"`
+	StartedAt  *time.Time           `bson:"started_at,omitempty" json:"started_at,omitempty"`
+	FinishedAt *time.Time           `bson:"finished_at,omitempty" json:"finished_at,omitempty"`
+}
+
+type AgentBuildRequest struct {
+	Version   string   `json:"version"`
+	APIURL    string   `json:"api_url"`
+	Platforms []string `json:"platforms"`
+	Archs     []string `json:"archs"`
+}
+
+var (
+	agentBuildMu      sync.Mutex
+	agentVersionRegex = regexp.MustCompile(`^[0-9]+(\.[0-9]+){1,3}([\-+][0-9A-Za-z.-]+)?$`)
+	validAgentOS      = map[string]bool{"linux": true, "windows": true, "darwin": true}
+	validAgentArch    = map[string]bool{"amd64": true, "arm64": true}
+)
+
 // GET /update/check?version=<current>&os=<goos>&arch=<goarch>
 //
 // Returns:
@@ -2244,6 +2286,542 @@ func releasePublishHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Agent release published: %s %s/%s", rel.Version, rel.OS, rel.Arch)
 	w.WriteHeader(http.StatusCreated)
+}
+
+// GET /update/releases
+//
+// Returns the latest published agent release for each OS/arch pair.
+func releaseListHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	coll := mongoClient.Database(dbName).Collection("agent_releases")
+	opts := options.Find().SetSort(bson.D{
+		{Key: "os", Value: 1},
+		{Key: "arch", Value: 1},
+		{Key: "published_at", Value: -1},
+	})
+	cur, err := coll.Find(ctx, bson.M{}, opts)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	defer cur.Close(ctx)
+
+	latestByTarget := map[string]AgentRelease{}
+	allReleases := []AgentRelease{}
+	for cur.Next(ctx) {
+		var rel AgentRelease
+		if err := cur.Decode(&rel); err != nil {
+			continue
+		}
+		allReleases = append(allReleases, rel)
+		key := rel.OS + "/" + rel.Arch
+		if _, exists := latestByTarget[key]; !exists {
+			latestByTarget[key] = rel
+		}
+	}
+	if err := cur.Err(); err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	releases := make([]AgentRelease, 0, len(latestByTarget))
+	for _, rel := range latestByTarget {
+		releases = append(releases, rel)
+	}
+	sort.Slice(releases, func(i, j int) bool {
+		if releases[i].OS == releases[j].OS {
+			return releases[i].Arch < releases[j].Arch
+		}
+		return releases[i].OS < releases[j].OS
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"releases": releases, "all_releases": allReleases})
+}
+
+// POST /update/release/activate
+//
+// Makes a previously published release active by copying it with a fresh
+// published_at timestamp. Agents use the newest release per OS/arch.
+func releaseActivateHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		OS      string `json:"os"`
+		Arch    string `json:"arch"`
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Bad JSON", http.StatusBadRequest)
+		return
+	}
+	req.OS = strings.TrimSpace(req.OS)
+	req.Arch = strings.TrimSpace(req.Arch)
+	req.Version = strings.TrimSpace(req.Version)
+	if !validAgentOS[req.OS] || !validAgentArch[req.Arch] || req.Version == "" {
+		http.Error(w, "os, arch and version are required", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	coll := mongoClient.Database(dbName).Collection("agent_releases")
+	var rel AgentRelease
+	filter := bson.M{"os": req.OS, "arch": req.Arch, "version": req.Version}
+	opts := options.FindOne().SetSort(bson.D{{Key: "published_at", Value: -1}})
+	if err := coll.FindOne(ctx, filter, opts).Decode(&rel); err != nil {
+		http.Error(w, "Release not found", http.StatusNotFound)
+		return
+	}
+	rel.PublishedAt = time.Now()
+	if _, err := coll.InsertOne(ctx, rel); err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(rel)
+}
+
+func agentBuildsHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		listAgentBuildJobs(w, r)
+	case http.MethodPost:
+		createAgentBuildJob(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func listAgentBuildJobs(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	coll := mongoClient.Database(dbName).Collection("agent_build_jobs")
+	opts := options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}).SetLimit(20)
+	cur, err := coll.Find(ctx, bson.M{}, opts)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	defer cur.Close(ctx)
+
+	jobs := []AgentBuildJob{}
+	for cur.Next(ctx) {
+		var job AgentBuildJob
+		if err := cur.Decode(&job); err == nil {
+			jobs = append(jobs, job)
+		}
+	}
+	if err := cur.Err(); err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"jobs": jobs})
+}
+
+func createAgentBuildJob(w http.ResponseWriter, r *http.Request) {
+	var req AgentBuildRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Bad JSON", http.StatusBadRequest)
+		return
+	}
+	if req.APIURL == "" {
+		req.APIURL = publicAPIURLFromRequest(r)
+	}
+	if err := validateAgentBuildRequest(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateAgentReleaseS3Config(); err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+
+	now := time.Now()
+	job := AgentBuildJob{
+		ID:        primitive.NewObjectID(),
+		Version:   req.Version,
+		APIURL:    req.APIURL,
+		Platforms: req.Platforms,
+		Archs:     req.Archs,
+		Status:    "queued",
+		Logs:      []string{"Queued build"},
+		Artifacts: []AgentBuildArtifact{},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	coll := mongoClient.Database(dbName).Collection("agent_build_jobs")
+	if _, err := coll.InsertOne(ctx, job); err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	go runAgentBuildJob(job.ID)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(job)
+}
+
+func runAgentBuildJob(jobID primitive.ObjectID) {
+	agentBuildMu.Lock()
+	defer agentBuildMu.Unlock()
+
+	ctx := context.Background()
+	coll := mongoClient.Database(dbName).Collection("agent_build_jobs")
+
+	var job AgentBuildJob
+	if err := coll.FindOne(ctx, bson.M{"_id": jobID}).Decode(&job); err != nil {
+		log.Printf("Agent build job %s missing: %v", jobID.Hex(), err)
+		return
+	}
+
+	started := time.Now()
+	setAgentBuildJob(ctx, jobID, bson.M{"status": "building", "started_at": started, "updated_at": started})
+	appendAgentBuildLog(ctx, jobID, "Build started")
+
+	distDir, err := os.MkdirTemp("", "devicepulse-agent-build-*")
+	if err != nil {
+		failAgentBuildJob(ctx, jobID, fmt.Sprintf("create temp dir: %v", err))
+		return
+	}
+	defer os.RemoveAll(distDir)
+
+	buildRoot := strings.TrimSpace(os.Getenv("AGENT_BUILD_ROOT"))
+	if buildRoot == "" {
+		buildRoot = "."
+	}
+	buildScript := filepath.Join(buildRoot, "packaging", "build.sh")
+	if _, err := os.Stat(buildScript); err != nil {
+		failAgentBuildJob(ctx, jobID, fmt.Sprintf("build script not found at %s", buildScript))
+		return
+	}
+
+	for _, platform := range job.Platforms {
+		appendAgentBuildLog(ctx, jobID, fmt.Sprintf("Building %s targets", platform))
+		cmdCtx, cancel := context.WithTimeout(ctx, 20*time.Minute)
+		cmd := exec.CommandContext(cmdCtx, "bash", buildScript, "--version", job.Version, "--api-url", job.APIURL, "--platform", platform)
+		cmd.Dir = buildRoot
+		cmd.Env = append(os.Environ(),
+			"DEVICEPULSE_DIST_DIR="+distDir,
+			"GOCACHE=/tmp/devicepulse-go-build-cache",
+		)
+		output, err := cmd.CombinedOutput()
+		cancel()
+		if len(output) > 0 {
+			appendAgentBuildLog(ctx, jobID, trimBuildOutput(string(output)))
+		}
+		if err != nil {
+			failAgentBuildJob(ctx, jobID, fmt.Sprintf("build %s failed: %v", platform, err))
+			return
+		}
+	}
+
+	setAgentBuildJob(ctx, jobID, bson.M{"status": "uploading", "updated_at": time.Now()})
+	appendAgentBuildLog(ctx, jobID, "Uploading artifacts to S3")
+
+	artifacts, err := uploadAgentBuildArtifacts(ctx, job, distDir)
+	if err != nil {
+		failAgentBuildJob(ctx, jobID, err.Error())
+		return
+	}
+
+	setAgentBuildJob(ctx, jobID, bson.M{"status": "publishing", "artifacts": artifacts, "updated_at": time.Now()})
+	if err := publishAgentArtifacts(ctx, job.Version, artifacts); err != nil {
+		failAgentBuildJob(ctx, jobID, err.Error())
+		return
+	}
+
+	finished := time.Now()
+	setAgentBuildJob(ctx, jobID, bson.M{"status": "published", "finished_at": finished, "updated_at": finished})
+	appendAgentBuildLog(ctx, jobID, "Published release metadata")
+}
+
+func validateAgentBuildRequest(req *AgentBuildRequest) error {
+	req.Version = strings.TrimSpace(req.Version)
+	req.APIURL = strings.TrimSpace(req.APIURL)
+	if !agentVersionRegex.MatchString(req.Version) {
+		return fmt.Errorf("version must look like 1.2.3")
+	}
+	parsed, err := url.Parse(req.APIURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") {
+		return fmt.Errorf("api_url must be a valid http(s) URL")
+	}
+	req.APIURL = strings.TrimRight(req.APIURL, "/")
+	req.Platforms = uniqueStrings(req.Platforms)
+	req.Archs = uniqueStrings(req.Archs)
+	if len(req.Platforms) == 0 {
+		return fmt.Errorf("choose at least one platform")
+	}
+	if len(req.Archs) == 0 {
+		return fmt.Errorf("choose at least one architecture")
+	}
+	for _, platform := range req.Platforms {
+		if !validAgentOS[platform] {
+			return fmt.Errorf("unsupported platform: %s", platform)
+		}
+	}
+	for _, arch := range req.Archs {
+		if !validAgentArch[arch] {
+			return fmt.Errorf("unsupported architecture: %s", arch)
+		}
+	}
+	for _, platform := range req.Platforms {
+		for _, arch := range req.Archs {
+			if artifactSuffix(platform, arch) == "" {
+				return fmt.Errorf("unsupported build target: %s/%s", platform, arch)
+			}
+		}
+	}
+	return nil
+}
+
+func validateAgentReleaseS3Config() error {
+	if strings.TrimSpace(os.Getenv("AGENT_RELEASE_S3_BUCKET")) == "" && strings.TrimSpace(os.Getenv("S3_BUCKET")) == "" {
+		return fmt.Errorf("agent release S3 bucket is not configured")
+	}
+	return nil
+}
+
+func uploadAgentBuildArtifacts(ctx context.Context, job AgentBuildJob, distDir string) ([]AgentBuildArtifact, error) {
+	client, bucket, prefix, publicBase, err := agentReleaseS3Client(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	artifacts := []AgentBuildArtifact{}
+	for _, platform := range job.Platforms {
+		for _, arch := range job.Archs {
+			suffix := artifactSuffix(platform, arch)
+			if suffix == "" {
+				continue
+			}
+			fileName := fmt.Sprintf("devicepulse-agent-%s-%s", job.Version, suffix)
+			path := filepath.Join(distDir, fileName)
+			info, err := os.Stat(path)
+			if err != nil {
+				return nil, fmt.Errorf("expected artifact missing: %s", fileName)
+			}
+			checksum, err := sha256File(path)
+			if err != nil {
+				return nil, fmt.Errorf("checksum %s: %w", fileName, err)
+			}
+			key := strings.Trim(strings.TrimSpace(prefix), "/")
+			if key != "" {
+				key += "/"
+			}
+			key += fmt.Sprintf("%s/%s/%s/%s", job.Version, platform, arch, fileName)
+
+			f, err := os.Open(path)
+			if err != nil {
+				return nil, fmt.Errorf("open %s: %w", fileName, err)
+			}
+			_, putErr := client.PutObject(ctx, &s3.PutObjectInput{
+				Bucket:        aws.String(bucket),
+				Key:           aws.String(key),
+				Body:          f,
+				ContentLength: aws.Int64(info.Size()),
+				ContentType:   aws.String("application/octet-stream"),
+			})
+			f.Close()
+			if putErr != nil {
+				return nil, fmt.Errorf("upload %s: %w", fileName, putErr)
+			}
+
+			artifacts = append(artifacts, AgentBuildArtifact{
+				OS:          platform,
+				Arch:        arch,
+				FileName:    fileName,
+				S3Key:       key,
+				DownloadURL: agentReleasePublicURL(publicBase, bucket, key),
+				Checksum:    checksum,
+				SizeBytes:   info.Size(),
+			})
+		}
+	}
+	if len(artifacts) == 0 {
+		return nil, fmt.Errorf("no artifacts were produced")
+	}
+	return artifacts, nil
+}
+
+func publishAgentArtifacts(ctx context.Context, version string, artifacts []AgentBuildArtifact) error {
+	coll := mongoClient.Database(dbName).Collection("agent_releases")
+	now := time.Now()
+	docs := make([]interface{}, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		docs = append(docs, AgentRelease{
+			Version:     version,
+			OS:          artifact.OS,
+			Arch:        artifact.Arch,
+			DownloadURL: artifact.DownloadURL,
+			Checksum:    artifact.Checksum,
+			PublishedAt: now,
+		})
+	}
+	if _, err := coll.InsertMany(ctx, docs); err != nil {
+		return fmt.Errorf("publish release metadata: %w", err)
+	}
+	return nil
+}
+
+func agentReleaseS3Client(ctx context.Context) (*s3.Client, string, string, string, error) {
+	bucket := strings.TrimSpace(os.Getenv("AGENT_RELEASE_S3_BUCKET"))
+	if bucket == "" {
+		bucket = strings.TrimSpace(os.Getenv("S3_BUCKET"))
+	}
+	if bucket == "" {
+		return nil, "", "", "", fmt.Errorf("agent release S3 bucket is not configured")
+	}
+	cfg, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		return nil, "", "", "", fmt.Errorf("AWS config error: %w", err)
+	}
+	endpoint := strings.TrimSpace(os.Getenv("AGENT_RELEASE_S3_ENDPOINT"))
+	if endpoint == "" {
+		endpoint = strings.TrimSpace(os.Getenv("S3_ENDPOINT"))
+	}
+	usePathStyle := strings.EqualFold(os.Getenv("AGENT_RELEASE_S3_PATH_STYLE"), "true") ||
+		strings.EqualFold(os.Getenv("S3_PATH_STYLE"), "true") ||
+		endpoint != ""
+	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		if endpoint != "" {
+			o.BaseEndpoint = aws.String(endpoint)
+		}
+		o.UsePathStyle = usePathStyle
+	})
+	prefix := strings.Trim(strings.TrimSpace(os.Getenv("AGENT_RELEASE_S3_PREFIX")), "/")
+	if prefix == "" {
+		prefix = "agent-releases"
+	}
+	publicBase := strings.TrimRight(strings.TrimSpace(os.Getenv("AGENT_RELEASE_PUBLIC_BASE_URL")), "/")
+	return client, bucket, prefix, publicBase, nil
+}
+
+func artifactSuffix(platform, arch string) string {
+	switch platform + "/" + arch {
+	case "darwin/amd64":
+		return "darwin-amd64"
+	case "darwin/arm64":
+		return "darwin-arm64"
+	case "linux/amd64":
+		return "linux-amd64"
+	case "linux/arm64":
+		return "linux-arm64"
+	case "windows/amd64":
+		return "windows-amd64.exe"
+	case "windows/arm64":
+		return "windows-arm64.exe"
+	default:
+		return ""
+	}
+}
+
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func agentReleasePublicURL(publicBase, bucket, key string) string {
+	escapedKey := strings.ReplaceAll(url.PathEscape(key), "%2F", "/")
+	if publicBase != "" {
+		return publicBase + "/" + escapedKey
+	}
+	return fmt.Sprintf("https://%s.s3.amazonaws.com/%s", bucket, escapedKey)
+}
+
+func publicAPIURLFromRequest(r *http.Request) string {
+	if configured := strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_API_URL")), "/"); configured != "" {
+		return configured
+	}
+	proto := r.Header.Get("X-Forwarded-Proto")
+	if proto == "" {
+		if r.TLS != nil {
+			proto = "https"
+		} else {
+			proto = "http"
+		}
+	}
+	host := r.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = r.Host
+	}
+	return strings.TrimRight(proto+"://"+host, "/")
+}
+
+func uniqueStrings(values []string) []string {
+	seen := map[string]bool{}
+	result := []string{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
+}
+
+func setAgentBuildJob(ctx context.Context, id primitive.ObjectID, fields bson.M) {
+	_, err := mongoClient.Database(dbName).Collection("agent_build_jobs").UpdateByID(ctx, id, bson.M{"$set": fields})
+	if err != nil {
+		log.Printf("Agent build job update failed: %v", err)
+	}
+}
+
+func appendAgentBuildLog(ctx context.Context, id primitive.ObjectID, msg string) {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return
+	}
+	_, err := mongoClient.Database(dbName).Collection("agent_build_jobs").UpdateByID(ctx, id, bson.M{
+		"$set":  bson.M{"updated_at": time.Now()},
+		"$push": bson.M{"logs": msg},
+	})
+	if err != nil {
+		log.Printf("Agent build log update failed: %v", err)
+	}
+}
+
+func failAgentBuildJob(ctx context.Context, id primitive.ObjectID, msg string) {
+	finished := time.Now()
+	setAgentBuildJob(ctx, id, bson.M{"status": "failed", "error": msg, "finished_at": finished, "updated_at": finished})
+	appendAgentBuildLog(ctx, id, "Failed: "+msg)
+}
+
+func trimBuildOutput(output string) string {
+	output = strings.TrimSpace(output)
+	if len(output) <= 4000 {
+		return output
+	}
+	return output[len(output)-4000:]
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -2412,7 +2990,10 @@ func main() {
 	http.HandleFunc("/focus/", corsMiddleware(requireRole(RoleViewer, focusHandler)))
 
 	http.HandleFunc("/update/check", corsMiddleware(requireAgent(updateCheckHandler)))
+	http.HandleFunc("/update/releases", corsMiddleware(requireRole(RoleAdmin, releaseListHandler)))
+	http.HandleFunc("/update/release/activate", corsMiddleware(requireRole(RoleAdmin, releaseActivateHandler)))
 	http.HandleFunc("/update/release", corsMiddleware(requireRole(RoleAdmin, releasePublishHandler)))
+	http.HandleFunc("/update/builds", corsMiddleware(requireRole(RoleAdmin, agentBuildsHandler)))
 
 	port := os.Getenv("PORT")
 	if port == "" {

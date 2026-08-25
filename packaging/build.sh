@@ -13,6 +13,7 @@
 #   --api-url   URL         API endpoint to bake in (default: http://localhost:8000)
 #   --package               Also build OS-specific installers (.pkg/.deb/.rpm)
 #   --platform  PLATFORM    Only build one platform: darwin|linux|windows
+#   DEVICEPULSE_DIST_DIR    Optional output directory override
 #   --help                  Show this help
 #
 # Examples:
@@ -53,7 +54,7 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 AGENT_DIR="$REPO_ROOT/agent"
-DIST_DIR="$REPO_ROOT/dist"
+DIST_DIR="${DEVICEPULSE_DIST_DIR:-$REPO_ROOT/dist}"
 BASE_LDFLAGS="-X main.defaultAPIURL=${API_URL} -X main.agentVersion=${VERSION} -s -w"
 
 mkdir -p "$DIST_DIR"
@@ -73,6 +74,7 @@ declare -a TARGETS=(
   "linux   amd64  linux-amd64"
   "linux   arm64  linux-arm64"
   "windows amd64  windows-amd64.exe"
+  "windows arm64  windows-arm64.exe"
 )
 
 for target in "${TARGETS[@]}"; do

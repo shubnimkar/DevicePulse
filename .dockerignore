@@ -1,0 +1,10 @@
+.git
+.agents
+.codex
+**/node_modules
+**/.next
+dist
+agent/data
+api/data
+*.log
+.DS_Store

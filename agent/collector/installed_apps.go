@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	_ "modernc.org/sqlite"
@@ -16,11 +17,11 @@ import (
 // InstalledApps collects installed applications and their versions.
 //
 // Platform strategy — zero external binary requirements:
-//   macOS   — scans .app bundles, reads Info.plist directly
-//   Linux   — parses /var/lib/dpkg/status (Debian/Ubuntu),
-//              /var/lib/pacman/local (Arch),
-//              /var/lib/rpm/rpmdb.sqlite (RHEL 9+ / Fedora 37+ / SUSE 15.5+)
-//   Windows — reads Uninstall registry keys via installed_apps_windows.go
+//
+//	macOS   — scans .app bundles, reads Info.plist directly
+//	Linux   — scans application launchers (*.desktop), then falls back to
+//	           package databases when launcher metadata is unavailable
+//	Windows — reads Uninstall registry keys via installed_apps_windows.go
 type InstalledApps struct{}
 
 func (a *InstalledApps) Name() string { return "InstalledApps" }
@@ -43,14 +44,17 @@ func (a *InstalledApps) Collect() (map[string]interface{}, error) {
 		return map[string]interface{}{"installed_apps": apps, "count": len(apps), "source": "macos_bundle"}, nil
 
 	case "linux":
+		if apps := scanLinuxDesktopApps(); len(apps) > 0 {
+			return map[string]interface{}{"installed_apps": apps, "count": len(apps), "source": "desktop_entries"}, nil
+		}
 		if apps := parseDpkgStatus("/var/lib/dpkg/status"); len(apps) > 0 {
-			return map[string]interface{}{"installed_apps": apps, "count": len(apps), "source": "dpkg"}, nil
+			return map[string]interface{}{"installed_apps": apps, "count": len(apps), "source": "dpkg_packages"}, nil
 		}
 		if apps := parsePacmanDB("/var/lib/pacman/local"); len(apps) > 0 {
-			return map[string]interface{}{"installed_apps": apps, "count": len(apps), "source": "pacman"}, nil
+			return map[string]interface{}{"installed_apps": apps, "count": len(apps), "source": "pacman_packages"}, nil
 		}
 		if apps := parseRPMDB(); len(apps) > 0 {
-			return map[string]interface{}{"installed_apps": apps, "count": len(apps), "source": "rpm"}, nil
+			return map[string]interface{}{"installed_apps": apps, "count": len(apps), "source": "rpm_packages"}, nil
 		}
 		return map[string]interface{}{"installed_apps": []AppEntry{}, "count": 0, "error": "no package db found"}, nil
 
@@ -134,7 +138,139 @@ func scanMacOSApps() []AppEntry {
 	return apps
 }
 
-// ─── Linux / Debian–Ubuntu ────────────────────────────────────────────────────
+// ─── Linux / desktop launchers ────────────────────────────────────────────────
+
+type desktopEntry struct {
+	name       string
+	generic    string
+	exec       string
+	hidden     bool
+	noDisplay  bool
+	entryType  string
+	categories string
+}
+
+func scanLinuxDesktopApps() []AppEntry {
+	home := os.Getenv("HOME")
+	searchDirs := []string{
+		"/usr/share/applications",
+		"/usr/local/share/applications",
+		"/var/lib/flatpak/exports/share/applications",
+		"/var/lib/snapd/desktop/applications",
+	}
+	if home != "" {
+		searchDirs = append(searchDirs,
+			filepath.Join(home, ".local/share/applications"),
+			filepath.Join(home, ".local/share/flatpak/exports/share/applications"),
+		)
+	}
+
+	var apps []AppEntry
+	seen := map[string]bool{}
+	for _, dir := range searchDirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".desktop") {
+				continue
+			}
+			path := filepath.Join(dir, e.Name())
+			entry, ok := parseDesktopEntry(path)
+			if !ok || shouldSkipDesktopEntry(entry) {
+				continue
+			}
+			name := entry.name
+			if name == "" {
+				name = strings.TrimSuffix(e.Name(), ".desktop")
+			}
+			key := strings.ToLower(name)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			apps = append(apps, AppEntry{
+				Name:   name,
+				Path:   path,
+				Source: "desktop_entries",
+			})
+		}
+	}
+	sort.Slice(apps, func(i, j int) bool {
+		return strings.ToLower(apps[i].Name) < strings.ToLower(apps[j].Name)
+	})
+	return apps
+}
+
+func parseDesktopEntry(path string) (desktopEntry, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return desktopEntry{}, false
+	}
+	defer f.Close()
+
+	var entry desktopEntry
+	inDesktopEntry := false
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			inDesktopEntry = line == "[Desktop Entry]"
+			continue
+		}
+		if !inDesktopEntry {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		switch key {
+		case "Name":
+			entry.name = decodeDesktopString(value)
+		case "GenericName":
+			entry.generic = decodeDesktopString(value)
+		case "Exec":
+			entry.exec = strings.TrimSpace(value)
+		case "Hidden":
+			entry.hidden = strings.EqualFold(strings.TrimSpace(value), "true")
+		case "NoDisplay":
+			entry.noDisplay = strings.EqualFold(strings.TrimSpace(value), "true")
+		case "Type":
+			entry.entryType = strings.TrimSpace(value)
+		case "Categories":
+			entry.categories = strings.TrimSpace(value)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return desktopEntry{}, false
+	}
+	return entry, true
+}
+
+func shouldSkipDesktopEntry(entry desktopEntry) bool {
+	if entry.hidden || entry.noDisplay {
+		return true
+	}
+	if entry.entryType != "" && entry.entryType != "Application" {
+		return true
+	}
+	if entry.name == "" || entry.exec == "" {
+		return true
+	}
+	return false
+}
+
+func decodeDesktopString(value string) string {
+	replacer := strings.NewReplacer(`\s`, " ", `\n`, " ", `\t`, " ", `\\`, `\`)
+	return strings.TrimSpace(replacer.Replace(value))
+}
+
+// ─── Linux / Debian–Ubuntu package fallback ──────────────────────────────────
 
 // parseDpkgStatus reads /var/lib/dpkg/status — a plain key:value text file.
 // No dpkg-query binary required.

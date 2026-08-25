@@ -1,7 +1,7 @@
 'use client';
 
 import { AppFocusSummary, Device, DeviceTab, HistoryEntry } from '@/types';
-import { isOnline, timeAgo, metricColor } from '@/lib/utils';
+import { isOnline, timeAgo, metricColor, primaryDisk } from '@/lib/utils';
 import OverviewTab from '@/components/tabs/OverviewTab';
 import HardwareTab from '@/components/tabs/HardwareTab';
 import ProcessesTab from '@/components/tabs/ProcessesTab';
@@ -36,7 +36,7 @@ const TABS: { key: DeviceTab; label: string; icon: React.ReactNode }[] = [
   { key: 'ports',      label: 'Ports',      icon: <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><rect x="2" y="5" width="12" height="6" rx="1" stroke="currentColor" strokeWidth="1.2" fill="none"/><circle cx="5" cy="8" r="1"/><circle cx="8" cy="8" r="1"/><circle cx="11" cy="8" r="1"/></svg> },
   { key: 'apps',       label: 'Apps',       icon: <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="1" width="4" height="4" rx="0.5"/><rect x="6" y="1" width="4" height="4" rx="0.5"/><rect x="11" y="1" width="4" height="4" rx="0.5"/><rect x="1" y="6" width="4" height="4" rx="0.5"/><rect x="6" y="6" width="4" height="4" rx="0.5"/><rect x="11" y="6" width="4" height="4" rx="0.5"/><rect x="1" y="11" width="4" height="4" rx="0.5"/><rect x="6" y="11" width="4" height="4" rx="0.5"/><rect x="11" y="11" width="4" height="4" rx="0.5"/></svg> },
   { key: 'security',   label: 'Security',   icon: <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1L2 3v5c0 3.5 2.5 6 6 7 3.5-1 6-3.5 6-7V3L8 1z"/></svg> },
-  { key: 'focus',      label: 'Focus',      icon: <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="2"/><circle cx="8" cy="8" r="5" stroke="currentColor" strokeWidth="1.2" fill="none"/><circle cx="8" cy="8" r="7.5" stroke="currentColor" strokeWidth="1" fill="none" opacity="0.4"/></svg> },
+  { key: 'focus',      label: 'App Usage',  icon: <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="2"/><circle cx="8" cy="8" r="5" stroke="currentColor" strokeWidth="1.2" fill="none"/><circle cx="8" cy="8" r="7.5" stroke="currentColor" strokeWidth="1" fill="none" opacity="0.4"/></svg> },
   { key: 'sysinfo',    label: 'System',     icon: <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="2" width="14" height="9" rx="1" stroke="currentColor" strokeWidth="1.2" fill="none"/><path d="M5 14h6M8 11v3"/></svg> },
 ];
 
@@ -61,9 +61,10 @@ export default function DeviceCard({
   const hostname = sys?.hostname || device.hostname || device.device_id;
   const cpuPct = hw?.cpu?.usage_percent;
   const ramPct = hw?.ram?.used_percent;
+  const diskPct = primaryDisk(hw?.disks)?.used_percent;
 
   // Derive card state for the left border color
-  const risk = Math.max(cpuPct ?? 0, ramPct ?? 0, hw?.disks?.[0]?.used_percent ?? 0);
+  const risk = Math.max(cpuPct ?? 0, ramPct ?? 0, diskPct ?? 0);
   const state = !online ? 'offline' : risk >= 90 ? 'critical' : risk >= 70 ? 'warning' : 'online';
 
   return (

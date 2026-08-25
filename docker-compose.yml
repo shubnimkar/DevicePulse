@@ -1,13 +1,18 @@
 services:
   api:
     build:
-      context: ./api
+      context: .
+      dockerfile: api/Dockerfile
     image: devicepulse-api:local
     env_file:
       - ./api/.env
     environment:
       PORT: "8000"
       DASHBOARD_ORIGIN: ${DASHBOARD_ORIGIN:-http://localhost:3000}
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
+      AGENT_RELEASE_S3_BUCKET: ${AGENT_RELEASE_S3_BUCKET:-}
+      AGENT_RELEASE_S3_PREFIX: ${AGENT_RELEASE_S3_PREFIX:-agent-releases}
+      AGENT_RELEASE_PUBLIC_BASE_URL: ${AGENT_RELEASE_PUBLIC_BASE_URL:-}
     ports:
       - "8000:8000"
     restart: unless-stopped

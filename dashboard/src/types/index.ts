@@ -171,6 +171,41 @@ export interface DashboardUser {
   updated_at?: string;
 }
 
+export interface AgentRelease {
+  version: string;
+  os: 'darwin' | 'linux' | 'windows';
+  arch: 'amd64' | 'arm64' | string;
+  download_url: string;
+  checksum_sha256: string;
+  published_at?: string;
+}
+
+export interface AgentBuildArtifact {
+  os: AgentRelease['os'];
+  arch: string;
+  file_name: string;
+  s3_key: string;
+  download_url: string;
+  checksum_sha256: string;
+  size_bytes: number;
+}
+
+export interface AgentBuildJob {
+  id: string;
+  version: string;
+  api_url: string;
+  platforms: AgentRelease['os'][];
+  archs: string[];
+  status: 'queued' | 'building' | 'uploading' | 'publishing' | 'published' | 'failed';
+  error?: string;
+  logs: string[];
+  artifacts: AgentBuildArtifact[];
+  created_at: string;
+  updated_at: string;
+  started_at?: string;
+  finished_at?: string;
+}
+
 export interface EnterprisePolicy {
   sync_interval_seconds: number;
   telemetry_retention_days: number;

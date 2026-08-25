@@ -2,8 +2,8 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import type { FormEvent } from 'react';
-import { Device, AppFocusSummary, FocusCacheData, DeviceTab, EnterprisePolicy, DashboardUser, UserRole, HistoryEntry, BrowserHistoryArchiveData } from '@/types';
-import { API, readHeaders, adminHeaders, isOnline, timeAgo } from '@/lib/utils';
+import { Device, AppFocusSummary, FocusCacheData, DeviceTab, EnterprisePolicy, DashboardUser, UserRole, HistoryEntry, BrowserHistoryArchiveData, AgentRelease, AgentBuildJob } from '@/types';
+import { API, readHeaders, adminHeaders, isOnline, timeAgo, primaryDisk } from '@/lib/utils';
 import DeviceCard from '@/components/DeviceCard';
 import type { BrowserHistoryRange } from '@/components/tabs/BrowserTab';
 
@@ -11,6 +11,7 @@ type PageView = 'dashboard' | 'inventory' | 'inspect' | 'settings' | 'access';
 type StatusFilter = 'all' | 'online' | 'critical' | 'warning' | 'offline';
 type AuthMode = 'login' | 'register';
 type BrowserHistoryCache = Record<string, Partial<Record<BrowserHistoryRange, HistoryEntry[]>>>;
+type AgentBuildForm = { version: string; api_url: string; platforms: AgentRelease['os'][]; archs: string[] };
 type CollectorPolicyKey =
   | 'collect_system_info'
   | 'collect_hardware_stats'
@@ -40,6 +41,19 @@ const DEFAULT_POLICY: EnterprisePolicy = {
   collect_os_updates: true,
   collect_usb_devices: true,
 };
+
+const DEFAULT_BUILD_FORM: AgentBuildForm = {
+  version: '',
+  api_url: '',
+  platforms: ['linux'],
+  archs: ['amd64'],
+};
+
+const RELEASE_TARGETS: Array<{ os: AgentRelease['os']; label: string }> = [
+  { os: 'linux', label: 'Linux' },
+  { os: 'windows', label: 'Windows' },
+  { os: 'darwin', label: 'macOS' },
+];
 
 const roleLabel: Record<UserRole, string> = {
   admin: 'Admin',
@@ -145,6 +159,11 @@ export default function Home() {
   const [isUpdating, setIsUpdating]   = useState(false);
   const [policy, setPolicy]           = useState<EnterprisePolicy>(DEFAULT_POLICY);
   const [policySavedAt, setPolicySavedAt] = useState<string>('');
+  const [agentReleases, setAgentReleases] = useState<AgentRelease[]>([]);
+  const [allAgentReleases, setAllAgentReleases] = useState<AgentRelease[]>([]);
+  const [agentBuildJobs, setAgentBuildJobs] = useState<AgentBuildJob[]>([]);
+  const [buildForm, setBuildForm] = useState<AgentBuildForm>(DEFAULT_BUILD_FORM);
+  const [releaseStatus, setReleaseStatus] = useState('');
   const [activeTab, setActiveTab]     = useState<Record<string, DeviceTab>>({});
   const [focusCache, setFocusCache]   = useState<Record<string, AppFocusSummary[]>>({});
   const [browserHistoryCache, setBrowserHistoryCache] = useState<BrowserHistoryCache>({});
@@ -159,6 +178,7 @@ export default function Home() {
   const canManageUsers = authUser?.role === 'admin';
   const canDeleteDevices = authUser?.role === 'admin';
   const canFilterBrowserHistory = authUser?.role === 'admin';
+  const canManageReleases = authUser?.role === 'admin';
 
   const apiFetch = useCallback((path: string, init?: RequestInit) => {
     return fetch(`${API}${path}`, {
@@ -270,6 +290,29 @@ export default function Home() {
     } catch {}
   }, [apiFetch, canManageUsers]);
 
+  const fetchAgentReleases = useCallback(async () => {
+    if (!canManageReleases) return;
+    try {
+      const res = await apiFetch('/update/releases', { headers: readHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        setAgentReleases(data.releases ?? []);
+        setAllAgentReleases(data.all_releases ?? []);
+      }
+    } catch {}
+  }, [apiFetch, canManageReleases]);
+
+  const fetchAgentBuildJobs = useCallback(async () => {
+    if (!canManageReleases) return;
+    try {
+      const res = await apiFetch('/update/builds', { headers: readHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        setAgentBuildJobs(data.jobs ?? []);
+      }
+    } catch {}
+  }, [apiFetch, canManageReleases]);
+
   useEffect(() => {
     if (!authUser) return;
     const t = window.setTimeout(() => { void fetchAll(); void fetchPolicy(); }, 0);
@@ -280,6 +323,23 @@ export default function Home() {
   useEffect(() => {
     if (currentPage === 'access') void fetchUsers();
   }, [currentPage, fetchUsers]);
+
+  useEffect(() => {
+    if (currentPage !== 'settings') return;
+    void fetchAgentReleases();
+    void fetchAgentBuildJobs();
+  }, [currentPage, fetchAgentBuildJobs, fetchAgentReleases]);
+
+  useEffect(() => {
+    if (currentPage !== 'settings' || !canManageReleases) return;
+    const hasActiveJob = agentBuildJobs.some(job => !['published', 'failed'].includes(job.status));
+    if (!hasActiveJob) return;
+    const id = setInterval(() => {
+      void fetchAgentReleases();
+      void fetchAgentBuildJobs();
+    }, 3000);
+    return () => clearInterval(id);
+  }, [agentBuildJobs, canManageReleases, currentPage, fetchAgentBuildJobs, fetchAgentReleases]);
 
   // ── Actions ───────────────────────────────────────────────────────────────
 
@@ -409,6 +469,53 @@ export default function Home() {
     void savePolicy(nextPolicy);
   };
 
+  const startAgentBuild = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!canManageReleases) return;
+    setReleaseStatus('');
+    const payload = {
+      ...buildForm,
+      version: buildForm.version.trim(),
+      api_url: buildForm.api_url.trim(),
+    };
+    try {
+      const res = await apiFetch('/update/builds', {
+        method: 'POST',
+        headers: adminHeaders(),
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        setReleaseStatus(await readApiError(res));
+        return;
+      }
+      setReleaseStatus(`Build queued for ${payload.version}`);
+      setBuildForm(form => ({ ...form, version: '' }));
+      await fetchAgentBuildJobs();
+    } catch {
+      setReleaseStatus('Could not start agent build.');
+    }
+  };
+
+  const activateAgentRelease = async (rel: AgentRelease) => {
+    if (!canManageReleases) return;
+    setReleaseStatus('');
+    try {
+      const res = await apiFetch('/update/release/activate', {
+        method: 'POST',
+        headers: adminHeaders(),
+        body: JSON.stringify({ os: rel.os, arch: rel.arch, version: rel.version }),
+      });
+      if (!res.ok) {
+        setReleaseStatus(await readApiError(res));
+        return;
+      }
+      setReleaseStatus(`Activated ${rel.version} for ${rel.os}/${rel.arch}`);
+      await fetchAgentReleases();
+    } catch {
+      setReleaseStatus('Could not activate agent release.');
+    }
+  };
+
   const deleteDevice = async (deviceId: string) => {
     if (!canDeleteDevices) return;
     if (!confirm(`Remove device ${deviceId} and all of its data?`)) return;
@@ -469,7 +576,7 @@ export default function Home() {
 
   const deviceRisk = (device: Device) => {
     const hw = device.data?.HardwareStats;
-    return Math.max(hw?.cpu?.usage_percent ?? 0, hw?.ram?.used_percent ?? 0, hw?.disks?.[0]?.used_percent ?? 0);
+    return Math.max(hw?.cpu?.usage_percent ?? 0, hw?.ram?.used_percent ?? 0, primaryDisk(hw?.disks)?.used_percent ?? 0);
   };
   const getDeviceState = (device: Device): 'online' | 'critical' | 'warning' | 'offline' => {
     if (!isOnline(device.last_seen)) return 'offline';
@@ -514,13 +621,44 @@ export default function Home() {
     { key: 'collect_system_info', label: 'System info', meta: 'Hostname, OS, architecture, kernel' },
     { key: 'collect_hardware_stats', label: 'Hardware stats', meta: 'CPU, RAM, disk, network and battery' },
     { key: 'collect_processes', label: 'Processes', meta: 'Active process names with CPU and memory' },
-    { key: 'collect_active_window', label: 'Active window', meta: 'Foreground app and focus duration' },
+    { key: 'collect_active_window', label: 'App usage', meta: 'Foreground app and time used' },
     { key: 'collect_services', label: 'Services', meta: 'Running and stopped system services' },
     { key: 'collect_network_ports', label: 'Network ports', meta: 'Open TCP/UDP ports and owning process' },
     { key: 'collect_installed_apps', label: 'Installed apps', meta: 'Application inventory and versions' },
     { key: 'collect_os_updates', label: 'OS updates', meta: 'Update status and pending count' },
     { key: 'collect_usb_devices', label: 'USB devices', meta: 'Connected USB device inventory' },
   ];
+
+  const releasesByOS = RELEASE_TARGETS.map(target => ({
+    ...target,
+    releases: agentReleases.filter(rel => rel.os === target.os),
+  }));
+
+  const releaseOptionsFor = (os: AgentRelease['os'], arch: string) => {
+    const seen = new Set<string>();
+    return allAgentReleases
+      .filter(rel => rel.os === os && rel.arch === arch)
+      .filter(rel => {
+        const key = rel.version;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  };
+
+  const toggleBuildPlatform = (os: AgentRelease['os'], checked: boolean) => {
+    setBuildForm(form => ({
+      ...form,
+      platforms: checked ? Array.from(new Set([...form.platforms, os])) : form.platforms.filter(item => item !== os),
+    }));
+  };
+
+  const toggleBuildArch = (arch: string, checked: boolean) => {
+    setBuildForm(form => ({
+      ...form,
+      archs: checked ? Array.from(new Set([...form.archs, arch])) : form.archs.filter(item => item !== arch),
+    }));
+  };
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -1100,6 +1238,133 @@ export default function Home() {
                   </div>
                 </label>
               </section>
+
+              {canManageReleases && (
+                <section className="settings-panel">
+                  <div className="settings-panel-header">
+                    <div>
+                      <h2>Agent Rollouts</h2>
+                      <p>Build, upload, publish, and roll back agent binaries for supported targets.</p>
+                    </div>
+                    <button type="button" className="action-btn" onClick={() => { void fetchAgentReleases(); void fetchAgentBuildJobs(); }}>
+                      Refresh
+                    </button>
+                  </div>
+
+                  <div className="release-grid">
+                    {releasesByOS.map(target => (
+                      <div key={target.os} className="release-card">
+                        <div className="release-card-head">
+                          <strong>{target.label}</strong>
+                          <span>{target.releases.length ? `${target.releases.length} build${target.releases.length !== 1 ? 's' : ''}` : 'No release'}</span>
+                        </div>
+                        {target.releases.length ? (
+                          <div className="release-builds">
+                            {target.releases.map(rel => (
+                              <div key={`${rel.os}-${rel.arch}`} className="release-build">
+                                <span className="pill pill-blue mono">{rel.arch}</span>
+                                <strong>{rel.version}</strong>
+                                <small>{rel.published_at ? new Date(rel.published_at).toLocaleString() : 'Published'}</small>
+                                <select
+                                  value={rel.version}
+                                  onChange={e => {
+                                    const selected = releaseOptionsFor(rel.os, rel.arch).find(item => item.version === e.target.value);
+                                    if (selected) void activateAgentRelease(selected);
+                                  }}
+                                  aria-label={`Activate ${target.label} ${rel.arch} release`}
+                                >
+                                  {releaseOptionsFor(rel.os, rel.arch).map(option => (
+                                    <option key={`${option.os}-${option.arch}-${option.version}`} value={option.version}>
+                                      {option.version}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="release-empty">No binary published yet.</div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+
+                  <form className="release-form build-form" onSubmit={startAgentBuild}>
+                    <label className="setting-field">
+                      <span>Version</span>
+                      <input
+                        value={buildForm.version}
+                        onChange={e => setBuildForm(form => ({ ...form, version: e.target.value }))}
+                        placeholder="1.0.1"
+                        required
+                      />
+                    </label>
+                    <label className="setting-field">
+                      <span>API URL</span>
+                      <input
+                        value={buildForm.api_url}
+                        onChange={e => setBuildForm(form => ({ ...form, api_url: e.target.value }))}
+                        placeholder={API || 'Auto from hosted API'}
+                        type="url"
+                      />
+                    </label>
+                    <label className="setting-field release-choice-field">
+                      <span>Platforms</span>
+                      <div className="choice-row">
+                        {RELEASE_TARGETS.map(target => (
+                          <label key={target.os}>
+                            <input
+                              type="checkbox"
+                              checked={buildForm.platforms.includes(target.os)}
+                              onChange={e => toggleBuildPlatform(target.os, e.target.checked)}
+                            />
+                            {target.label}
+                          </label>
+                        ))}
+                      </div>
+                    </label>
+                    <label className="setting-field release-choice-field">
+                      <span>Architectures</span>
+                      <div className="choice-row">
+                        {['amd64', 'arm64'].map(arch => (
+                          <label key={arch}>
+                            <input
+                              type="checkbox"
+                              checked={buildForm.archs.includes(arch)}
+                              onChange={e => toggleBuildArch(arch, e.target.checked)}
+                            />
+                            {arch}
+                          </label>
+                        ))}
+                      </div>
+                    </label>
+                    <button type="submit" className="action-btn release-submit">Build New Version</button>
+                  </form>
+                  {releaseStatus && <div className="form-status">{releaseStatus}</div>}
+
+                  {agentBuildJobs.length > 0 && (
+                    <div className="build-history">
+                      <div className="sub-section-title">Build History</div>
+                      {agentBuildJobs.map(job => (
+                        <div key={job.id} className={`build-job build-${job.status}`}>
+                          <div className="build-job-head">
+                            <strong>{job.version}</strong>
+                            <span className="pill pill-neutral mono">{job.status}</span>
+                            <small>{new Date(job.created_at).toLocaleString()}</small>
+                          </div>
+                          <div className="build-job-meta">
+                            <span>{job.platforms.join(', ')}</span>
+                            <span>{job.archs.join(', ')}</span>
+                            <span>{job.api_url}</span>
+                          </div>
+                          {job.error && <div className="build-error">{job.error}</div>}
+                          {job.logs?.length > 0 && <pre className="build-log">{job.logs.slice(-2).join('\n\n')}</pre>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              )}
 
               <section className="settings-panel">
                 <div className="settings-panel-header">

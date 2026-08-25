@@ -1,7 +1,7 @@
 'use client';
 
 import { HardwareStats, BatteryStat, DiskStat } from '@/types';
-import { formatBytes, metricColor } from '@/lib/utils';
+import { displayDisks, formatBytes, metricColor, primaryDisk } from '@/lib/utils';
 import GaugeBar from '@/components/GaugeBar';
 
 function BatteryCard({ battery }: { battery?: BatteryStat }) {
@@ -71,7 +71,8 @@ export default function HardwareTab({ hw }: Props) {
 
   const cpu  = hw.cpu;
   const ram  = hw.ram;
-  const disk = hw.disks?.[0];
+  const disks = displayDisks(hw.disks);
+  const disk = primaryDisk(hw.disks);
   const net  = hw.network?.[0];
   const diskPct = diskUsagePercent(disk);
 
@@ -128,7 +129,7 @@ export default function HardwareTab({ hw }: Props) {
       </div>
 
       {/* All disks */}
-      {hw.disks && hw.disks.length > 1 && (
+      {disks.length > 1 && (
         <div className="sub-section">
           <div className="sub-section-title">All Volumes</div>
           <div className="disk-table-wrap">
@@ -137,7 +138,7 @@ export default function HardwareTab({ hw }: Props) {
                 <tr><th>Mount</th><th>Total</th><th>Used</th><th>Free</th><th>Usage</th></tr>
               </thead>
               <tbody>
-                {hw.disks.map((d, i) => {
+                {disks.map((d, i) => {
                   const pct = diskUsagePercent(d);
                   return (
                     <tr key={i}>
