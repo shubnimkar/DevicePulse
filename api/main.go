@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -47,6 +48,7 @@ var (
 	sessionSecret  string
 	browserArchive *BrowserHistoryArchive
 	telemetryStore *TelemetryArchive
+	activityStore  *DailyActivityArchive
 )
 
 // ─── Focus Cache ──────────────────────────────────────────────────────────────
@@ -429,6 +431,208 @@ func (a *TelemetryArchive) DeleteDevice(ctx context.Context, deviceID string) (i
 	return deleted, nil
 }
 
+// ─── Daily App Usage Archive ─────────────────────────────────────────────────
+
+type DailyActivityArchive struct {
+	client *s3.Client
+	bucket string
+	prefix string
+}
+
+type DailyActivityArchiveResult struct {
+	Bucket     string        `json:"bucket" bson:"bucket"`
+	Key        string        `json:"key" bson:"key"`
+	Date       string        `json:"date" bson:"date"`
+	Username   string        `json:"username" bson:"username"`
+	TotalS     float64       `json:"total_seconds" bson:"total_seconds"`
+	TopApps    []interface{} `json:"top_apps" bson:"top_apps"`
+	SessionCnt int           `json:"session_count" bson:"session_count"`
+}
+
+func initDailyActivityArchive(ctx context.Context) *DailyActivityArchive {
+	bucket := strings.TrimSpace(os.Getenv("ACTIVITY_S3_BUCKET"))
+	if bucket == "" {
+		bucket = strings.TrimSpace(os.Getenv("TELEMETRY_S3_BUCKET"))
+	}
+	if bucket == "" {
+		bucket = strings.TrimSpace(os.Getenv("BROWSER_HISTORY_S3_BUCKET"))
+	}
+	if bucket == "" {
+		bucket = strings.TrimSpace(os.Getenv("S3_BUCKET"))
+	}
+	if bucket == "" {
+		log.Println("Daily app usage S3 archive disabled (set ACTIVITY_S3_BUCKET or TELEMETRY_S3_BUCKET to enable)")
+		return nil
+	}
+
+	cfg, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		log.Printf("Daily app usage S3 archive disabled: AWS config error: %v", err)
+		return nil
+	}
+
+	prefix := strings.Trim(strings.TrimSpace(os.Getenv("ACTIVITY_S3_PREFIX")), "/")
+	if prefix == "" {
+		prefix = "app-usage"
+	}
+	endpoint := strings.TrimSpace(os.Getenv("ACTIVITY_S3_ENDPOINT"))
+	if endpoint == "" {
+		endpoint = strings.TrimSpace(os.Getenv("TELEMETRY_S3_ENDPOINT"))
+	}
+	if endpoint == "" {
+		endpoint = strings.TrimSpace(os.Getenv("S3_ENDPOINT"))
+	}
+	usePathStyle := strings.EqualFold(os.Getenv("ACTIVITY_S3_PATH_STYLE"), "true") ||
+		strings.EqualFold(os.Getenv("TELEMETRY_S3_PATH_STYLE"), "true") ||
+		strings.EqualFold(os.Getenv("S3_PATH_STYLE"), "true") ||
+		endpoint != ""
+	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		if endpoint != "" {
+			o.BaseEndpoint = aws.String(endpoint)
+		}
+		o.UsePathStyle = usePathStyle
+	})
+
+	log.Printf("Daily app usage S3 archive enabled: bucket=%s prefix=%s", bucket, prefix)
+	return &DailyActivityArchive{client: client, bucket: bucket, prefix: prefix}
+}
+
+func (a *DailyActivityArchive) Archive(ctx context.Context, deviceID string, payload map[string]interface{}) (*DailyActivityArchiveResult, error) {
+	if a == nil {
+		return nil, nil
+	}
+	username := activityUsername(payload)
+	sessions := extractFocusSessions(payload)
+	if len(sessions) == 0 {
+		return nil, nil
+	}
+
+	eventTime := payloadTime(payload["timestamp"])
+	date := eventTime.UTC().Format("2006-01-02")
+	key := dailyActivityS3Key(a.prefix, deviceID, username, date)
+
+	doc := map[string]interface{}{
+		"date":       date,
+		"device_id":  deviceID,
+		"username":   username,
+		"sessions":   []interface{}{},
+		"apps":       []interface{}{},
+		"updated_at": time.Now().UTC(),
+	}
+	existing, err := a.readObject(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		doc = existing
+	}
+	doc["date"] = date
+	doc["device_id"] = deviceID
+	doc["username"] = username
+	doc["updated_at"] = time.Now().UTC()
+
+	allSessions := appendInterfaceSlice(doc["sessions"], sessions)
+	sort.Slice(allSessions, func(i, j int) bool {
+		return activitySessionStart(allSessions[i]).Before(activitySessionStart(allSessions[j]))
+	})
+	doc["sessions"] = allSessions
+	apps, totalS := summarizeActivitySessions(allSessions)
+	doc["apps"] = apps
+	doc["total_seconds"] = totalS
+	doc["session_count"] = len(allSessions)
+
+	body, err := json.Marshal(doc)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = a.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(a.bucket),
+		Key:         aws.String(key),
+		Body:        bytes.NewReader(body),
+		ContentType: aws.String("application/json"),
+	}); err != nil {
+		return nil, err
+	}
+
+	topApps := apps
+	if len(topApps) > 10 {
+		topApps = topApps[:10]
+	}
+	return &DailyActivityArchiveResult{
+		Bucket:     a.bucket,
+		Key:        key,
+		Date:       date,
+		Username:   username,
+		TotalS:     totalS,
+		TopApps:    topApps,
+		SessionCnt: len(allSessions),
+	}, nil
+}
+
+func (a *DailyActivityArchive) readObject(ctx context.Context, key string) (map[string]interface{}, error) {
+	raw, err := a.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(a.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		var notFound interface{ ErrorCode() string }
+		if ok := errors.As(err, &notFound); ok && (notFound.ErrorCode() == "NoSuchKey" || notFound.ErrorCode() == "NotFound") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer raw.Body.Close()
+	var doc map[string]interface{}
+	if err := json.NewDecoder(raw.Body).Decode(&doc); err != nil {
+		return nil, err
+	}
+	return doc, nil
+}
+
+func (a *DailyActivityArchive) DeleteDevice(ctx context.Context, deviceID string) (int, error) {
+	if a == nil {
+		return 0, nil
+	}
+	deleted := 0
+	prefix := fmt.Sprintf("%s/", a.prefix)
+	paginator := s3.NewListObjectsV2Paginator(a.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(a.bucket),
+		Prefix: aws.String(prefix),
+	})
+	needle := "/device_id=" + safeS3PathSegment(deviceID) + "/"
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return deleted, err
+		}
+		for _, obj := range page.Contents {
+			if obj.Key == nil || !strings.Contains(*obj.Key, needle) {
+				continue
+			}
+			if _, err := a.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+				Bucket: aws.String(a.bucket),
+				Key:    obj.Key,
+			}); err != nil {
+				return deleted, err
+			}
+			deleted++
+		}
+	}
+	return deleted, nil
+}
+
+func dailyActivityS3Key(prefix, deviceID, username, date string) string {
+	day := payloadTime(date + "T00:00:00Z")
+	return fmt.Sprintf("%s/year=%s/month=%s/day=%s/device_id=%s/user=%s/activity.json",
+		prefix,
+		day.Format("2006"),
+		day.Format("01"),
+		day.Format("02"),
+		safeS3PathSegment(deviceID),
+		safeS3PathSegment(username),
+	)
+}
+
 func telemetryMetadata(payload map[string]interface{}, archiveResult *TelemetryArchiveResult) bson.M {
 	doc := bson.M{
 		"device_id":             payload["device_id"],
@@ -440,6 +644,8 @@ func telemetryMetadata(payload map[string]interface{}, archiveResult *TelemetryA
 		"agent_version":         payload["agent_version"],
 		"agent_os":              payload["agent_os"],
 		"agent_arch":            payload["agent_arch"],
+		"username":              payload["username"],
+		"app_usage_archive":     payload["app_usage_archive"],
 	}
 	if summaries := focusSummariesFromPayload(payload); len(summaries) > 0 {
 		doc["data"] = bson.M{
@@ -527,6 +733,123 @@ func focusSummariesFromPayload(payload map[string]interface{}) []interface{} {
 		return nil
 	}
 	return raw
+}
+
+func activityUsername(payload map[string]interface{}) string {
+	if username, ok := payload["username"].(string); ok && strings.TrimSpace(username) != "" {
+		return strings.TrimSpace(username)
+	}
+	return "unknown"
+}
+
+func extractFocusSessions(payload map[string]interface{}) []interface{} {
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	awt, ok := data["ActiveWindowTracker"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	raw, ok := awt["sessions"].([]interface{})
+	if !ok || len(raw) == 0 {
+		return nil
+	}
+	username := activityUsername(payload)
+	deviceID, _ := payload["device_id"].(string)
+	out := make([]interface{}, 0, len(raw))
+	for _, item := range raw {
+		session, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		appName, _ := session["app_name"].(string)
+		appName = strings.TrimSpace(appName)
+		if appName == "" {
+			continue
+		}
+		duration, ok := toFloat(session["duration_seconds"])
+		if !ok || duration <= 0 {
+			continue
+		}
+		out = append(out, map[string]interface{}{
+			"app_name":         appName,
+			"start_time":       session["start_time"],
+			"end_time":         session["end_time"],
+			"duration_seconds": duration,
+			"device_id":        deviceID,
+			"username":         username,
+		})
+	}
+	return out
+}
+
+func appendInterfaceSlice(existing interface{}, next []interface{}) []interface{} {
+	var out []interface{}
+	if items, ok := existing.([]interface{}); ok {
+		out = append(out, items...)
+	}
+	out = append(out, next...)
+	return out
+}
+
+func activitySessionStart(raw interface{}) time.Time {
+	m, ok := raw.(map[string]interface{})
+	if !ok {
+		return time.Time{}
+	}
+	if s, ok := m["start_time"].(string); ok {
+		if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+			return t.UTC()
+		}
+	}
+	return time.Time{}
+}
+
+func summarizeActivitySessions(sessions []interface{}) ([]interface{}, float64) {
+	type appTotal struct {
+		AppName      string
+		TotalSeconds float64
+		SessionCount int
+	}
+	totals := map[string]*appTotal{}
+	totalS := 0.0
+	for _, raw := range sessions {
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		appName, _ := m["app_name"].(string)
+		appName = strings.TrimSpace(appName)
+		duration, ok := toFloat(m["duration_seconds"])
+		if appName == "" || !ok || duration <= 0 {
+			continue
+		}
+		item, ok := totals[appName]
+		if !ok {
+			item = &appTotal{AppName: appName}
+			totals[appName] = item
+		}
+		item.TotalSeconds += duration
+		item.SessionCount++
+		totalS += duration
+	}
+	apps := make([]interface{}, 0, len(totals))
+	for _, item := range totals {
+		apps = append(apps, map[string]interface{}{
+			"app_name":      item.AppName,
+			"total_seconds": item.TotalSeconds,
+			"session_count": item.SessionCount,
+		})
+	}
+	sort.Slice(apps, func(i, j int) bool {
+		a := apps[i].(map[string]interface{})
+		b := apps[j].(map[string]interface{})
+		av, _ := toFloat(a["total_seconds"])
+		bv, _ := toFloat(b["total_seconds"])
+		return av > bv
+	})
+	return apps, totalS
 }
 
 // ─── Browser History S3 Archive ────────────────────────────────────────────────
@@ -1809,6 +2132,19 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var activityArchiveResult *DailyActivityArchiveResult
+	if activityStore != nil {
+		activityArchiveResult, err = activityStore.Archive(ctx, authDeviceID, payload)
+		if err != nil {
+			log.Printf("Daily app usage S3 archive error for %s: %v", authDeviceID, err)
+			http.Error(w, "Daily app usage archive error", http.StatusInternalServerError)
+			return
+		}
+		if activityArchiveResult != nil {
+			payload["app_usage_archive"] = activityArchiveResult
+		}
+	}
+
 	var telemetryArchiveResult *TelemetryArchiveResult
 	if telemetryStore != nil {
 		telemetryArchiveResult, err = telemetryStore.Archive(ctx, authDeviceID, payload)
@@ -1822,6 +2158,7 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 
 	collTelemetry := mongoClient.Database(dbName).Collection("telemetry")
 	collDevices := mongoClient.Database(dbName).Collection("devices")
+	collActivity := mongoClient.Database(dbName).Collection("app_usage_daily")
 
 	// Insert telemetry event
 	telemetryDoc := bson.M(payload)
@@ -1851,6 +2188,9 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 	if agentArch, ok := payload["agent_arch"].(string); ok && agentArch != "" {
 		setDoc["agent_arch"] = agentArch
 	}
+	if username, ok := payload["username"].(string); ok && username != "" {
+		setDoc["username"] = username
+	}
 	if data, ok := payload["data"].(map[string]interface{}); ok {
 		for collectorName, collectorPayload := range data {
 			if collectorName == "BrowserHistory" {
@@ -1871,6 +2211,30 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err = collDevices.UpdateOne(ctx, bson.M{"device_id": authDeviceID}, update, opts); err != nil {
 		log.Printf("Error updating device state: %v", err)
+	}
+
+	if activityArchiveResult != nil {
+		activityDoc := bson.M{
+			"device_id":      authDeviceID,
+			"username":       activityArchiveResult.Username,
+			"date":           activityArchiveResult.Date,
+			"total_seconds":  activityArchiveResult.TotalS,
+			"session_count":  activityArchiveResult.SessionCnt,
+			"top_apps":       activityArchiveResult.TopApps,
+			"archive":        activityArchiveResult,
+			"archive_bucket": activityArchiveResult.Bucket,
+			"archive_key":    activityArchiveResult.Key,
+			"updated_at":     now,
+		}
+		_, err = collActivity.UpdateOne(
+			ctx,
+			bson.M{"device_id": authDeviceID, "username": activityArchiveResult.Username, "date": activityArchiveResult.Date},
+			bson.M{"$set": activityDoc, "$setOnInsert": bson.M{"created_at": now}},
+			options.Update().SetUpsert(true),
+		)
+		if err != nil {
+			log.Printf("Error updating daily app usage summary: %v", err)
+		}
 	}
 
 	// Update focus cache from the per-cycle app_summaries in this payload
@@ -1916,6 +2280,21 @@ func toFloat(v interface{}) (float64, bool) {
 		return float64(n), true
 	}
 	return 0, false
+}
+
+func bsonTime(v interface{}) (time.Time, bool) {
+	switch t := v.(type) {
+	case time.Time:
+		return t, !t.IsZero()
+	case primitive.DateTime:
+		return t.Time(), !t.Time().IsZero()
+	case string:
+		parsed, err := time.Parse(time.RFC3339, t)
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // ─── Device Delete Handler ─────────────────────────────────────────────────────
@@ -1968,6 +2347,115 @@ func deviceNameHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"device_id":    deviceID,
 		"display_name": name,
+	})
+}
+
+// POST /devices/{device_id}/ping
+func devicePingHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+	if len(parts) != 3 || parts[0] != "devices" || parts[1] == "" || parts[2] != "ping" {
+		http.Error(w, "Invalid URL", http.StatusBadRequest)
+		return
+	}
+	deviceID := parts[1]
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var device bson.M
+	err := mongoClient.Database(dbName).Collection("devices").FindOne(
+		ctx,
+		bson.M{"device_id": deviceID},
+		options.FindOne().SetProjection(bson.M{"api_key": 0}),
+	).Decode(&device)
+	if err == mongo.ErrNoDocuments {
+		http.Error(w, "Device not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	lastSeen, hasLastSeen := bsonTime(device["last_seen"])
+	now := time.Now()
+	ageSeconds := -1
+	online := false
+	var lastSeenValue interface{}
+	if hasLastSeen {
+		age := now.Sub(lastSeen)
+		ageSeconds = int(age.Seconds())
+		online = age < 60*time.Second
+		lastSeenValue = lastSeen
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"device_id":     deviceID,
+		"online":        online,
+		"last_seen":     lastSeenValue,
+		"age_seconds":   ageSeconds,
+		"checked_at":    now,
+		"message":       map[bool]string{true: "Agent is online", false: "No recent agent check-in"}[online],
+		"live_window_s": 60,
+	})
+}
+
+// GET /devices/{device_id}/app-usage?date=YYYY-MM-DD
+func deviceAppUsageHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+	if len(parts) != 3 || parts[0] != "devices" || parts[1] == "" || parts[2] != "app-usage" {
+		http.Error(w, "Invalid URL", http.StatusBadRequest)
+		return
+	}
+	deviceID := parts[1]
+	date := strings.TrimSpace(r.URL.Query().Get("date"))
+	if date == "" {
+		date = time.Now().UTC().Format("2006-01-02")
+	}
+	if _, err := time.Parse("2006-01-02", date); err != nil {
+		http.Error(w, "Invalid date; use YYYY-MM-DD", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cursor, err := mongoClient.Database(dbName).Collection("app_usage_daily").Find(
+		ctx,
+		bson.M{"device_id": deviceID, "date": date},
+		options.Find().SetSort(bson.D{{Key: "total_seconds", Value: -1}}),
+	)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	defer cursor.Close(ctx)
+
+	var rows []bson.M
+	if err := cursor.All(ctx, &rows); err != nil {
+		http.Error(w, "Parsing error", http.StatusInternalServerError)
+		return
+	}
+	if rows == nil {
+		rows = []bson.M{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"device_id": deviceID,
+		"date":      date,
+		"users":     rows,
 	})
 }
 
@@ -2031,11 +2519,24 @@ func deviceDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	appUsageRes, err := db.Collection("app_usage_daily").DeleteMany(ctx, bson.M{"device_id": deviceID})
+	if err != nil {
+		log.Printf("App usage summary cleanup failed for deleted device %s: %v", deviceID, err)
+		http.Error(w, "Device deleted, but app usage cleanup failed", http.StatusInternalServerError)
+		return
+	}
+	appUsageArchiveDeleted, err := activityStore.DeleteDevice(ctx, deviceID)
+	if err != nil {
+		log.Printf("App usage archive cleanup failed for deleted device %s: %v", deviceID, err)
+		http.Error(w, "Device deleted, but app usage archive cleanup failed", http.StatusInternalServerError)
+		return
+	}
+
 	globalFocusCache.mu.Lock()
 	delete(globalFocusCache.data, deviceID)
 	globalFocusCache.mu.Unlock()
 
-	log.Printf("Device deleted: %s (telemetry=%d telemetry_archive_objects=%d browser_archive_objects=%d)", deviceID, telemetryRes.DeletedCount, telemetryArchiveDeleted, browserArchiveDeleted)
+	log.Printf("Device deleted: %s (telemetry=%d telemetry_archive_objects=%d browser_archive_objects=%d app_usage=%d app_usage_archive_objects=%d)", deviceID, telemetryRes.DeletedCount, telemetryArchiveDeleted, browserArchiveDeleted, appUsageRes.DeletedCount, appUsageArchiveDeleted)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"device_id":                       deviceID,
@@ -2044,6 +2545,8 @@ func deviceDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		"telemetry_deleted_count":         telemetryRes.DeletedCount,
 		"telemetry_archive_deleted_count": telemetryArchiveDeleted,
 		"browser_archive_deleted_count":   browserArchiveDeleted,
+		"app_usage_deleted_count":         appUsageRes.DeletedCount,
+		"app_usage_archive_deleted_count": appUsageArchiveDeleted,
 		"focus_cache_deleted":             true,
 	})
 }
@@ -3272,6 +3775,7 @@ func main() {
 
 	telemetryStore = initTelemetryArchive(ctx)
 	browserArchive = initBrowserHistoryArchive(ctx)
+	activityStore = initDailyActivityArchive(ctx)
 
 	// Build focus cache from existing telemetry data
 	go buildFocusCacheFromMongo()
@@ -3311,6 +3815,10 @@ func registerRoutes(mux *http.ServeMux) {
 			requireRole(RoleViewer, historyHandler)(w, r)
 		} else if strings.HasSuffix(r.URL.Path, "/name") {
 			requireRole(RoleAdmin, deviceNameHandler)(w, r)
+		} else if strings.HasSuffix(r.URL.Path, "/ping") {
+			requireRole(RoleAdmin, devicePingHandler)(w, r)
+		} else if strings.HasSuffix(r.URL.Path, "/app-usage") {
+			requireRole(RoleViewer, deviceAppUsageHandler)(w, r)
 		} else if r.Method == http.MethodDelete {
 			requireRole(RoleAdmin, deviceDeleteHandler)(w, r)
 		} else {
@@ -3372,6 +3880,19 @@ func ensureIndexes() {
 			Keys:    bson.D{{Key: "telemetry_expires_at", Value: 1}},
 			Options: options.Index().SetExpireAfterSeconds(0).SetSparse(true),
 		})
+
+	activityIdx := []mongo.IndexModel{
+		{
+			Keys: bson.D{
+				{Key: "device_id", Value: 1},
+				{Key: "username", Value: 1},
+				{Key: "date", Value: 1},
+			},
+			Options: options.Index().SetUnique(true),
+		},
+		{Keys: bson.D{{Key: "device_id", Value: 1}, {Key: "date", Value: -1}}},
+	}
+	db.Collection("app_usage_daily").Indexes().CreateMany(ctx, activityIdx)
 
 	// agent_releases: index on os+arch+published_at for fast latest-release lookup
 	db.Collection("agent_releases").Indexes().CreateOne(ctx,

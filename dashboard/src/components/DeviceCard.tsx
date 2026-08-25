@@ -1,6 +1,6 @@
 'use client';
 
-import { AppFocusSummary, Device, DeviceTab, HistoryEntry } from '@/types';
+import { AppFocusSummary, DailyAppUsageData, Device, DeviceTab, HistoryEntry } from '@/types';
 import { isOnline, timeAgo, metricColor, primaryDisk } from '@/lib/utils';
 import OverviewTab from '@/components/tabs/OverviewTab';
 import HardwareTab from '@/components/tabs/HardwareTab';
@@ -19,7 +19,13 @@ interface Props {
   tab: DeviceTab;
   onTabChange: (tab: DeviceTab) => void;
   onDelete?: () => void;
+  onPing?: () => void;
+  pingStatus?: { state: 'idle' | 'checking' | 'online' | 'offline' | 'error'; message?: string };
   cachedFocus: AppFocusSummary[];
+  dailyAppUsage?: DailyAppUsageData;
+  dailyAppUsageLoading?: boolean;
+  appUsageDate?: string;
+  onAppUsageDateChange?: (date: string) => void;
   browserHistory?: HistoryEntry[];
   browserHistoryRange?: BrowserHistoryRange;
   browserHistoryLoading?: boolean;
@@ -46,7 +52,13 @@ export default function DeviceCard({
   tab,
   onTabChange,
   onDelete,
+  onPing,
+  pingStatus,
   cachedFocus,
+  dailyAppUsage,
+  dailyAppUsageLoading = false,
+  appUsageDate,
+  onAppUsageDateChange,
   browserHistory,
   browserHistoryRange = 'recent',
   browserHistoryLoading = false,
@@ -97,6 +109,23 @@ export default function DeviceCard({
         </div>
 
         <div className="device-header-right">
+          {onPing && (
+            <>
+              {pingStatus?.message && (
+                <span className={`ping-state ping-${pingStatus.state}`}>
+                  {pingStatus.message}
+                </span>
+              )}
+              <button
+                type="button"
+                className="action-btn"
+                onClick={onPing}
+                disabled={pingStatus?.state === 'checking'}
+              >
+                {pingStatus?.state === 'checking' ? 'Pinging...' : 'Ping Agent'}
+              </button>
+            </>
+          )}
           {cpuPct !== undefined && (
             <span className="resource-pill" style={{ color: metricColor(cpuPct) }}>
               CPU {cpuPct.toFixed(0)}%
@@ -152,7 +181,16 @@ export default function DeviceCard({
         {tab === 'ports'     && <PortsTab data={device.data?.NetworkPorts} />}
         {tab === 'apps'      && <AppsTab data={device.data?.InstalledApps} />}
         {tab === 'security'  && <SecurityTab usb={device.data?.USBEvents} osUpd={device.data?.OSUpdates} />}
-        {tab === 'focus'     && <FocusTab data={device.data?.ActiveWindowTracker} cachedSummaries={cachedFocus} />}
+        {tab === 'focus'     && (
+          <FocusTab
+            data={device.data?.ActiveWindowTracker}
+            cachedSummaries={cachedFocus}
+            dailyUsage={dailyAppUsage}
+            dailyUsageLoading={dailyAppUsageLoading}
+            usageDate={appUsageDate}
+            onUsageDateChange={onAppUsageDateChange}
+          />
+        )}
         {tab === 'sysinfo'   && <SysInfoTab sys={sys} />}
       </div>
     </div>

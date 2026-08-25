@@ -1258,7 +1258,82 @@ body {
   transition: all 0.15s;
 }
 .action-btn:hover { border-color: var(--blue-border); color: var(--blue); background: var(--blue-dim); }
+.action-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+.action-btn.primary {
+  background: var(--blue);
+  border-color: var(--blue);
+  color: white;
+}
+.action-btn.primary:hover { background: var(--blue-2); color: white; }
 .action-btn.danger:hover { border-color: var(--red-border); color: var(--red); background: var(--red-dim); }
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgba(2, 6, 23, 0.72);
+  backdrop-filter: blur(4px);
+}
+
+.modal-panel {
+  width: min(480px, 100%);
+  background: var(--surface);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-xl);
+  padding: 1rem;
+}
+
+.modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.modal-header h2 {
+  color: var(--text-1);
+  font-size: 1rem;
+  margin: 0;
+}
+
+.modal-header p {
+  color: var(--text-3);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.6875rem;
+  margin-top: 0.25rem;
+  word-break: break-all;
+}
+
+.modal-close {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text-3);
+  cursor: pointer;
+  font-size: 1rem;
+}
+
+.modal-close:hover {
+  color: var(--text-1);
+  border-color: var(--border-2);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
 
 .table-footer {
   display: flex;
@@ -1366,6 +1441,19 @@ body {
   border-radius: var(--radius);
   padding: 0.2rem 0.5rem;
 }
+.ping-state {
+  max-width: 260px;
+  color: var(--text-3);
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ping-online { color: var(--green); }
+.ping-offline,
+.ping-error { color: var(--red); }
+.ping-checking { color: var(--blue); }
 .delete-btn {
   display: inline-flex;
   align-items: center;
@@ -1965,6 +2053,35 @@ body {
 }
 
 /* ── Focus / Active Window Tab ───────────────────────────────────────────────── */
+.focus-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+.focus-date-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text-3);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.focus-date-field input {
+  color: var(--text-1);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.35rem 0.5rem;
+  color-scheme: dark;
+}
+.focus-archive-note {
+  color: var(--text-3);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
 .focus-current {
   display: flex;
   align-items: center;

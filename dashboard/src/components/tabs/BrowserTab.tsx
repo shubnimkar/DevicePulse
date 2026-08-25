@@ -50,10 +50,15 @@ export default function BrowserTab({
           </button>
         ))}
       </div>
+      {historyLoading && historyLoaded && <span className="history-loading">Refreshing</span>}
+    </div>
+  ) : historyLoading && historyLoaded ? (
+    <div className="browser-history-toolbar">
+      <span className="history-loading">Refreshing</span>
     </div>
   ) : null;
 
-  if (historyLoading || !historyLoaded) {
+  if (!historyLoaded) {
     return (
       <div>
         {toolbar}

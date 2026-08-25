@@ -129,10 +129,12 @@ func (a *ActiveWindowTracker) Collect() (map[string]interface{}, error) {
 	}
 
 	current := a.currentApp
+	sessions := append([]focusSession(nil), a.sessions...)
 	a.sessions = nil // reset per-cycle buffer only
 
 	return map[string]interface{}{
 		"current_app":          current,
+		"sessions":             sessions,
 		"app_summaries":        cycleSummaries,
 		"cumulative_summaries": cumSummaries,
 	}, nil

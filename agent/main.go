@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	osuser "os/user"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -322,6 +324,7 @@ func runAgent() {
 		finalPayload := map[string]interface{}{
 			"device_id":     deviceID,
 			"timestamp":     time.Now().Format(time.RFC3339),
+			"username":      currentUsername(),
 			"agent_version": agentVersion,
 			"agent_os":      runtime.GOOS,
 			"agent_arch":    runtime.GOARCH,
@@ -343,6 +346,26 @@ func runAgent() {
 
 		time.Sleep(interval)
 	}
+}
+
+func currentUsername() string {
+	if u, err := osuser.Current(); err == nil && u != nil {
+		if u.Username != "" {
+			parts := strings.FieldsFunc(u.Username, func(r rune) bool {
+				return r == '\\' || r == '/'
+			})
+			if len(parts) > 0 {
+				return parts[len(parts)-1]
+			}
+			return u.Username
+		}
+	}
+	for _, key := range []string{"USER", "USERNAME", "LOGNAME"} {
+		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+			return v
+		}
+	}
+	return "unknown"
 }
 
 func configureLogging(dir string) {
@@ -698,8 +721,12 @@ func runWindowOnlyMode() {
 			continue
 		}
 		finalPayload := map[string]interface{}{
-			"device_id": deviceID,
-			"timestamp": time.Now().Format(time.RFC3339),
+			"device_id":     deviceID,
+			"timestamp":     time.Now().Format(time.RFC3339),
+			"username":      currentUsername(),
+			"agent_version": agentVersion,
+			"agent_os":      runtime.GOOS,
+			"agent_arch":    runtime.GOARCH,
 			"data": map[string]interface{}{
 				activeWin.Name(): payload,
 			},

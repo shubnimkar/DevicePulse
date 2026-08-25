@@ -113,11 +113,18 @@ export interface OSUpdateInfo {
 export interface AppFocusSummary {
   app_name: string;
   total_focus_seconds: number;
+  total_seconds?: number;
   session_count: number;
 }
 
 export interface ActiveWindowData {
   current_app: string;
+  sessions?: Array<{
+    app_name: string;
+    start_time: string;
+    end_time: string;
+    duration_seconds: number;
+  }>;
   app_summaries: AppFocusSummary[];
   cumulative_summaries: AppFocusSummary[];
 }
@@ -125,6 +132,22 @@ export interface ActiveWindowData {
 export interface FocusCacheData {
   device_id: string;
   app_summaries: AppFocusSummary[];
+}
+
+export interface DailyAppUsageUser {
+  device_id: string;
+  username: string;
+  date: string;
+  total_seconds: number;
+  session_count: number;
+  top_apps: AppFocusSummary[];
+  archive_key?: string;
+}
+
+export interface DailyAppUsageData {
+  device_id: string;
+  date: string;
+  users: DailyAppUsageUser[];
 }
 
 export interface BrowserHistoryArchiveData {

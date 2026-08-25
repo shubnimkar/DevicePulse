@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import type { FormEvent } from 'react';
-import { Device, AppFocusSummary, FocusCacheData, DeviceTab, EnterprisePolicy, DashboardUser, UserRole, HistoryEntry, BrowserHistoryArchiveData, AgentRelease, AgentBuildJob } from '@/types';
+import { Device, AppFocusSummary, FocusCacheData, DeviceTab, EnterprisePolicy, DashboardUser, UserRole, HistoryEntry, BrowserHistoryArchiveData, DailyAppUsageData, AgentRelease, AgentBuildJob } from '@/types';
 import { API, readHeaders, adminHeaders, isOnline, timeAgo, primaryDisk } from '@/lib/utils';
 import DeviceCard from '@/components/DeviceCard';
 import type { BrowserHistoryRange } from '@/components/tabs/BrowserTab';
@@ -11,6 +11,9 @@ type PageView = 'dashboard' | 'inventory' | 'inspect' | 'settings' | 'access';
 type StatusFilter = 'all' | 'online' | 'critical' | 'warning' | 'offline';
 type AuthMode = 'login' | 'register';
 type BrowserHistoryCache = Record<string, Partial<Record<BrowserHistoryRange, HistoryEntry[]>>>;
+type DailyAppUsageCache = Record<string, Record<string, DailyAppUsageData>>;
+type AgentPingState = 'idle' | 'checking' | 'online' | 'offline' | 'error';
+type AgentPingStatus = Record<string, { state: AgentPingState; message?: string }>;
 type AgentBuildForm = { version: string; api_url: string; platforms: AgentRelease['os'][]; archs: string[] };
 type CollectorPolicyKey =
   | 'collect_system_info'
@@ -94,6 +97,14 @@ function browserHistoryQuery(range: BrowserHistoryRange): string {
   return params.toString();
 }
 
+function formatPingAge(seconds?: number): string {
+  if (seconds === undefined || seconds < 0) return 'unknown age';
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86400)}d ago`;
+}
+
 async function readApiError(res: Response): Promise<string> {
   const text = await res.text();
   const trimmed = text.trim();
@@ -169,17 +180,26 @@ export default function Home() {
   const [browserHistoryCache, setBrowserHistoryCache] = useState<BrowserHistoryCache>({});
   const [browserHistoryRange, setBrowserHistoryRange] = useState<BrowserHistoryRange>('recent');
   const [browserHistoryLoading, setBrowserHistoryLoading] = useState<Record<string, boolean>>({});
+  const [appUsageDate, setAppUsageDate] = useState(() => localDateKey(0));
+  const [dailyAppUsageCache, setDailyAppUsageCache] = useState<DailyAppUsageCache>({});
+  const [dailyAppUsageLoading, setDailyAppUsageLoading] = useState<Record<string, boolean>>({});
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [currentPage, setCurrentPage] = useState<PageView>('dashboard');
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
   const [currentTime, setCurrentTime] = useState(() => new Date());
+  const [renameTarget, setRenameTarget] = useState<Device | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [renameError, setRenameError] = useState('');
+  const [renameSaving, setRenameSaving] = useState(false);
+  const [agentPingStatus, setAgentPingStatus] = useState<AgentPingStatus>({});
 
   const canManagePolicy = authUser?.role === 'admin' || authUser?.role === 'manager';
   const canManageUsers = authUser?.role === 'admin';
   const canDeleteDevices = authUser?.role === 'admin';
   const canFilterBrowserHistory = authUser?.role === 'admin';
   const canManageReleases = authUser?.role === 'admin';
+  const canPingAgents = authUser?.role === 'admin';
 
   const apiFetch = useCallback((path: string, init?: RequestInit) => {
     return fetch(`${API}${path}`, {
@@ -225,9 +245,14 @@ export default function Home() {
     return () => window.clearInterval(id);
   }, []);
 
-  const fetchBrowserHistory = useCallback(async (deviceId: string, range = browserHistoryRange) => {
+  const fetchBrowserHistory = useCallback(async (
+    deviceId: string,
+    range = browserHistoryRange,
+    options: { showLoader?: boolean } = {}
+  ) => {
+    const showLoader = options.showLoader ?? true;
     try {
-      setBrowserHistoryLoading(state => ({ ...state, [deviceId]: true }));
+      if (showLoader) setBrowserHistoryLoading(state => ({ ...state, [deviceId]: true }));
       const res = await apiFetch(`/devices/${encodeURIComponent(deviceId)}/browser-history?${browserHistoryQuery(range)}`, { headers: readHeaders() });
       const data: BrowserHistoryArchiveData = res.ok ? await res.json() : { device_id: deviceId, from: '', to: '', count: 0, entries: [] };
       setBrowserHistoryCache(cache => ({
@@ -246,9 +271,39 @@ export default function Home() {
         },
       }));
     } finally {
-      setBrowserHistoryLoading(state => ({ ...state, [deviceId]: false }));
+      if (showLoader) setBrowserHistoryLoading(state => ({ ...state, [deviceId]: false }));
     }
   }, [apiFetch, browserHistoryRange]);
+
+  const fetchDailyAppUsage = useCallback(async (
+    deviceId: string,
+    date = appUsageDate,
+    options: { showLoader?: boolean } = {}
+  ) => {
+    const showLoader = options.showLoader ?? true;
+    try {
+      if (showLoader) setDailyAppUsageLoading(state => ({ ...state, [deviceId]: true }));
+      const res = await apiFetch(`/devices/${encodeURIComponent(deviceId)}/app-usage?date=${encodeURIComponent(date)}`, { headers: readHeaders() });
+      const data: DailyAppUsageData = res.ok ? await res.json() : { device_id: deviceId, date, users: [] };
+      setDailyAppUsageCache(cache => ({
+        ...cache,
+        [deviceId]: {
+          ...(cache[deviceId] ?? {}),
+          [date]: data,
+        },
+      }));
+    } catch {
+      setDailyAppUsageCache(cache => ({
+        ...cache,
+        [deviceId]: {
+          ...(cache[deviceId] ?? {}),
+          [date]: { device_id: deviceId, date, users: [] },
+        },
+      }));
+    } finally {
+      if (showLoader) setDailyAppUsageLoading(state => ({ ...state, [deviceId]: false }));
+    }
+  }, [apiFetch, appUsageDate]);
 
   const fetchAll = useCallback(async () => {
     try {
@@ -273,7 +328,12 @@ export default function Home() {
         await Promise.allSettled(
           devList
             .filter(d => activeTab[d.device_id] === 'browser')
-            .map(d => fetchBrowserHistory(d.device_id, browserHistoryRange))
+            .map(d => fetchBrowserHistory(d.device_id, browserHistoryRange, { showLoader: false }))
+        );
+        await Promise.allSettled(
+          devList
+            .filter(d => activeTab[d.device_id] === 'focus')
+            .map(d => fetchDailyAppUsage(d.device_id, appUsageDate, { showLoader: false }))
         );
       }
     } catch (e) {
@@ -281,7 +341,7 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }, [activeTab, apiFetch, browserHistoryRange, fetchBrowserHistory]);
+  }, [activeTab, apiFetch, appUsageDate, browserHistoryRange, fetchBrowserHistory, fetchDailyAppUsage]);
 
   const fetchPolicy = useCallback(async () => {
     try {
@@ -454,6 +514,47 @@ export default function Home() {
     }
   };
 
+  const pingAgent = async (deviceId: string) => {
+    if (!canPingAgents) return;
+    setAgentPingStatus(prev => ({
+      ...prev,
+      [deviceId]: { state: 'checking', message: 'Pinging...' },
+    }));
+    try {
+      const res = await apiFetch(`/devices/${encodeURIComponent(deviceId)}/ping`, {
+        method: 'POST',
+        headers: adminHeaders(),
+      });
+      if (!res.ok) {
+        const message = await readApiError(res);
+        setAgentPingStatus(prev => ({
+          ...prev,
+          [deviceId]: { state: 'error', message },
+        }));
+        return;
+      }
+      const data: { online?: boolean; age_seconds?: number; last_seen?: string } = await res.json();
+      const age = formatPingAge(data.age_seconds);
+      setAgentPingStatus(prev => ({
+        ...prev,
+        [deviceId]: {
+          state: data.online ? 'online' : 'offline',
+          message: data.online ? `Online, seen ${age}` : `No response, seen ${age}`,
+        },
+      }));
+      if (data.last_seen) {
+        setDevices(list => list.map(item => (
+          item.device_id === deviceId ? { ...item, last_seen: data.last_seen } : item
+        )));
+      }
+    } catch {
+      setAgentPingStatus(prev => ({
+        ...prev,
+        [deviceId]: { state: 'error', message: 'Ping failed' },
+      }));
+    }
+  };
+
   const savePolicy = async (nextPolicy: EnterprisePolicy) => {
     if (!canManagePolicy) return;
     setIsUpdating(true);
@@ -555,6 +656,21 @@ export default function Home() {
         delete next[deviceId];
         return next;
       });
+      setDailyAppUsageCache(prev => {
+        const next = { ...prev };
+        delete next[deviceId];
+        return next;
+      });
+      setDailyAppUsageLoading(prev => {
+        const next = { ...prev };
+        delete next[deviceId];
+        return next;
+      });
+      setAgentPingStatus(prev => {
+        const next = { ...prev };
+        delete next[deviceId];
+        return next;
+      });
       if (selectedDeviceId === deviceId) {
         setSelectedDeviceId('');
         setCurrentPage('inventory');
@@ -562,30 +678,48 @@ export default function Home() {
     } catch {}
   };
 
-  const renameDevice = async (device: Device) => {
+  const openRenameDevice = (device: Device) => {
     if (!canDeleteDevices) return;
-    const currentName = device.display_name || '';
-    const nextName = window.prompt('Device display name. Leave blank to use hostname.', currentName);
-    if (nextName === null) return;
-    const name = nextName.trim();
+    setRenameTarget(device);
+    setRenameValue(device.display_name || '');
+    setRenameError('');
+  };
+
+  const closeRenameDevice = () => {
+    if (renameSaving) return;
+    setRenameTarget(null);
+    setRenameValue('');
+    setRenameError('');
+  };
+
+  const saveRenameDevice = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!renameTarget || !canDeleteDevices) return;
+    const name = renameValue.trim();
     if (name.length > 80) {
-      window.alert('Device name must be 80 characters or fewer.');
+      setRenameError('Name must be 80 characters or fewer.');
       return;
     }
+    setRenameSaving(true);
+    setRenameError('');
     try {
-      const res = await apiFetch(`/devices/${encodeURIComponent(device.device_id)}/name`, {
+      const res = await apiFetch(`/devices/${encodeURIComponent(renameTarget.device_id)}/name`, {
         method: 'PUT',
         headers: adminHeaders(),
         body: JSON.stringify({ name }),
       });
       if (!res.ok) throw new Error(await readApiError(res));
       setDevices(list => list.map(item => (
-        item.device_id === device.device_id
+        item.device_id === renameTarget.device_id
           ? { ...item, display_name: name || undefined }
           : item
       )));
+      setRenameTarget(null);
+      setRenameValue('');
     } catch {
-      window.alert('Could not rename device. Check the API connection and try again.');
+      setRenameError('Could not rename device. Check the API connection and try again.');
+    } finally {
+      setRenameSaving(false);
     }
   };
 
@@ -593,12 +727,20 @@ export default function Home() {
   const setTab = (id: string, tab: DeviceTab) => {
     setActiveTab(prev => ({ ...prev, [id]: tab }));
     if (tab === 'browser') void fetchBrowserHistory(id, browserHistoryRange);
+    if (tab === 'focus') void fetchDailyAppUsage(id, appUsageDate);
   };
 
   const updateBrowserHistoryRange = (range: BrowserHistoryRange) => {
     setBrowserHistoryRange(range);
     if (selectedDeviceId && getTab(selectedDeviceId) === 'browser') {
       void fetchBrowserHistory(selectedDeviceId, range);
+    }
+  };
+
+  const updateAppUsageDate = (date: string) => {
+    setAppUsageDate(date);
+    if (selectedDeviceId && getTab(selectedDeviceId) === 'focus') {
+      void fetchDailyAppUsage(selectedDeviceId, date);
     }
   };
 
@@ -615,6 +757,9 @@ export default function Home() {
   const selectedBrowserHistoryLoaded = selectedDevice
     ? browserHistoryCache[selectedDevice.device_id]?.[browserHistoryRange] !== undefined
     : false;
+  const selectedDailyAppUsage = selectedDevice
+    ? dailyAppUsageCache[selectedDevice.device_id]?.[appUsageDate]
+    : undefined;
 
   const deviceRisk = (device: Device) => {
     const hw = device.data?.HardwareStats;
@@ -1455,7 +1600,13 @@ export default function Home() {
                   tab={getTab(selectedDevice.device_id)}
                   onTabChange={tab => setTab(selectedDevice.device_id, tab)}
                   onDelete={canDeleteDevices ? () => deleteDevice(selectedDevice.device_id) : undefined}
+                  onPing={canPingAgents ? () => pingAgent(selectedDevice.device_id) : undefined}
+                  pingStatus={agentPingStatus[selectedDevice.device_id]}
                   cachedFocus={focusCache[selectedDevice.device_id] ?? []}
+                  dailyAppUsage={selectedDailyAppUsage}
+                  dailyAppUsageLoading={Boolean(dailyAppUsageLoading[selectedDevice.device_id])}
+                  appUsageDate={appUsageDate}
+                  onAppUsageDateChange={updateAppUsageDate}
                   browserHistory={selectedBrowserHistory}
                   browserHistoryRange={browserHistoryRange}
                   browserHistoryLoading={Boolean(browserHistoryLoading[selectedDevice.device_id])}
@@ -1578,7 +1729,7 @@ export default function Home() {
                                 <button
                                   type="button"
                                   className="action-btn"
-                                  onClick={() => renameDevice(device)}
+                                  onClick={() => openRenameDevice(device)}
                                 >
                                   Rename
                                 </button>
@@ -1616,6 +1767,48 @@ export default function Home() {
 
         </div>
       </main>
+
+      {renameTarget && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={closeRenameDevice}>
+          <form
+            className="modal-panel rename-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="rename-device-title"
+            onSubmit={saveRenameDevice}
+            onMouseDown={e => e.stopPropagation()}
+          >
+            <div className="modal-header">
+              <div>
+                <h2 id="rename-device-title">Rename Device</h2>
+                <p>{renameTarget.device_id}</p>
+              </div>
+              <button type="button" className="modal-close" onClick={closeRenameDevice} aria-label="Close">
+                ×
+              </button>
+            </div>
+            <label className="auth-field">
+              <span>Display Name</span>
+              <input
+                value={renameValue}
+                onChange={e => setRenameValue(e.target.value)}
+                placeholder={renameTarget.data?.SystemInfo?.hostname || renameTarget.hostname || 'Use hostname'}
+                maxLength={80}
+                autoFocus
+              />
+            </label>
+            {renameError && <div className="auth-error">{renameError}</div>}
+            <div className="modal-actions">
+              <button type="button" className="action-btn" onClick={closeRenameDevice} disabled={renameSaving}>
+                Cancel
+              </button>
+              <button type="submit" className="action-btn primary" disabled={renameSaving}>
+                {renameSaving ? 'Saving...' : 'Save Name'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
 
     </div>
   );
