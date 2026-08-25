@@ -93,7 +93,7 @@ async function readApiError(res: Response): Promise<string> {
   const text = await res.text();
   const trimmed = text.trim();
   if (trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html')) {
-    return `API route returned ${res.status}. Check that nginx proxies API paths to the DevicePulse API.`;
+    return `API route returned HTML instead of JSON/text (${res.status}). Check that /api is proxied to the DevicePulse API.`;
   }
   return trimmed || `Request failed with status ${res.status}.`;
 }
@@ -224,8 +224,7 @@ export default function Home() {
     try {
       setBrowserHistoryLoading(state => ({ ...state, [deviceId]: true }));
       const res = await apiFetch(`/devices/${encodeURIComponent(deviceId)}/browser-history?${browserHistoryQuery(range)}`, { headers: readHeaders() });
-      if (!res.ok) return;
-      const data: BrowserHistoryArchiveData = await res.json();
+      const data: BrowserHistoryArchiveData = res.ok ? await res.json() : { device_id: deviceId, from: '', to: '', count: 0, entries: [] };
       setBrowserHistoryCache(cache => ({
         ...cache,
         [deviceId]: {
@@ -234,6 +233,13 @@ export default function Home() {
         },
       }));
     } catch {
+      setBrowserHistoryCache(cache => ({
+        ...cache,
+        [deviceId]: {
+          ...cache[deviceId],
+          [range]: [],
+        },
+      }));
     } finally {
       setBrowserHistoryLoading(state => ({ ...state, [deviceId]: false }));
     }
@@ -390,7 +396,7 @@ export default function Home() {
         body: JSON.stringify(userForm),
       });
       if (!res.ok) {
-        setUserCreateStatus(await res.text());
+        setUserCreateStatus(await readApiError(res));
         return;
       }
       setUserForm({ name: '', email: '', password: '', role: 'viewer' });
@@ -411,7 +417,7 @@ export default function Home() {
         body: JSON.stringify({ password: passwordResetValue }),
       });
       if (!res.ok) {
-        setPasswordResetStatus(await res.text());
+        setPasswordResetStatus(await readApiError(res));
         return;
       }
       setPasswordResetValue('');
@@ -432,7 +438,7 @@ export default function Home() {
         body: JSON.stringify({ role }),
       });
       if (!res.ok) {
-        setRoleUpdateStatus(await res.text());
+        setRoleUpdateStatus(await readApiError(res));
         return;
       }
       setUsers(list => list.map(item => item.id === user.id ? { ...item, role } : item));
@@ -522,7 +528,7 @@ export default function Home() {
     if (!confirm(`Remove device ${deviceId}, delete its stored data, and revoke future agent uploads?`)) return;
     try {
       const res = await apiFetch(`/devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE', headers: adminHeaders() });
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok) throw new Error(await readApiError(res));
       setDevices(d => d.filter(x => x.device_id !== deviceId));
       setActiveTab(prev => {
         const next = { ...prev };
@@ -574,6 +580,9 @@ export default function Home() {
   const selectedBrowserHistory = selectedDevice
     ? browserHistoryCache[selectedDevice.device_id]?.[browserHistoryRange]
     : undefined;
+  const selectedBrowserHistoryLoaded = selectedDevice
+    ? browserHistoryCache[selectedDevice.device_id]?.[browserHistoryRange] !== undefined
+    : false;
 
   const deviceRisk = (device: Device) => {
     const hw = device.data?.HardwareStats;
@@ -1353,6 +1362,22 @@ export default function Home() {
                             <span>{job.api_url}</span>
                           </div>
                           {job.error && <div className="build-error">{job.error}</div>}
+                          {job.artifacts?.length > 0 && (
+                            <div className="artifact-list">
+                              {job.artifacts.map(artifact => (
+                                <a
+                                  key={artifact.s3_key || artifact.file_name}
+                                  href={artifact.download_url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="artifact-link"
+                                >
+                                  <span className="pill pill-blue mono">{artifact.kind || 'binary'}</span>
+                                  <span>{artifact.file_name}</span>
+                                </a>
+                              ))}
+                            </div>
+                          )}
                           {job.logs?.length > 0 && <pre className="build-log">{job.logs.slice(-2).join('\n\n')}</pre>}
                         </div>
                       ))}
@@ -1402,6 +1427,7 @@ export default function Home() {
                   browserHistory={selectedBrowserHistory}
                   browserHistoryRange={browserHistoryRange}
                   browserHistoryLoading={Boolean(browserHistoryLoading[selectedDevice.device_id])}
+                  browserHistoryLoaded={selectedBrowserHistoryLoaded}
                   canFilterBrowserHistory={canFilterBrowserHistory}
                   onBrowserHistoryRangeChange={updateBrowserHistoryRange}
                 />

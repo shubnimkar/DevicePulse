@@ -1,20 +1,25 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Build a .deb package for DevicePulse Agent (amd64)
+# Build a .deb package for DevicePulse Agent
 #
 # Requires: dpkg-deb (ships with dpkg on Debian/Ubuntu)
 # Called by: packaging/build.sh
-# Usage: build_deb.sh <version> <dist_dir>
+# Usage: build_deb.sh <version> <dist_dir> [amd64|arm64]
 # =============================================================================
 set -euo pipefail
 
 VERSION="${1:?version required}"
 DIST_DIR="${2:?dist_dir required}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ARCH="amd64"
+ARCH="${3:-amd64}"
 BINARY="$DIST_DIR/devicepulse-agent-${VERSION}-linux-${ARCH}"
 PKG_NAME="devicepulse-agent"
 PKG_DIR="$DIST_DIR/deb-staging-${VERSION}"
+
+case "$ARCH" in
+  amd64|arm64) ;;
+  *) echo "  ✗ Unsupported deb architecture: $ARCH"; exit 1 ;;
+esac
 
 if [[ ! -f "$BINARY" ]]; then
   echo "  ✗ Binary not found: $BINARY (run build.sh without --package first)"

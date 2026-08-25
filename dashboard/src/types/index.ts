@@ -188,6 +188,7 @@ export interface AgentRelease {
 export interface AgentBuildArtifact {
   os: AgentRelease['os'];
   arch: string;
+  kind?: 'binary' | 'package' | string;
   file_name: string;
   s3_key: string;
   download_url: string;

@@ -9,6 +9,7 @@ interface Props {
   canFilterHistory?: boolean;
   historyRange?: BrowserHistoryRange;
   historyLoading?: boolean;
+  historyLoaded?: boolean;
   onHistoryRangeChange?: (range: BrowserHistoryRange) => void;
 }
 
@@ -25,13 +26,43 @@ export default function BrowserTab({
   canFilterHistory = false,
   historyRange = 'recent',
   historyLoading = false,
+  historyLoaded = true,
   onHistoryRangeChange,
 }: Props) {
   const [expanded, setExpanded] = useState(false);
 
   const uniqueHistory = dedupeHistory(history);
 
-  if (!uniqueHistory.length && !canFilterHistory) return <div className="no-data">No browser history.</div>;
+  const toolbar = canFilterHistory ? (
+    <div className="browser-history-toolbar">
+      <div className="segmented-control compact" role="group" aria-label="Browser history date range">
+        {(['recent', 'last_day', 'day_before'] as const).map(range => (
+          <button
+            key={range}
+            type="button"
+            className={historyRange === range ? 'active' : ''}
+            onClick={() => {
+              setExpanded(false);
+              onHistoryRangeChange?.(range);
+            }}
+          >
+            {rangeLabels[range]}
+          </button>
+        ))}
+      </div>
+    </div>
+  ) : null;
+
+  if (historyLoading || !historyLoaded) {
+    return (
+      <div>
+        {toolbar}
+        <div className="loading">Loading browser history...</div>
+      </div>
+    );
+  }
+
+  if (!uniqueHistory.length && !canFilterHistory) return <div className="no-data">No browser history entries.</div>;
 
   const topRecent = uniqueHistory.slice(0, 10);
   const hasMore   = uniqueHistory.length > 10;
@@ -77,26 +108,7 @@ export default function BrowserTab({
 
   return (
     <div>
-      {canFilterHistory && (
-        <div className="browser-history-toolbar">
-          <div className="segmented-control compact" role="group" aria-label="Browser history date range">
-            {(['recent', 'last_day', 'day_before'] as const).map(range => (
-              <button
-                key={range}
-                type="button"
-                className={historyRange === range ? 'active' : ''}
-                onClick={() => {
-                  setExpanded(false);
-                  onHistoryRangeChange?.(range);
-                }}
-              >
-                {rangeLabels[range]}
-              </button>
-            ))}
-          </div>
-          {historyLoading && <span className="history-loading">Loading</span>}
-        </div>
-      )}
+      {toolbar}
 
       {topRecent.length > 0 && (
       <div className="browser-section">
@@ -108,7 +120,7 @@ export default function BrowserTab({
       )}
 
       {!uniqueHistory.length && (
-        <div className="no-data">No browser history for {rangeLabels[historyRange].toLowerCase()}.</div>
+        <div className="no-data">No browser history entries for {rangeLabels[historyRange].toLowerCase()}.</div>
       )}
 
       {hasMore && (

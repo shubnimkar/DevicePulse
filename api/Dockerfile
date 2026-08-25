@@ -11,7 +11,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/devicep
 FROM golang:1.25-bookworm AS runtime
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates bash \
+  && apt-get install -y --no-install-recommends ca-certificates bash dpkg-dev \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace

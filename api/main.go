@@ -2256,6 +2256,7 @@ type AgentRelease struct {
 type AgentBuildArtifact struct {
 	OS          string `bson:"os"              json:"os"`
 	Arch        string `bson:"arch"            json:"arch"`
+	Kind        string `bson:"kind"            json:"kind"`
 	FileName    string `bson:"file_name"       json:"file_name"`
 	S3Key       string `bson:"s3_key"          json:"s3_key"`
 	DownloadURL string `bson:"download_url"    json:"download_url"`
@@ -2664,6 +2665,15 @@ func runAgentBuildJob(jobID primitive.ObjectID) {
 			failAgentBuildJob(ctx, jobID, fmt.Sprintf("build %s failed: %v", platform, err))
 			return
 		}
+		if platform == "linux" {
+			for _, arch := range job.Archs {
+				if err := buildLinuxDebPackage(ctx, buildRoot, distDir, job.Version, arch); err != nil {
+					failAgentBuildJob(ctx, jobID, err.Error())
+					return
+				}
+				appendAgentBuildLog(ctx, jobID, fmt.Sprintf("Built Linux .deb package for %s", arch))
+			}
+		}
 	}
 
 	setAgentBuildJob(ctx, jobID, bson.M{"status": "uploading", "updated_at": time.Now()})
@@ -2732,6 +2742,23 @@ func validateAgentReleaseS3Config() error {
 	return nil
 }
 
+func buildLinuxDebPackage(ctx context.Context, buildRoot, distDir, version, arch string) error {
+	script := filepath.Join(buildRoot, "packaging", "linux", "build_deb.sh")
+	if _, err := os.Stat(script); err != nil {
+		return fmt.Errorf("deb package script not found at %s", script)
+	}
+	cmdCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(cmdCtx, "bash", script, version, distDir, arch)
+	cmd.Dir = buildRoot
+	cmd.Env = append(os.Environ(), "GOCACHE=/tmp/devicepulse-go-build-cache")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("deb package %s failed: %v: %s", arch, err, trimBuildOutput(string(output)))
+	}
+	return nil
+}
+
 func uploadAgentBuildArtifacts(ctx context.Context, job AgentBuildJob, distDir string) ([]AgentBuildArtifact, error) {
 	client, bucket, prefix, publicBase, err := agentReleaseS3Client(ctx)
 	if err != nil {
@@ -2746,46 +2773,21 @@ func uploadAgentBuildArtifacts(ctx context.Context, job AgentBuildJob, distDir s
 				continue
 			}
 			fileName := fmt.Sprintf("devicepulse-agent-%s-%s", job.Version, suffix)
-			path := filepath.Join(distDir, fileName)
-			info, err := os.Stat(path)
+			artifact, err := uploadAgentArtifactFile(ctx, client, bucket, prefix, publicBase, distDir, job.Version, platform, arch, "binary", fileName, true)
 			if err != nil {
-				return nil, fmt.Errorf("expected artifact missing: %s", fileName)
+				return nil, err
 			}
-			checksum, err := sha256File(path)
-			if err != nil {
-				return nil, fmt.Errorf("checksum %s: %w", fileName, err)
-			}
-			key := strings.Trim(strings.TrimSpace(prefix), "/")
-			if key != "" {
-				key += "/"
-			}
-			key += fmt.Sprintf("%s/%s/%s/%s", job.Version, platform, arch, fileName)
+			artifacts = append(artifacts, artifact)
 
-			f, err := os.Open(path)
-			if err != nil {
-				return nil, fmt.Errorf("open %s: %w", fileName, err)
+			for _, packageName := range packageArtifactNames(job.Version, platform, arch) {
+				artifact, err := uploadAgentArtifactFile(ctx, client, bucket, prefix, publicBase, distDir, job.Version, platform, arch, "package", packageName, false)
+				if err != nil {
+					return nil, err
+				}
+				if artifact.FileName != "" {
+					artifacts = append(artifacts, artifact)
+				}
 			}
-			_, putErr := client.PutObject(ctx, &s3.PutObjectInput{
-				Bucket:        aws.String(bucket),
-				Key:           aws.String(key),
-				Body:          f,
-				ContentLength: aws.Int64(info.Size()),
-				ContentType:   aws.String("application/octet-stream"),
-			})
-			f.Close()
-			if putErr != nil {
-				return nil, fmt.Errorf("upload %s: %w", fileName, putErr)
-			}
-
-			artifacts = append(artifacts, AgentBuildArtifact{
-				OS:          platform,
-				Arch:        arch,
-				FileName:    fileName,
-				S3Key:       key,
-				DownloadURL: agentReleasePublicURL(publicBase, bucket, key),
-				Checksum:    checksum,
-				SizeBytes:   info.Size(),
-			})
 		}
 	}
 	if len(artifacts) == 0 {
@@ -2794,11 +2796,83 @@ func uploadAgentBuildArtifacts(ctx context.Context, job AgentBuildJob, distDir s
 	return artifacts, nil
 }
 
+func uploadAgentArtifactFile(ctx context.Context, client *s3.Client, bucket, prefix, publicBase, distDir, version, platform, arch, kind, fileName string, required bool) (AgentBuildArtifact, error) {
+	path := filepath.Join(distDir, fileName)
+	info, err := os.Stat(path)
+	if err != nil {
+		if required {
+			return AgentBuildArtifact{}, fmt.Errorf("expected artifact missing: %s", fileName)
+		}
+		return AgentBuildArtifact{}, nil
+	}
+	checksum, err := sha256File(path)
+	if err != nil {
+		return AgentBuildArtifact{}, fmt.Errorf("checksum %s: %w", fileName, err)
+	}
+	key := strings.Trim(strings.TrimSpace(prefix), "/")
+	if key != "" {
+		key += "/"
+	}
+	key += fmt.Sprintf("%s/%s/%s/%s", version, platform, arch, fileName)
+
+	f, err := os.Open(path)
+	if err != nil {
+		return AgentBuildArtifact{}, fmt.Errorf("open %s: %w", fileName, err)
+	}
+	_, putErr := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(bucket),
+		Key:           aws.String(key),
+		Body:          f,
+		ContentLength: aws.Int64(info.Size()),
+		ContentType:   aws.String(agentArtifactContentType(fileName)),
+	})
+	f.Close()
+	if putErr != nil {
+		return AgentBuildArtifact{}, fmt.Errorf("upload %s: %w", fileName, putErr)
+	}
+
+	return AgentBuildArtifact{
+		OS:          platform,
+		Arch:        arch,
+		Kind:        kind,
+		FileName:    fileName,
+		S3Key:       key,
+		DownloadURL: agentReleasePublicURL(publicBase, bucket, key),
+		Checksum:    checksum,
+		SizeBytes:   info.Size(),
+	}, nil
+}
+
+func packageArtifactNames(version, platform, arch string) []string {
+	if platform != "linux" {
+		return nil
+	}
+	return []string{fmt.Sprintf("devicepulse-agent_%s_%s.deb", version, arch)}
+}
+
+func agentArtifactContentType(fileName string) string {
+	switch {
+	case strings.HasSuffix(fileName, ".deb"):
+		return "application/vnd.debian.binary-package"
+	case strings.HasSuffix(fileName, ".rpm"):
+		return "application/x-rpm"
+	case strings.HasSuffix(fileName, ".pkg"):
+		return "application/octet-stream"
+	case strings.HasSuffix(fileName, ".msi"):
+		return "application/octet-stream"
+	default:
+		return "application/octet-stream"
+	}
+}
+
 func publishAgentArtifacts(ctx context.Context, version string, artifacts []AgentBuildArtifact) error {
 	coll := mongoClient.Database(dbName).Collection("agent_releases")
 	now := time.Now()
 	docs := make([]interface{}, 0, len(artifacts))
 	for _, artifact := range artifacts {
+		if artifact.Kind != "" && artifact.Kind != "binary" {
+			continue
+		}
 		docs = append(docs, AgentRelease{
 			Version:     version,
 			OS:          artifact.OS,
@@ -2808,6 +2882,9 @@ func publishAgentArtifacts(ctx context.Context, version string, artifacts []Agen
 			Checksum:    artifact.Checksum,
 			PublishedAt: now,
 		})
+	}
+	if len(docs) == 0 {
+		return fmt.Errorf("no binary artifacts were produced")
 	}
 	if _, err := coll.InsertMany(ctx, docs); err != nil {
 		return fmt.Errorf("publish release metadata: %w", err)

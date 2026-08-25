@@ -23,6 +23,7 @@ interface Props {
   browserHistory?: HistoryEntry[];
   browserHistoryRange?: BrowserHistoryRange;
   browserHistoryLoading?: boolean;
+  browserHistoryLoaded?: boolean;
   canFilterBrowserHistory?: boolean;
   onBrowserHistoryRangeChange?: (range: BrowserHistoryRange) => void;
 }
@@ -49,12 +50,13 @@ export default function DeviceCard({
   browserHistory,
   browserHistoryRange = 'recent',
   browserHistoryLoading = false,
+  browserHistoryLoaded = true,
   canFilterBrowserHistory = false,
   onBrowserHistoryRangeChange,
 }: Props) {
   const sys    = device.data?.SystemInfo;
   const procs  = device.data?.ProcessMonitor?.top_processes ?? [];
-  const history = browserHistory ?? device.data?.BrowserHistory?.top_recent_urls ?? [];
+  const history = browserHistory ?? (browserHistoryLoaded ? device.data?.BrowserHistory?.top_recent_urls : undefined) ?? [];
   const hw     = device.data?.HardwareStats;
   const online = isOnline(device.last_seen);
 
@@ -142,6 +144,7 @@ export default function DeviceCard({
             canFilterHistory={canFilterBrowserHistory}
             historyRange={browserHistoryRange}
             historyLoading={browserHistoryLoading}
+            historyLoaded={browserHistoryLoaded}
             onHistoryRangeChange={onBrowserHistoryRangeChange}
           />
         )}

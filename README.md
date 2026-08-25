@@ -187,6 +187,8 @@ location / {
 
 With this setup, set dashboard `NEXT_PUBLIC_API_URL` to `/api` or leave it unset; the dashboard defaults to `/api`. Build agents with an API URL that includes the prefix, for example `https://your-domain.com/api`. Root API paths still work for backward compatibility.
 
+If nginx forwards all traffic to the Next.js dashboard, set `API_INTERNAL_URL=http://127.0.0.1:8000` for the dashboard process. Next.js will rewrite `/api/*` to the Go API as a fallback.
+
 ### Authentication
 
 Agents authenticate via the `X-API-Key` header using the key returned at registration.
@@ -363,7 +365,8 @@ DevicePulse/
 | `BROWSER_HISTORY_S3_ENDPOINT` | API | — | Optional S3-compatible endpoint, for example MinIO |
 | `BROWSER_HISTORY_S3_PATH_STYLE` | API | `false` | Force path-style S3 requests; automatically enabled when endpoint is set |
 | `DEVICEPULSE_API_URL` | Agent | `http://localhost:8000` | API endpoint override at runtime |
-| `NEXT_PUBLIC_API_URL` | Dashboard | `http://localhost:8000` | API URL used by the browser dashboard |
+| `NEXT_PUBLIC_API_URL` | Dashboard | `/api` | API URL used by the browser dashboard |
+| `API_INTERNAL_URL` | Dashboard | `http://127.0.0.1:8000` | Server-side Next.js rewrite target for `/api/*` when nginx sends API traffic to the dashboard |
 | `NEXT_PUBLIC_DASHBOARD_TOKEN` | Dashboard | — | Dashboard token sent to read endpoints when `DASHBOARD_TOKEN` is configured |
 | `NEXT_PUBLIC_ADMIN_SECRET` | Dashboard | — | Admin secret sent for policy updates in simple dashboard deployments |
 
