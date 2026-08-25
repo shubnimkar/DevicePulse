@@ -1,0 +1,65 @@
+package main
+
+import (
+	"testing"
+
+	"go.mongodb.org/mongo-driver/bson"
+)
+
+func TestSanitizeActiveWindowPayloadDropsIgnoredProcesses(t *testing.T) {
+	payload := map[string]interface{}{
+		"data": map[string]interface{}{
+			"ActiveWindowTracker": map[string]interface{}{
+				"current_app": "fwupd",
+				"app_summaries": []interface{}{
+					map[string]interface{}{"app_name": "fwupd", "total_focus_seconds": 30.0, "session_count": 1.0},
+					map[string]interface{}{"app_name": "Chrome", "total_focus_seconds": 60.0, "session_count": 2.0},
+				},
+				"sessions": []interface{}{
+					map[string]interface{}{"app_name": "fwupd", "duration_seconds": 30.0},
+					map[string]interface{}{"app_name": "Chrome", "duration_seconds": 60.0},
+				},
+			},
+		},
+	}
+
+	sanitizeActiveWindowPayload(payload)
+
+	awt := payload["data"].(map[string]interface{})["ActiveWindowTracker"].(map[string]interface{})
+	if awt["current_app"] != "" {
+		t.Fatalf("expected ignored current_app to be cleared, got %q", awt["current_app"])
+	}
+	summaries := awt["app_summaries"].([]interface{})
+	if len(summaries) != 1 || summaries[0].(map[string]interface{})["app_name"] != "Chrome" {
+		t.Fatalf("expected only Chrome summary, got %#v", summaries)
+	}
+	sessions := awt["sessions"].([]interface{})
+	if len(sessions) != 1 || sessions[0].(map[string]interface{})["app_name"] != "Chrome" {
+		t.Fatalf("expected only Chrome session, got %#v", sessions)
+	}
+}
+
+func TestFilterDailyAppUsageRowsRecomputesVisibleTotals(t *testing.T) {
+	rows := []bson.M{{
+		"username": "aditya",
+		"top_apps": bson.A{
+			bson.M{"app_name": "fwupd", "total_seconds": 30.0, "session_count": 1.0},
+			bson.M{"app_name": "Chrome", "total_seconds": 60.0, "session_count": 2.0},
+		},
+	}}
+
+	filtered := filterDailyAppUsageRows(rows)
+	if len(filtered) != 1 {
+		t.Fatalf("expected visible row, got %#v", filtered)
+	}
+	if got := filtered[0]["total_seconds"]; got != 60.0 {
+		t.Fatalf("expected total_seconds 60, got %#v", got)
+	}
+	if got := filtered[0]["session_count"]; got != 2 {
+		t.Fatalf("expected session_count 2, got %#v", got)
+	}
+	apps := filtered[0]["top_apps"].([]interface{})
+	if len(apps) != 1 || apps[0].(bson.M)["app_name"] != "Chrome" {
+		t.Fatalf("expected only Chrome app, got %#v", apps)
+	}
+}

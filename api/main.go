@@ -90,7 +90,8 @@ func (fc *FocusCache) applyFocusSummaries(deviceID string, summaries []interface
 			continue
 		}
 		name, _ := m["app_name"].(string)
-		if name == "" {
+		name = strings.TrimSpace(name)
+		if !isVisibleAppUsageName(name) {
 			continue
 		}
 		dur, _ := toFloat(m["total_focus_seconds"])
@@ -183,9 +184,11 @@ func extractFocusSummaries(doc bson.M) []interface{} {
 		return nil
 	}
 	summaries, _ := awt["app_summaries"].(bson.A)
-	result := make([]interface{}, len(summaries))
-	for i, s := range summaries {
-		result[i] = s
+	result := make([]interface{}, 0, len(summaries))
+	for _, s := range summaries {
+		if isVisibleAppUsageSummary(s) {
+			result = append(result, s)
+		}
 	}
 	return result
 }
@@ -732,7 +735,125 @@ func focusSummariesFromPayload(payload map[string]interface{}) []interface{} {
 	if !ok || len(raw) == 0 {
 		return nil
 	}
-	return raw
+	out := make([]interface{}, 0, len(raw))
+	for _, item := range raw {
+		if isVisibleAppUsageSummary(item) {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func sanitizeActiveWindowPayload(payload map[string]interface{}) {
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	awt, ok := data["ActiveWindowTracker"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	if current, _ := awt["current_app"].(string); current != "" && !isVisibleAppUsageName(current) {
+		awt["current_app"] = ""
+	}
+	for _, key := range []string{"app_summaries", "cumulative_summaries", "sessions"} {
+		raw, ok := awt[key].([]interface{})
+		if !ok {
+			continue
+		}
+		filtered := make([]interface{}, 0, len(raw))
+		for _, item := range raw {
+			if isVisibleAppUsageSummary(item) {
+				filtered = append(filtered, item)
+			}
+		}
+		awt[key] = filtered
+	}
+}
+
+var ignoredAppUsageNames = map[string]struct{}{
+	"apt-check":         {},
+	"apt.systemd.daily": {},
+	"dbus-daemon":       {},
+	"fwupd":             {},
+	"packagekitd":       {},
+	"snapd":             {},
+	"systemd":           {},
+	"upowerd":           {},
+	"devicepulse-age":   {},
+	"devicepulse-agent": {},
+}
+
+func isVisibleAppUsageName(name string) bool {
+	key := strings.ToLower(strings.TrimSpace(name))
+	key = strings.TrimSuffix(key, ".service")
+	if key == "" {
+		return false
+	}
+	if _, ignored := ignoredAppUsageNames[key]; ignored {
+		return false
+	}
+	return !strings.HasPrefix(key, "devicepulse-")
+}
+
+func isVisibleAppUsageSummary(raw interface{}) bool {
+	switch m := raw.(type) {
+	case map[string]interface{}:
+		name, _ := m["app_name"].(string)
+		return isVisibleAppUsageName(name)
+	case bson.M:
+		name, _ := m["app_name"].(string)
+		return isVisibleAppUsageName(name)
+	default:
+		return false
+	}
+}
+
+func filterDailyAppUsageRows(rows []bson.M) []bson.M {
+	filteredRows := make([]bson.M, 0, len(rows))
+	for _, row := range rows {
+		topApps, totalS, sessionCount := filterDailyTopApps(row["top_apps"])
+		if len(topApps) == 0 {
+			continue
+		}
+		row["top_apps"] = topApps
+		row["total_seconds"] = totalS
+		row["session_count"] = sessionCount
+		filteredRows = append(filteredRows, row)
+	}
+	return filteredRows
+}
+
+func filterDailyTopApps(raw interface{}) ([]interface{}, float64, int) {
+	items, ok := raw.(bson.A)
+	if !ok {
+		items, ok = raw.([]interface{})
+	}
+	if !ok {
+		return nil, 0, 0
+	}
+	out := make([]interface{}, 0, len(items))
+	totalS := 0.0
+	sessionCount := 0
+	for _, item := range items {
+		if !isVisibleAppUsageSummary(item) {
+			continue
+		}
+		out = append(out, item)
+		switch m := item.(type) {
+		case bson.M:
+			seconds, _ := toFloat(m["total_seconds"])
+			sessions, _ := toFloat(m["session_count"])
+			totalS += seconds
+			sessionCount += int(sessions)
+		case map[string]interface{}:
+			seconds, _ := toFloat(m["total_seconds"])
+			sessions, _ := toFloat(m["session_count"])
+			totalS += seconds
+			sessionCount += int(sessions)
+		}
+	}
+	return out, totalS, sessionCount
 }
 
 func activityUsername(payload map[string]interface{}) string {
@@ -765,7 +886,7 @@ func extractFocusSessions(payload map[string]interface{}) []interface{} {
 		}
 		appName, _ := session["app_name"].(string)
 		appName = strings.TrimSpace(appName)
-		if appName == "" {
+		if !isVisibleAppUsageName(appName) {
 			continue
 		}
 		duration, ok := toFloat(session["duration_seconds"])
@@ -822,7 +943,7 @@ func summarizeActivitySessions(sessions []interface{}) ([]interface{}, float64) 
 		appName, _ := m["app_name"].(string)
 		appName = strings.TrimSpace(appName)
 		duration, ok := toFloat(m["duration_seconds"])
-		if appName == "" || !ok || duration <= 0 {
+		if !isVisibleAppUsageName(appName) || !ok || duration <= 0 {
 			continue
 		}
 		item, ok := totals[appName]
@@ -2118,6 +2239,7 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 	payload["device_id"] = authDeviceID
 	payload["ingested_at"] = now
 	payload["telemetry_expires_at"] = now.AddDate(0, 0, retentionDays)
+	sanitizeActiveWindowPayload(payload)
 
 	if browserArchive != nil {
 		archiveResult, err := browserArchive.Archive(ctx, authDeviceID, payload)
@@ -2461,6 +2583,7 @@ func deviceAppUsageHandler(w http.ResponseWriter, r *http.Request) {
 	if rows == nil {
 		rows = []bson.M{}
 	}
+	rows = filterDailyAppUsageRows(rows)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{

@@ -5,9 +5,12 @@ import "strings"
 var ignoredLinuxForegroundProcesses = map[string]struct{}{
 	"apt-check":         {},
 	"apt.systemd.daily": {},
+	"dbus-daemon":       {},
+	"fwupd":             {},
 	"packagekitd":       {},
 	"snapd":             {},
-	"fwupd":             {},
+	"systemd":           {},
+	"upowerd":           {},
 	"devicepulse-age":   {},
 	"devicepulse-agent": {},
 }

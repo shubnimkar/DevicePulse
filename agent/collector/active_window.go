@@ -246,14 +246,17 @@ func getForegroundAppMacOS() string {
 
 func getForegroundAppLinux() string {
 	// Prefer X11 when DISPLAY is set; fall back to Wayland paths.
-	if os.Getenv("DISPLAY") != "" {
+	hasDisplay := os.Getenv("DISPLAY") != ""
+	hasWayland := os.Getenv("WAYLAND_DISPLAY") != "" || os.Getenv("XDG_SESSION_TYPE") == "wayland"
+
+	if hasDisplay {
 		if name := getActiveWindowX11(); name != "" {
 			return cleanLinuxForegroundApp(name)
 		}
 	}
 
 	// Wayland paths.
-	if os.Getenv("WAYLAND_DISPLAY") != "" || os.Getenv("XDG_SESSION_TYPE") == "wayland" {
+	if hasWayland {
 		// Try GNOME first (most deployed enterprise Linux desktop).
 		if name := getActiveWindowWaylandGNOME(); name != "" {
 			return cleanLinuxForegroundApp(name)
@@ -268,7 +271,13 @@ func getForegroundAppLinux() string {
 		}
 	}
 
-	// /proc-based fallback — works even in headless/TTY sessions.
+	// Without a display session, /proc can only tell us about background
+	// processes, not the GUI app the person is using.
+	if !hasDisplay && !hasWayland {
+		return ""
+	}
+
+	// /proc-based fallback — best effort for broken display-server access.
 	return cleanLinuxForegroundApp(getActiveWindowProcFallback())
 }
 
