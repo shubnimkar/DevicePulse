@@ -47,7 +47,8 @@ func (b *BrowserHistory) Start() error { return nil }
 func (b *BrowserHistory) Stop() error  { return nil }
 
 const maxBrowserHistoryScanEntries = 5000
-const maxBrowserHistoryUploadEntries = 200
+const maxBrowserHistoryRecentSnapshotEntries = 200
+const maxBrowserHistoryUploadEntries = 5000
 const maxBrowserHistorySentStateEntries = 10000
 
 type browserHistoryState struct {
@@ -112,8 +113,8 @@ func (b *BrowserHistory) Collect() (map[string]interface{}, error) {
 		return allEntries[i].LastVisitTime > allEntries[j].LastVisitTime
 	})
 	recentSnapshot := append([]HistoryEntry(nil), allEntries...)
-	if len(recentSnapshot) > maxBrowserHistoryUploadEntries {
-		recentSnapshot = recentSnapshot[:maxBrowserHistoryUploadEntries]
+	if len(recentSnapshot) > maxBrowserHistoryRecentSnapshotEntries {
+		recentSnapshot = recentSnapshot[:maxBrowserHistoryRecentSnapshotEntries]
 	}
 
 	filtered := allEntries[:0]

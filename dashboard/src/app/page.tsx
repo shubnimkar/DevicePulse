@@ -61,6 +61,16 @@ const roleLabel: Record<UserRole, string> = {
   viewer: 'Viewer',
 };
 
+function formatHeaderTime(date: Date): string {
+  return date.toLocaleString(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 function localDateKey(daysAgo: number): string {
   const date = new Date();
   date.setDate(date.getDate() - daysAgo);
@@ -104,21 +114,6 @@ const IconList = () => (
 const IconSearch = () => (
   <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
     <circle cx="6.5" cy="6.5" r="5"/><path d="M10.5 10.5L14 14"/>
-  </svg>
-);
-const IconFilter = () => (
-  <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-    <path d="M1 3h14M3 8h10M6 13h4"/>
-  </svg>
-);
-const IconExport = () => (
-  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-    <path d="M8 1v9M5 7l3 3 3-3M2 11v2a1 1 0 001 1h10a1 1 0 001-1v-2"/>
-  </svg>
-);
-const IconPlus = () => (
-  <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2">
-    <path d="M8 2v12M2 8h12"/>
   </svg>
 );
 const IconLogo = () => (
@@ -173,6 +168,7 @@ export default function Home() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [currentPage, setCurrentPage] = useState<PageView>('dashboard');
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
+  const [currentTime, setCurrentTime] = useState(() => new Date());
 
   const canManagePolicy = authUser?.role === 'admin' || authUser?.role === 'manager';
   const canManageUsers = authUser?.role === 'admin';
@@ -218,6 +214,11 @@ export default function Home() {
   useEffect(() => {
     void loadCurrentUser();
   }, [loadCurrentUser]);
+
+  useEffect(() => {
+    const id = window.setInterval(() => setCurrentTime(new Date()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
 
   const fetchBrowserHistory = useCallback(async (deviceId: string, range = browserHistoryRange) => {
     try {
@@ -373,7 +374,7 @@ export default function Home() {
       setAuthUser(null);
       setDevices([]);
       setFocusCache({});
-      setCurrentPage('inventory');
+      setCurrentPage('dashboard');
       setAuthMode('login');
       void loadCurrentUser();
     }
@@ -518,9 +519,9 @@ export default function Home() {
 
   const deleteDevice = async (deviceId: string) => {
     if (!canDeleteDevices) return;
-    if (!confirm(`Remove device ${deviceId} and all of its data?`)) return;
+    if (!confirm(`Remove device ${deviceId}, delete its stored data, and revoke future agent uploads?`)) return;
     try {
-      const res = await apiFetch(`/devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE', headers: readHeaders() });
+      const res = await apiFetch(`/devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE', headers: adminHeaders() });
       if (!res.ok) throw new Error(await res.text());
       setDevices(d => d.filter(x => x.device_id !== deviceId));
       setActiveTab(prev => {
@@ -742,31 +743,33 @@ export default function Home() {
         </div>
 
         <div className="header-right">
-          <div className="user-chip">
-            <span>{authUser.name || authUser.email}</span>
-            <strong>{roleLabel[authUser.role]}</strong>
+          <div className="header-status">
+            <span className="header-time">{formatHeaderTime(currentTime)}</span>
+            {!loading && (
+              <span className="live-badge">
+                <span className="dot" />
+                Live
+              </span>
+            )}
           </div>
-          {!loading && (
-            <span className="live-badge">
-              <span className="dot" />
-              Live
-            </span>
-          )}
-          <button type="button" className="btn" onClick={logout}>Sign out</button>
+          <details className="user-menu">
+            <summary className="user-chip" aria-label="User menu">
+              <span className="user-avatar">{(authUser.name || authUser.email || 'U').charAt(0).toUpperCase()}</span>
+              <span className="user-copy">
+                <span className="user-name">{authUser.name || authUser.email}</span>
+                <span className="user-role">{roleLabel[authUser.role]}</span>
+              </span>
+              <span className="user-caret" aria-hidden="true" />
+            </summary>
+            <div className="user-menu-panel">
+              <button type="button" onClick={logout}>Sign out</button>
+            </div>
+          </details>
         </div>
       </header>
 
       {/* ── Sidebar ── */}
       <aside className="app-sidebar">
-        <button
-          type="button"
-          className="add-device-btn"
-          onClick={() => window.alert('Start the DevicePulse agent on a machine to add it to inventory.')}
-        >
-          <IconPlus />
-          Add Device
-        </button>
-
         <div className="sidebar-section">
           <div className="sidebar-label">Navigation</div>
           <nav className="sidebar-nav" aria-label="Dashboard pages">
@@ -892,14 +895,6 @@ export default function Home() {
                     aria-label="Search devices"
                   />
                 </div>
-                <button type="button" className="btn" onClick={() => setStatusFilter(statusFilter === 'all' ? 'offline' : 'all')}>
-                  <IconFilter />
-                  Filters
-                </button>
-                <button type="button" className="btn" onClick={() => window.print()}>
-                  <IconExport />
-                  Export
-                </button>
               </div>
             )}
           </div>
@@ -1439,6 +1434,7 @@ export default function Home() {
                     <tr>
                       <th>Device</th>
                       <th>Status</th>
+                      <th>Agent</th>
                       <th>Platform</th>
                       <th>Connection</th>
                       <th>Last Seen</th>
@@ -1477,6 +1473,20 @@ export default function Home() {
                               <span className="dot" />
                               {stateLabel}
                             </span>
+                          </td>
+                          <td>
+                            <div className="cell-stack">
+                              <strong>
+                                {device.agent_version
+                                  ? `Agent ${device.agent_version}`
+                                  : online ? 'DevicePulse Agent' : 'Unknown agent'}
+                              </strong>
+                              <span>
+                                {[device.agent_os, device.agent_arch].filter(Boolean).join(', ') ||
+                                  device.agent_update_status ||
+                                  (online ? 'Waiting for version' : 'No check-in')}
+                              </span>
+                            </div>
                           </td>
                           <td>
                             <div className="cell-stack">

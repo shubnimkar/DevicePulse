@@ -257,11 +257,6 @@ func normalizePolicy(input map[string]interface{}) map[string]interface{} {
 		}
 	}
 
-	if policy["browser_history_mode"] == "disabled" {
-		policy["browser_history_mode"] = "full_url"
-	}
-	policy["collect_browser_history"] = true
-
 	return policy
 }
 
@@ -442,6 +437,9 @@ func telemetryMetadata(payload map[string]interface{}, archiveResult *TelemetryA
 		"telemetry_expires_at":  payload["telemetry_expires_at"],
 		"telemetry_archive":     archiveResult,
 		"telemetry_archive_key": archiveResult.Key,
+		"agent_version":         payload["agent_version"],
+		"agent_os":              payload["agent_os"],
+		"agent_arch":            payload["agent_arch"],
 	}
 	if summaries := focusSummariesFromPayload(payload); len(summaries) > 0 {
 		doc["data"] = bson.M{
@@ -451,6 +449,68 @@ func telemetryMetadata(payload map[string]interface{}, archiveResult *TelemetryA
 		}
 	}
 	return doc
+}
+
+func deviceIdentityFilters(deviceID, hardwareUUID, macAddress, hostname string) bson.A {
+	filters := bson.A{}
+	if deviceID != "" {
+		filters = append(filters, bson.M{"device_id": deviceID})
+	}
+	if hardwareUUID != "" {
+		filters = append(filters, bson.M{"hardware_uuid": hardwareUUID})
+	}
+	if macAddress != "" {
+		filters = append(filters, bson.M{"mac_address": macAddress})
+	}
+	if hostname != "" && hostname != "unknown" {
+		filters = append(filters, bson.M{"hostname": hostname})
+	}
+	return filters
+}
+
+func revokedDeviceFilter(deviceID, hardwareUUID, macAddress, hostname string) bson.M {
+	filters := deviceIdentityFilters(deviceID, hardwareUUID, macAddress, hostname)
+	if len(filters) == 0 {
+		return bson.M{"_id": "__never__"}
+	}
+	return bson.M{"$or": filters}
+}
+
+func isDeviceRevoked(ctx context.Context, deviceID, hardwareUUID, macAddress, hostname string) bool {
+	filter := revokedDeviceFilter(deviceID, hardwareUUID, macAddress, hostname)
+	err := mongoClient.Database(dbName).Collection("device_revocations").FindOne(ctx, filter).Err()
+	return err == nil
+}
+
+func createDeviceRevocation(ctx context.Context, device bson.M, reason string) error {
+	now := time.Now().UTC()
+	deviceID, _ := device["device_id"].(string)
+	hardwareUUID, _ := device["hardware_uuid"].(string)
+	macAddress, _ := device["mac_address"].(string)
+	hostname, _ := device["hostname"].(string)
+	if deviceID == "" && hardwareUUID == "" && macAddress == "" && hostname == "" {
+		return nil
+	}
+
+	doc := bson.M{
+		"device_id":     deviceID,
+		"hardware_uuid": hardwareUUID,
+		"mac_address":   macAddress,
+		"hostname":      hostname,
+		"reason":        reason,
+		"revoked_at":    now,
+	}
+	update := bson.M{
+		"$set":         doc,
+		"$setOnInsert": bson.M{"created_at": now},
+	}
+	_, err := mongoClient.Database(dbName).Collection("device_revocations").UpdateOne(
+		ctx,
+		revokedDeviceFilter(deviceID, hardwareUUID, macAddress, hostname),
+		update,
+		options.Update().SetUpsert(true),
+	)
+	return err
 }
 
 func focusSummariesFromPayload(payload map[string]interface{}) []interface{} {
@@ -1134,7 +1194,10 @@ func resolveAPIKey(ctx context.Context, key string) (string, bool) {
 	}
 	coll := mongoClient.Database(dbName).Collection("devices")
 	var device bson.M
-	err := coll.FindOne(ctx, bson.M{"api_key": key}).Decode(&device)
+	err := coll.FindOne(ctx, bson.M{
+		"api_key": key,
+		"status":  bson.M{"$ne": "revoked"},
+	}).Decode(&device)
 	if err != nil {
 		return "", false
 	}
@@ -1214,6 +1277,11 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	if isDeviceRevoked(ctx, "", hardwareUUID, macAddress, hostname) {
+		http.Error(w, "Device registration is revoked", http.StatusForbidden)
+		return
+	}
+
 	coll := mongoClient.Database(dbName).Collection("devices")
 
 	// Build a dedup filter in priority order.
@@ -1230,6 +1298,11 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 
 	var existing bson.M
 	if err := coll.FindOne(ctx, dedupFilter).Decode(&existing); err == nil {
+		deviceID, _ := existing["device_id"].(string)
+		if isDeviceRevoked(ctx, deviceID, hardwareUUID, macAddress, hostname) {
+			http.Error(w, "Device registration is revoked", http.StatusForbidden)
+			return
+		}
 		// Device already registered — return existing credentials.
 		// Also update hostname/mac/uuid in case they changed (e.g. NIC swap).
 		update := bson.M{"$set": bson.M{
@@ -1240,7 +1313,6 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 		}}
 		coll.UpdateOne(ctx, dedupFilter, update)
 
-		deviceID, _ := existing["device_id"].(string)
 		apiKey, _ := existing["api_key"].(string)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
@@ -1696,6 +1768,10 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
+	if isDeviceRevoked(ctx, authDeviceID, "", "", "") {
+		http.Error(w, "Device is revoked", http.StatusForbidden)
+		return
+	}
 
 	body, err := io.ReadAll(r.Body)
 	defer r.Body.Close()
@@ -1761,6 +1837,15 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 		"device_id": authDeviceID,
 		"timestamp": payload["timestamp"],
 		"last_seen": now,
+	}
+	if version, ok := payload["agent_version"].(string); ok && version != "" {
+		setDoc["agent_version"] = version
+	}
+	if agentOS, ok := payload["agent_os"].(string); ok && agentOS != "" {
+		setDoc["agent_os"] = agentOS
+	}
+	if agentArch, ok := payload["agent_arch"].(string); ok && agentArch != "" {
+		setDoc["agent_arch"] = agentArch
 	}
 	if data, ok := payload["data"].(map[string]interface{}); ok {
 		for collectorName, collectorPayload := range data {
@@ -1845,10 +1930,21 @@ func deviceDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	deviceID := parts[1]
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	db := mongoClient.Database(dbName)
+	var existing bson.M
+	if err := db.Collection("devices").FindOne(ctx, bson.M{"device_id": deviceID}).Decode(&existing); err != nil {
+		http.Error(w, "Device not found", http.StatusNotFound)
+		return
+	}
+	if err := createDeviceRevocation(ctx, existing, "device_deleted"); err != nil {
+		log.Printf("Device revocation failed for deleted device %s: %v", deviceID, err)
+		http.Error(w, "Device revocation failed", http.StatusInternalServerError)
+		return
+	}
+
 	res, err := db.Collection("devices").DeleteOne(ctx, bson.M{"device_id": deviceID})
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
@@ -1889,6 +1985,7 @@ func deviceDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"device_id":                       deviceID,
 		"deleted":                         true,
+		"revoked":                         true,
 		"telemetry_deleted_count":         telemetryRes.DeletedCount,
 		"telemetry_archive_deleted_count": telemetryArchiveDeleted,
 		"browser_archive_deleted_count":   browserArchiveDeleted,
@@ -2151,6 +2248,7 @@ type AgentRelease struct {
 	OS          string    `bson:"os"               json:"os"`   // "darwin" | "linux" | "windows"
 	Arch        string    `bson:"arch"             json:"arch"` // "amd64" | "arm64"
 	DownloadURL string    `bson:"download_url"     json:"download_url"`
+	S3Key       string    `bson:"s3_key,omitempty" json:"s3_key,omitempty"`
 	Checksum    string    `bson:"checksum_sha256"  json:"checksum_sha256"`
 	PublishedAt time.Time `bson:"published_at"     json:"published_at"`
 }
@@ -2220,6 +2318,21 @@ func updateCheckHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	checkingDeviceID := ""
+	if deviceID, ok := resolveAPIKey(ctx, r.Header.Get("X-API-Key")); ok {
+		checkingDeviceID = deviceID
+		update := bson.M{"$set": bson.M{
+			"agent_version":       currentVersion,
+			"agent_os":            agentOS,
+			"agent_arch":          agentArch,
+			"agent_last_checked":  time.Now(),
+			"agent_update_status": "checking",
+		}}
+		if _, err := mongoClient.Database(dbName).Collection("devices").UpdateOne(ctx, bson.M{"device_id": deviceID}, update); err != nil {
+			log.Printf("Agent version update failed for %s: %v", deviceID, err)
+		}
+	}
+
 	// Find the latest release for this OS/arch, sorted by published_at desc.
 	coll := mongoClient.Database(dbName).Collection("agent_releases")
 	opts := options.FindOne().SetSort(bson.D{{Key: "published_at", Value: -1}})
@@ -2228,26 +2341,44 @@ func updateCheckHandler(w http.ResponseWriter, r *http.Request) {
 	var latest AgentRelease
 	if err := coll.FindOne(ctx, filter, opts).Decode(&latest); err != nil {
 		// No releases published yet — agent is up to date.
+		log.Printf("Update check: device=%s %s/%s current=%s latest=none update=false", checkingDeviceID, agentOS, agentArch, currentVersion)
+		markAgentUpdateStatus(ctx, r, "up_to_date")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"update_available": false})
 		return
 	}
 
 	if latest.Version == currentVersion {
+		log.Printf("Update check: device=%s %s/%s current=%s latest=%s update=false", checkingDeviceID, agentOS, agentArch, currentVersion, latest.Version)
+		markAgentUpdateStatus(ctx, r, "up_to_date")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"update_available": false})
 		return
 	}
 
 	log.Printf("Update available for %s/%s: %s → %s", agentOS, agentArch, currentVersion, latest.Version)
+	markAgentUpdateStatus(ctx, r, "update_available")
+	downloadURL := agentReleaseDownloadURL(ctx, latest)
+	log.Printf("Update check: device=%s %s/%s current=%s latest=%s update=true", checkingDeviceID, agentOS, agentArch, currentVersion, latest.Version)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"update_available": true,
 		"version":          latest.Version,
-		"download_url":     latest.DownloadURL,
+		"download_url":     downloadURL,
 		"checksum_sha256":  latest.Checksum,
 	})
+}
+
+func markAgentUpdateStatus(ctx context.Context, r *http.Request, status string) {
+	deviceID, ok := resolveAPIKey(ctx, r.Header.Get("X-API-Key"))
+	if !ok {
+		return
+	}
+	update := bson.M{"$set": bson.M{"agent_update_status": status, "agent_last_checked": time.Now()}}
+	if _, err := mongoClient.Database(dbName).Collection("devices").UpdateOne(ctx, bson.M{"device_id": deviceID}, update); err != nil {
+		log.Printf("Agent update status failed for %s: %v", deviceID, err)
+	}
 }
 
 // ─── Release Publish Handler ───────────────────────────────────────────────────
@@ -2673,6 +2804,7 @@ func publishAgentArtifacts(ctx context.Context, version string, artifacts []Agen
 			OS:          artifact.OS,
 			Arch:        artifact.Arch,
 			DownloadURL: artifact.DownloadURL,
+			S3Key:       artifact.S3Key,
 			Checksum:    artifact.Checksum,
 			PublishedAt: now,
 		})
@@ -2711,6 +2843,59 @@ func agentReleaseS3Client(ctx context.Context) (*s3.Client, string, string, stri
 	}
 	publicBase := strings.TrimRight(strings.TrimSpace(os.Getenv("AGENT_RELEASE_PUBLIC_BASE_URL")), "/")
 	return client, bucket, prefix, publicBase, nil
+}
+
+func agentReleaseDownloadURL(ctx context.Context, rel AgentRelease) string {
+	s3Key := agentReleaseS3Key(rel)
+	if s3Key == "" || strings.EqualFold(os.Getenv("AGENT_RELEASE_PRESIGN_DOWNLOADS"), "false") {
+		return rel.DownloadURL
+	}
+	client, bucket, _, _, err := agentReleaseS3Client(ctx)
+	if err != nil {
+		log.Printf("Agent release presign skipped: %v", err)
+		return rel.DownloadURL
+	}
+	expires := 24 * time.Hour
+	if raw := strings.TrimSpace(os.Getenv("AGENT_RELEASE_PRESIGN_TTL")); raw != "" {
+		if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
+			expires = parsed
+		}
+	}
+	presigner := s3.NewPresignClient(client)
+	signed, err := presigner.PresignGetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(s3Key),
+	}, func(o *s3.PresignOptions) {
+		o.Expires = expires
+	})
+	if err != nil {
+		log.Printf("Agent release presign failed for %s: %v", s3Key, err)
+		return rel.DownloadURL
+	}
+	return signed.URL
+}
+
+func agentReleaseS3Key(rel AgentRelease) string {
+	if rel.S3Key != "" {
+		return rel.S3Key
+	}
+	u, err := url.Parse(rel.DownloadURL)
+	if err != nil {
+		return ""
+	}
+	key, err := url.PathUnescape(strings.TrimPrefix(u.Path, "/"))
+	if err != nil {
+		return ""
+	}
+	prefix := strings.Trim(strings.TrimSpace(os.Getenv("AGENT_RELEASE_S3_PREFIX")), "/")
+	if prefix == "" {
+		prefix = "agent-releases"
+	}
+	duplicatePrefix := prefix + "/" + prefix + "/"
+	if strings.HasPrefix(key, duplicatePrefix) {
+		key = strings.TrimPrefix(key, prefix+"/")
+	}
+	return key
 }
 
 func agentReleaseBucketName() string {
@@ -2959,17 +3144,35 @@ func main() {
 	// Build focus cache from existing telemetry data
 	go buildFocusCacheFromMongo()
 
-	// Routes
-	http.HandleFunc("/health", corsMiddleware(healthHandler))
-	http.HandleFunc("/devices/register", corsMiddleware(registerHandler))
-	http.HandleFunc("/auth/bootstrap", corsMiddleware(authBootstrapHandler))
-	http.HandleFunc("/auth/register", corsMiddleware(authRegisterHandler))
-	http.HandleFunc("/auth/login", corsMiddleware(authLoginHandler))
-	http.HandleFunc("/auth/logout", corsMiddleware(authLogoutHandler))
-	http.HandleFunc("/auth/me", corsMiddleware(requireAuth(authMeHandler)))
-	http.HandleFunc("/users/", corsMiddleware(requireRole(RoleAdmin, userDetailHandler)))
-	http.HandleFunc("/users", corsMiddleware(requireRole(RoleAdmin, usersHandler)))
-	http.HandleFunc("/devices/", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
+	apiMux := http.NewServeMux()
+	registerRoutes(apiMux)
+
+	rootMux := http.NewServeMux()
+	rootMux.Handle("/api/", http.StripPrefix("/api", apiMux))
+	rootMux.Handle("/api", http.RedirectHandler("/api/health", http.StatusTemporaryRedirect))
+	rootMux.Handle("/", apiMux)
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8000"
+	}
+	log.Printf("DevicePulse API listening on :%s", port)
+	if err := http.ListenAndServe(":"+port, rootMux); err != nil {
+		log.Fatalf("Server error: %v", err)
+	}
+}
+
+func registerRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/health", corsMiddleware(healthHandler))
+	mux.HandleFunc("/devices/register", corsMiddleware(registerHandler))
+	mux.HandleFunc("/auth/bootstrap", corsMiddleware(authBootstrapHandler))
+	mux.HandleFunc("/auth/register", corsMiddleware(authRegisterHandler))
+	mux.HandleFunc("/auth/login", corsMiddleware(authLoginHandler))
+	mux.HandleFunc("/auth/logout", corsMiddleware(authLogoutHandler))
+	mux.HandleFunc("/auth/me", corsMiddleware(requireAuth(authMeHandler)))
+	mux.HandleFunc("/users/", corsMiddleware(requireRole(RoleAdmin, userDetailHandler)))
+	mux.HandleFunc("/users", corsMiddleware(requireRole(RoleAdmin, usersHandler)))
+	mux.HandleFunc("/devices/", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/browser-history") {
 			requireRole(RoleViewer, browserHistoryHandler)(w, r)
 		} else if strings.HasSuffix(r.URL.Path, "/history") {
@@ -2980,11 +3183,11 @@ func main() {
 			http.NotFound(w, r)
 		}
 	}))
-	http.HandleFunc("/devices", corsMiddleware(requireRole(RoleViewer, devicesHandler)))
-	http.HandleFunc("/ingest", corsMiddleware(ingestHandler))
+	mux.HandleFunc("/devices", corsMiddleware(requireRole(RoleViewer, devicesHandler)))
+	mux.HandleFunc("/ingest", corsMiddleware(ingestHandler))
 	// Dashboard policy access is role-protected. Agents receive policy through
 	// authenticated device flows, not these browser endpoints.
-	http.HandleFunc("/policy", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/policy", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			requireRole(RoleManager, policyHandler)(w, r)
 		} else if r.Header.Get("X-API-Key") != "" {
@@ -2993,22 +3196,13 @@ func main() {
 			requireRole(RoleViewer, policyHandler)(w, r)
 		}
 	}))
-	http.HandleFunc("/focus/", corsMiddleware(requireRole(RoleViewer, focusHandler)))
+	mux.HandleFunc("/focus/", corsMiddleware(requireRole(RoleViewer, focusHandler)))
 
-	http.HandleFunc("/update/check", corsMiddleware(requireAgent(updateCheckHandler)))
-	http.HandleFunc("/update/releases", corsMiddleware(requireRole(RoleAdmin, releaseListHandler)))
-	http.HandleFunc("/update/release/activate", corsMiddleware(requireRole(RoleAdmin, releaseActivateHandler)))
-	http.HandleFunc("/update/release", corsMiddleware(requireRole(RoleAdmin, releasePublishHandler)))
-	http.HandleFunc("/update/builds", corsMiddleware(requireRole(RoleAdmin, agentBuildsHandler)))
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8000"
-	}
-	log.Printf("DevicePulse API listening on :%s", port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
-		log.Fatalf("Server error: %v", err)
-	}
+	mux.HandleFunc("/update/check", corsMiddleware(requireAgent(updateCheckHandler)))
+	mux.HandleFunc("/update/releases", corsMiddleware(requireRole(RoleAdmin, releaseListHandler)))
+	mux.HandleFunc("/update/release/activate", corsMiddleware(requireRole(RoleAdmin, releaseActivateHandler)))
+	mux.HandleFunc("/update/release", corsMiddleware(requireRole(RoleAdmin, releasePublishHandler)))
+	mux.HandleFunc("/update/builds", corsMiddleware(requireRole(RoleAdmin, agentBuildsHandler)))
 }
 
 func ensureIndexes() {
@@ -3026,6 +3220,15 @@ func ensureIndexes() {
 		{Keys: bson.D{{Key: "mac_address", Value: 1}}, Options: options.Index().SetSparse(true)},
 	}
 	db.Collection("devices").Indexes().CreateMany(ctx, deviceIdx)
+
+	revocationIdx := []mongo.IndexModel{
+		{Keys: bson.D{{Key: "device_id", Value: 1}}, Options: options.Index().SetSparse(true)},
+		{Keys: bson.D{{Key: "hardware_uuid", Value: 1}}, Options: options.Index().SetSparse(true)},
+		{Keys: bson.D{{Key: "mac_address", Value: 1}}, Options: options.Index().SetSparse(true)},
+		{Keys: bson.D{{Key: "hostname", Value: 1}}, Options: options.Index().SetSparse(true)},
+		{Keys: bson.D{{Key: "revoked_at", Value: -1}}},
+	}
+	db.Collection("device_revocations").Indexes().CreateMany(ctx, revocationIdx)
 
 	// telemetry: index on device_id + _id for fast history queries
 	db.Collection("telemetry").Indexes().CreateOne(ctx,

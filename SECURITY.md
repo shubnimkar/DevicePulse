@@ -110,18 +110,14 @@ Device API keys are generated using `crypto/rand` (cryptographically secure rand
 ## Data Retention
 
 The API stores:
-- **Telemetry**: unbounded (one document per agent sync cycle)
-- **Focus cache**: in-memory, rebuilt from the last 500 telemetry docs per device on startup
+- **Telemetry metadata**: one MongoDB document per agent sync cycle, with `telemetry_expires_at`
+- **Full telemetry payloads**: S3 objects when `TELEMETRY_S3_BUCKET` or `S3_BUCKET` is configured
+- **Full browser history**: S3 objects when `BROWSER_HISTORY_S3_BUCKET` or `S3_BUCKET` is configured
+- **Focus cache**: in-memory, rebuilt from retained telemetry metadata on startup
 
-**Recommended cleanup strategy** (manual for now):
-```javascript
-// MongoDB shell — delete telemetry older than 30 days
-db.telemetry.deleteMany({
-  "_id": {
-    "$lt": ObjectId(Math.floor(Date.now() / 1000 - 86400 * 30).toString(16) + "0000000000000000")
-  }
-})
-```
+Telemetry retention is controlled by the dashboard policy (`telemetry_retention_days`, default 30 days). MongoDB cleanup is enforced by a TTL index on `telemetry_expires_at`. S3 archive retention is controlled by bucket lifecycle rules.
+
+Deleting a device creates a revocation tombstone before removing server data, so the same hardware UUID/MAC cannot re-register and resend queued local telemetry unless the revocation is removed manually.
 
 ---
 

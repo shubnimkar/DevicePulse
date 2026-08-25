@@ -47,7 +47,16 @@ var (
 
 	policyMu              sync.RWMutex
 	syncInterval          = 10 * time.Second
+	collectSystemInfo     = true
+	collectHardwareStats  = true
+	collectProcesses      = true
 	collectBrowserHistory = true
+	collectActiveWindow   = true
+	collectServices       = true
+	collectNetworkPorts   = true
+	collectInstalledApps  = true
+	collectOSUpdates      = true
+	collectUSBDevices     = true
 	browserHistoryMode    = "full_url"
 	browserHistoryLimit   = 10
 	registerMu            sync.Mutex
@@ -172,22 +181,39 @@ func runAgent() {
 	// Run slow collectors once immediately in a goroutine, then every 60s.
 	go func() {
 		for {
-			if v, err := installedApps.Collect(); err == nil {
-				cache.mu.Lock()
-				cache.apps = v
-				cache.mu.Unlock()
-				log.Printf("Slow collector: InstalledApps refreshed")
+			policyMu.RLock()
+			shouldCollectApps := collectInstalledApps
+			shouldCollectUpdates := collectOSUpdates
+			policyMu.RUnlock()
+
+			if shouldCollectApps {
+				if v, err := installedApps.Collect(); err == nil {
+					cache.mu.Lock()
+					cache.apps = v
+					cache.mu.Unlock()
+					log.Printf("Slow collector: InstalledApps refreshed")
+				} else {
+					log.Printf("Error collecting installed apps: %v", err)
+				}
 			} else {
-				log.Printf("Error collecting installed apps: %v", err)
+				cache.mu.Lock()
+				cache.apps = nil
+				cache.mu.Unlock()
 			}
 
-			if v, err := osUpdates.Collect(); err == nil {
-				cache.mu.Lock()
-				cache.osUpd = v
-				cache.mu.Unlock()
-				log.Printf("Slow collector: OSUpdates refreshed")
+			if shouldCollectUpdates {
+				if v, err := osUpdates.Collect(); err == nil {
+					cache.mu.Lock()
+					cache.osUpd = v
+					cache.mu.Unlock()
+					log.Printf("Slow collector: OSUpdates refreshed")
+				} else {
+					log.Printf("Error collecting OS updates: %v", err)
+				}
 			} else {
-				log.Printf("Error collecting OS updates: %v", err)
+				cache.mu.Lock()
+				cache.osUpd = nil
+				cache.mu.Unlock()
 			}
 
 			time.Sleep(60 * time.Second)
@@ -196,21 +222,37 @@ func runAgent() {
 
 	// 5. Main Collection Loop
 	for {
-		sysPayload, err := sysInfo.Collect()
-		if err != nil {
-			log.Printf("Error collecting system info: %v", err)
-		}
-
-		procPayload, err := procMon.Collect()
-		if err != nil {
-			log.Printf("Error collecting process info: %v", err)
-		}
-
 		policyMu.RLock()
+		shouldCollectSystem := collectSystemInfo
+		shouldCollectHardware := collectHardwareStats
+		shouldCollectProcesses := collectProcesses
 		collectHistory := collectBrowserHistory
+		shouldCollectActiveWindow := collectActiveWindow
+		shouldCollectServices := collectServices
+		shouldCollectPorts := collectNetworkPorts
+		shouldCollectUSB := collectUSBDevices
 		historyMode := browserHistoryMode
 		historyLimit := browserHistoryLimit
 		policyMu.RUnlock()
+
+		dataMap := map[string]interface{}{}
+		var err error
+
+		if shouldCollectSystem {
+			if sysPayload, err := sysInfo.Collect(); err != nil {
+				log.Printf("Error collecting system info: %v", err)
+			} else {
+				dataMap[sysInfo.Name()] = sysPayload
+			}
+		}
+
+		if shouldCollectProcesses {
+			if procPayload, err := procMon.Collect(); err != nil {
+				log.Printf("Error collecting process info: %v", err)
+			} else {
+				dataMap[procMon.Name()] = procPayload
+			}
+		}
 
 		var histPayload map[string]interface{}
 		if collectHistory {
@@ -219,38 +261,48 @@ func runAgent() {
 				log.Printf("Error collecting browser history: %v", err)
 			} else {
 				applyBrowserHistoryPolicy(histPayload, historyMode, historyLimit)
-			}
-		} else {
-			histPayload = map[string]interface{}{
-				"top_recent_urls":     []collector.HistoryEntry{},
-				"new_history_entries": []collector.HistoryEntry{},
-				"sync_type":           "disabled",
+				dataMap[browserHist.Name()] = histPayload
 			}
 		}
 
-		hwPayload, err := hwStats.Collect()
-		if err != nil {
-			log.Printf("Error collecting hardware stats: %v", err)
+		if shouldCollectHardware {
+			if hwPayload, err := hwStats.Collect(); err != nil {
+				log.Printf("Error collecting hardware stats: %v", err)
+			} else {
+				dataMap[hwStats.Name()] = hwPayload
+			}
 		}
 
-		svcPayload, err := services.Collect()
-		if err != nil {
-			log.Printf("Error collecting services: %v", err)
+		if shouldCollectServices {
+			if svcPayload, err := services.Collect(); err != nil {
+				log.Printf("Error collecting services: %v", err)
+			} else {
+				dataMap[services.Name()] = svcPayload
+			}
 		}
 
-		portsPayload, err := netPorts.Collect()
-		if err != nil {
-			log.Printf("Error collecting network ports: %v", err)
+		if shouldCollectPorts {
+			if portsPayload, err := netPorts.Collect(); err != nil {
+				log.Printf("Error collecting network ports: %v", err)
+			} else {
+				dataMap[netPorts.Name()] = portsPayload
+			}
 		}
 
-		usbPayload, err := usbEvents.Collect()
-		if err != nil {
-			log.Printf("Error collecting USB events: %v", err)
+		if shouldCollectUSB {
+			if usbPayload, err := usbEvents.Collect(); err != nil {
+				log.Printf("Error collecting USB events: %v", err)
+			} else {
+				dataMap[usbEvents.Name()] = usbPayload
+			}
 		}
 
-		activeWinPayload, err := activeWin.Collect()
-		if err != nil {
-			log.Printf("Error collecting active window: %v", err)
+		if shouldCollectActiveWindow {
+			if activeWinPayload, err := activeWin.Collect(); err != nil {
+				log.Printf("Error collecting active window: %v", err)
+			} else {
+				dataMap[activeWin.Name()] = activeWinPayload
+			}
 		}
 
 		// Read slow-collector cache (non-blocking)
@@ -259,16 +311,6 @@ func runAgent() {
 		osUpdPayload := cache.osUpd
 		cache.mu.RUnlock()
 
-		dataMap := map[string]interface{}{
-			sysInfo.Name():     sysPayload,
-			procMon.Name():     procPayload,
-			browserHist.Name(): histPayload,
-			hwStats.Name():     hwPayload,
-			services.Name():    svcPayload,
-			netPorts.Name():    portsPayload,
-			usbEvents.Name():   usbPayload,
-			activeWin.Name():   activeWinPayload,
-		}
 		// Only include slow payloads once they have been collected at least once
 		if appsPayload != nil {
 			dataMap[installedApps.Name()] = appsPayload
@@ -278,9 +320,12 @@ func runAgent() {
 		}
 
 		finalPayload := map[string]interface{}{
-			"device_id": deviceID,
-			"timestamp": time.Now().Format(time.RFC3339),
-			"data":      dataMap,
+			"device_id":     deviceID,
+			"timestamp":     time.Now().Format(time.RFC3339),
+			"agent_version": agentVersion,
+			"agent_os":      runtime.GOOS,
+			"agent_arch":    runtime.GOARCH,
+			"data":          dataMap,
 		}
 
 		if err := q.Push(finalPayload); err != nil {
@@ -420,8 +465,35 @@ func policyPoller() {
 						syncInterval = newInterval
 					}
 				}
+				if v, ok := pol["collect_system_info"].(bool); ok {
+					collectSystemInfo = v
+				}
+				if v, ok := pol["collect_hardware_stats"].(bool); ok {
+					collectHardwareStats = v
+				}
+				if v, ok := pol["collect_processes"].(bool); ok {
+					collectProcesses = v
+				}
 				if v, ok := pol["collect_browser_history"].(bool); ok {
 					collectBrowserHistory = v
+				}
+				if v, ok := pol["collect_active_window"].(bool); ok {
+					collectActiveWindow = v
+				}
+				if v, ok := pol["collect_services"].(bool); ok {
+					collectServices = v
+				}
+				if v, ok := pol["collect_network_ports"].(bool); ok {
+					collectNetworkPorts = v
+				}
+				if v, ok := pol["collect_installed_apps"].(bool); ok {
+					collectInstalledApps = v
+				}
+				if v, ok := pol["collect_os_updates"].(bool); ok {
+					collectOSUpdates = v
+				}
+				if v, ok := pol["collect_usb_devices"].(bool); ok {
+					collectUSBDevices = v
 				}
 				if v, ok := pol["browser_history_mode"].(string); ok {
 					browserHistoryMode = v
@@ -430,9 +502,8 @@ func policyPoller() {
 					browserHistoryLimit = int(v)
 				}
 				if browserHistoryMode == "disabled" {
-					browserHistoryMode = "full_url"
+					collectBrowserHistory = false
 				}
-				collectBrowserHistory = true
 				policyMu.Unlock()
 			}
 			resp.Body.Close()
@@ -456,7 +527,7 @@ func applyBrowserHistoryPolicy(payload map[string]interface{}, mode string, limi
 				entries[i].Title = ""
 			}
 		}
-		if limit > 0 && len(entries) > limit {
+		if key == "top_recent_urls" && limit > 0 && len(entries) > limit {
 			entries = entries[:limit]
 		}
 		payload[key] = entries

@@ -156,6 +156,11 @@ export interface Device {
   hostname?: string;
   timestamp?: string;
   last_seen?: string;
+  agent_version?: string;
+  agent_os?: string;
+  agent_arch?: string;
+  agent_last_checked?: string;
+  agent_update_status?: 'checking' | 'up_to_date' | 'update_available' | string;
   data?: DeviceData;
 }
 

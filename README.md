@@ -89,6 +89,12 @@ npm run dev
 
 Telemetry is written to a local SQLite database (`agent/data/devicepulse.db`) before being uploaded. If the API is unreachable, data queues locally and is flushed in batches of 50 when connectivity is restored.
 
+### Server storage and retention
+
+MongoDB is the control plane: it stores device identity, current device state, telemetry metadata, focus summaries, users, policy, and release/build records. When `TELEMETRY_S3_BUCKET` or `S3_BUCKET` is configured, full raw telemetry payloads are written to S3 and MongoDB stores only metadata plus the S3 pointer for each ingest. When `BROWSER_HISTORY_S3_BUCKET` or `S3_BUCKET` is configured, full browser-history entries are archived to S3 by `device_id/date` and the raw URL arrays are pruned from MongoDB.
+
+Telemetry retention is controlled from the dashboard policy (`telemetry_retention_days`, default 30). The API stamps new telemetry documents with `telemetry_expires_at` and MongoDB removes them through a TTL index. S3 retention is intentionally left to bucket lifecycle rules.
+
 ### Device fingerprinting
 
 On registration the agent collects:
@@ -99,6 +105,8 @@ On registration the agent collects:
 The API deduplicates registrations in priority order: `hardware_uuid → mac_address → hostname`. A device that reinstalls its OS gets back the same `device_id` and `api_key` automatically.
 
 The cached `registration.json` is validated against the current hardware fingerprint on every startup. If the binary is copied to a different machine the mismatch triggers a fresh registration.
+
+Deleting a device creates a server-side revocation record for its hardware identifiers before data cleanup. A still-running agent on that machine cannot re-register or resume uploading queued telemetry unless the revocation is removed manually from the database.
 
 ### Auto-update
 
@@ -147,7 +155,7 @@ DEVICEPULSE_API_URL=https://your-ec2-domain.com ./agent_bin
 
 ## API
 
-Listens on `:8000`. All endpoints support CORS.
+Listens on `:8000`. All endpoints support CORS. The Go API serves every route at both the root path and under `/api`, so nginx can proxy a single `/api/` prefix without listing every endpoint.
 
 In production the API sits behind nginx on EC2, which handles TLS termination:
 
@@ -159,6 +167,25 @@ Get a free TLS certificate with Certbot:
 ```bash
 sudo certbot --nginx -d your-ec2-domain.com
 ```
+
+Minimal nginx shape:
+```nginx
+location /api/ {
+    proxy_pass http://127.0.0.1:8000/api/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+}
+
+location / {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+}
+```
+
+With this setup, set dashboard `NEXT_PUBLIC_API_URL` to `/api` or leave it unset; the dashboard defaults to `/api`. Build agents with an API URL that includes the prefix, for example `https://your-domain.com/api`. Root API paths still work for backward compatibility.
 
 ### Authentication
 
@@ -185,6 +212,8 @@ go run . reset-password --email admin@example.com --password 'new-password-min-8
 The command can reset an admin's own password or any other dashboard user's password. It updates the stored bcrypt hash directly and reactivates the user account.
 
 ### Endpoints
+
+Paths below are shown without the optional `/api` prefix. For nginx deployments, use `/api/devices`, `/api/ingest`, `/api/auth/login`, and so on.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
@@ -324,6 +353,11 @@ DevicePulse/
 | `MONGO_URI` | API | — | MongoDB connection string (required) |
 | `ADMIN_SECRET` | API | — | Admin secret for privileged endpoints such as policy updates and release publishing |
 | `DASHBOARD_TOKEN` | API | — | Optional token required by read endpoints when configured |
+| `S3_BUCKET` | API | — | Shared fallback S3 bucket for telemetry and browser-history archives |
+| `TELEMETRY_S3_BUCKET` | API | — | S3 bucket for full raw telemetry archive objects; disables telemetry S3 archive when unset |
+| `TELEMETRY_S3_PREFIX` | API | `telemetry` | S3 key prefix for full telemetry archive objects |
+| `TELEMETRY_S3_ENDPOINT` | API | — | Optional S3-compatible endpoint, for example MinIO |
+| `TELEMETRY_S3_PATH_STYLE` | API | `false` | Force path-style S3 requests; automatically enabled when endpoint is set |
 | `BROWSER_HISTORY_S3_BUCKET` | API | — | S3 bucket for browser-history archive objects; disables S3 archive when unset |
 | `BROWSER_HISTORY_S3_PREFIX` | API | `browser-history` | S3 key prefix for browser-history archive objects |
 | `BROWSER_HISTORY_S3_ENDPOINT` | API | — | Optional S3-compatible endpoint, for example MinIO |
@@ -359,9 +393,9 @@ Agents ──HTTPS:443──► │  nginx (TLS)        │
 
 1. Launch an EC2 instance (Ubuntu 22.04 recommended).
 2. Install Go, build the API binary, run it as a systemd service on `:8000`.
-3. Install nginx, point it at `localhost:8000`.
+3. Install nginx, proxy `/api/` to `localhost:8000` and `/` to the dashboard.
 4. Run `sudo certbot --nginx -d your-domain.com` for free TLS.
-5. Build agent binaries with `defaultAPIURL` set to `https://your-domain.com`.
+5. Build agent binaries with `defaultAPIURL` set to `https://your-domain.com/api`.
 6. Distribute agent binaries to endpoint machines.
 
 ---

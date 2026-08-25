@@ -82,6 +82,11 @@ export default function DeviceCard({
           </div>
           <div className="device-meta-row">
             <span className="device-meta-item">{timeAgo(device.last_seen)}</span>
+            {online && (
+              <span className="device-badge">
+                {device.agent_version ? `Agent ${device.agent_version}` : 'Agent version pending'}
+              </span>
+            )}
             {sys?.platform_version && (
               <span className="device-badge">{sys.os} {sys.platform_version}</span>
             )}

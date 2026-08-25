@@ -2,7 +2,8 @@
 
 import type { DiskStat } from '@/types';
 
-export const API = process.env.NEXT_PUBLIC_API_URL ?? '';
+const rawAPI = process.env.NEXT_PUBLIC_API_URL || '/api';
+export const API = rawAPI.endsWith('/') ? rawAPI.slice(0, -1) : rawAPI;
 
 export function readHeaders(): HeadersInit {
   return {};
