@@ -231,6 +231,7 @@ Paths below are shown without the optional `/api` prefix. For nginx deployments,
 | `POST` | `/users/{id}/password` | `admin` | Reset a dashboard user's password |
 | `POST` | `/users/{id}/role` | `admin` | Change a dashboard user's role |
 | `GET` | `/devices` | `viewer`+ | List all registered devices |
+| `PUT` | `/devices/{id}/name` | `admin` | Set or clear a device display name |
 | `DELETE` | `/devices/{id}` | `admin` | Remove a device |
 | `GET` | `/devices/{id}/history` | `viewer`+ | Last 100 telemetry snapshots for a device |
 | `GET` | `/devices/{id}/browser-history?from=YYYY-MM-DD&to=YYYY-MM-DD` | `viewer`+ | Browser history entries archived in S3 for a date range |

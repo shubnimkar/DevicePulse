@@ -1015,6 +1015,10 @@ type roleUpdateRequest struct {
 	Role string `json:"role"`
 }
 
+type deviceNameRequest struct {
+	Name string `json:"name"`
+}
+
 func normalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }
@@ -1915,6 +1919,57 @@ func toFloat(v interface{}) (float64, bool) {
 }
 
 // ─── Device Delete Handler ─────────────────────────────────────────────────────
+
+// PUT /devices/{device_id}/name
+func deviceNameHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+	if len(parts) != 3 || parts[0] != "devices" || parts[1] == "" || parts[2] != "name" {
+		http.Error(w, "Invalid URL", http.StatusBadRequest)
+		return
+	}
+	deviceID := parts[1]
+
+	var body deviceNameRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "Bad JSON", http.StatusBadRequest)
+		return
+	}
+	name := strings.TrimSpace(body.Name)
+	if len(name) > 80 {
+		http.Error(w, "Name must be 80 characters or fewer", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	update := bson.M{"$set": bson.M{"updated_at": time.Now()}}
+	if name == "" {
+		update["$unset"] = bson.M{"display_name": ""}
+	} else {
+		update["$set"].(bson.M)["display_name"] = name
+	}
+	res, err := mongoClient.Database(dbName).Collection("devices").UpdateOne(ctx, bson.M{"device_id": deviceID}, update)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	if res.MatchedCount == 0 {
+		http.Error(w, "Device not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"device_id":    deviceID,
+		"display_name": name,
+	})
+}
 
 // DELETE /devices/{device_id}
 func deviceDeleteHandler(w http.ResponseWriter, r *http.Request) {
@@ -3254,6 +3309,8 @@ func registerRoutes(mux *http.ServeMux) {
 			requireRole(RoleViewer, browserHistoryHandler)(w, r)
 		} else if strings.HasSuffix(r.URL.Path, "/history") {
 			requireRole(RoleViewer, historyHandler)(w, r)
+		} else if strings.HasSuffix(r.URL.Path, "/name") {
+			requireRole(RoleAdmin, deviceNameHandler)(w, r)
 		} else if r.Method == http.MethodDelete {
 			requireRole(RoleAdmin, deviceDeleteHandler)(w, r)
 		} else {

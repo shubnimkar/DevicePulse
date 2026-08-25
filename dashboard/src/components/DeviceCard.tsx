@@ -60,7 +60,7 @@ export default function DeviceCard({
   const hw     = device.data?.HardwareStats;
   const online = isOnline(device.last_seen);
 
-  const hostname = sys?.hostname || device.hostname || device.device_id;
+  const hostname = device.display_name || sys?.hostname || device.hostname || device.device_id;
   const cpuPct = hw?.cpu?.usage_percent;
   const ramPct = hw?.ram?.used_percent;
   const diskPct = primaryDisk(hw?.disks)?.used_percent;

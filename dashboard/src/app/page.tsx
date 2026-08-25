@@ -61,6 +61,11 @@ const roleLabel: Record<UserRole, string> = {
   viewer: 'Viewer',
 };
 
+function deviceDisplayName(device?: Device | null): string {
+  if (!device) return '';
+  return device.display_name || device.data?.SystemInfo?.hostname || device.hostname || device.device_id;
+}
+
 function formatHeaderTime(date: Date): string {
   return date.toLocaleString(undefined, {
     weekday: 'short',
@@ -557,6 +562,33 @@ export default function Home() {
     } catch {}
   };
 
+  const renameDevice = async (device: Device) => {
+    if (!canDeleteDevices) return;
+    const currentName = device.display_name || '';
+    const nextName = window.prompt('Device display name. Leave blank to use hostname.', currentName);
+    if (nextName === null) return;
+    const name = nextName.trim();
+    if (name.length > 80) {
+      window.alert('Device name must be 80 characters or fewer.');
+      return;
+    }
+    try {
+      const res = await apiFetch(`/devices/${encodeURIComponent(device.device_id)}/name`, {
+        method: 'PUT',
+        headers: adminHeaders(),
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) throw new Error(await readApiError(res));
+      setDevices(list => list.map(item => (
+        item.device_id === device.device_id
+          ? { ...item, display_name: name || undefined }
+          : item
+      )));
+    } catch {
+      window.alert('Could not rename device. Check the API connection and try again.');
+    }
+  };
+
   const getTab = (id: string): DeviceTab => activeTab[id] ?? 'overview';
   const setTab = (id: string, tab: DeviceTab) => {
     setActiveTab(prev => ({ ...prev, [id]: tab }));
@@ -576,7 +608,7 @@ export default function Home() {
   const offlineCount = devices.length - onlineCount;
   const fleetUptimePercent = devices.length > 0 ? (onlineCount / devices.length) * 100 : 0;
   const selectedDevice = devices.find(d => d.device_id === selectedDeviceId);
-  const selectedDeviceName = selectedDevice?.data?.SystemInfo?.hostname || selectedDevice?.hostname || selectedDeviceId;
+  const selectedDeviceName = selectedDevice ? deviceDisplayName(selectedDevice) : selectedDeviceId;
   const selectedBrowserHistory = selectedDevice
     ? browserHistoryCache[selectedDevice.device_id]?.[browserHistoryRange]
     : undefined;
@@ -609,7 +641,7 @@ export default function Home() {
     if (statusFilter !== 'all' && statusFilter !== 'online' && state !== statusFilter) return false;
     if (!normalizedQuery) return true;
     const sys = device.data?.SystemInfo;
-    return [device.device_id, device.hostname, sys?.hostname, sys?.os, sys?.platform, sys?.platform_version]
+    return [device.device_id, device.display_name, device.hostname, sys?.hostname, sys?.os, sys?.platform, sys?.platform_version]
       .filter(Boolean).join(' ').toLowerCase().includes(normalizedQuery);
   });
 
@@ -848,7 +880,7 @@ export default function Home() {
             {attentionDevice && (
               <div className="attention-strip">
                 <div className="kicker">Needs Attention</div>
-                <strong>{attentionDevice.data?.SystemInfo?.hostname || attentionDevice.hostname || attentionDevice.device_id}</strong>
+                <strong>{deviceDisplayName(attentionDevice)}</strong>
                 <span>Peak load {deviceRisk(attentionDevice).toFixed(0)}%</span>
               </div>
             )}
@@ -1472,7 +1504,7 @@ export default function Home() {
                       const sys    = device.data?.SystemInfo;
                       const state  = getDeviceState(device);
                       const online = isOnline(device.last_seen);
-                      const name   = sys?.hostname || device.hostname || device.device_id;
+                      const name   = deviceDisplayName(device);
                       const risk   = deviceRisk(device);
                       const hw     = device.data?.HardwareStats;
 
@@ -1542,6 +1574,15 @@ export default function Home() {
                               >
                                 Inspect
                               </button>
+                              {canDeleteDevices && (
+                                <button
+                                  type="button"
+                                  className="action-btn"
+                                  onClick={() => renameDevice(device)}
+                                >
+                                  Rename
+                                </button>
+                              )}
                               {canDeleteDevices && (
                                 <button
                                   type="button"

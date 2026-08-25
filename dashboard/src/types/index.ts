@@ -153,6 +153,7 @@ export interface DeviceData {
 
 export interface Device {
   device_id: string;
+  display_name?: string;
   hostname?: string;
   timestamp?: string;
   last_seen?: string;
