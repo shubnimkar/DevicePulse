@@ -58,6 +58,9 @@ const RELEASE_TARGETS: Array<{ os: AgentRelease['os']; label: string }> = [
   { os: 'darwin', label: 'macOS' },
 ];
 
+const PAGE_VIEWS: PageView[] = ['dashboard', 'inventory', 'inspect', 'settings', 'access'];
+const DEVICE_TABS: DeviceTab[] = ['overview', 'hardware', 'processes', 'browser', 'services', 'ports', 'apps', 'security', 'focus', 'sysinfo'];
+
 const roleLabel: Record<UserRole, string> = {
   admin: 'Admin',
   manager: 'Manager',
@@ -95,6 +98,26 @@ function browserHistoryQuery(range: BrowserHistoryRange): string {
   params.set('from', date);
   params.set('to', date);
   return params.toString();
+}
+
+function parsePageView(value: string | null): PageView {
+  return PAGE_VIEWS.includes(value as PageView) ? value as PageView : 'dashboard';
+}
+
+function parseDeviceTab(value: string | null): DeviceTab {
+  return DEVICE_TABS.includes(value as DeviceTab) ? value as DeviceTab : 'overview';
+}
+
+function readNavigationState() {
+  const params = new URLSearchParams(window.location.search);
+  const view = parsePageView(params.get('view'));
+  const deviceId = params.get('device') ?? '';
+  const tab = parseDeviceTab(params.get('tab'));
+  return {
+    view: view === 'inspect' && !deviceId ? 'inventory' : view,
+    deviceId,
+    tab,
+  };
 }
 
 function formatPingAge(seconds?: number): string {
@@ -210,6 +233,44 @@ export default function Home() {
     });
   }, []);
 
+  const applyNavigationState = useCallback(() => {
+    const { view, deviceId, tab } = readNavigationState();
+    setCurrentPage(view);
+    setSelectedDeviceId(view === 'inspect' ? deviceId : '');
+    if (view === 'inspect' && deviceId) {
+      setActiveTab(prev => ({ ...prev, [deviceId]: tab }));
+    }
+  }, []);
+
+  const writeNavigationState = useCallback((
+    view: PageView,
+    options: { deviceId?: string; tab?: DeviceTab; replace?: boolean } = {}
+  ) => {
+    const params = new URLSearchParams();
+    if (view !== 'dashboard') params.set('view', view);
+    if (view === 'inspect' && options.deviceId) {
+      params.set('device', options.deviceId);
+      if (options.tab && options.tab !== 'overview') params.set('tab', options.tab);
+    }
+    const nextUrl = `${window.location.pathname}${params.toString() ? `?${params}` : ''}${window.location.hash}`;
+    const method = options.replace ? 'replaceState' : 'pushState';
+    window.history[method](null, '', nextUrl);
+  }, []);
+
+  const goToPage = useCallback((
+    view: PageView,
+    options: { deviceId?: string; tab?: DeviceTab; replace?: boolean } = {}
+  ) => {
+    const deviceId = options.deviceId ?? '';
+    const tab = options.tab ?? 'overview';
+    setCurrentPage(view);
+    setSelectedDeviceId(view === 'inspect' ? deviceId : '');
+    if (view === 'inspect' && deviceId) {
+      setActiveTab(prev => ({ ...prev, [deviceId]: tab }));
+    }
+    writeNavigationState(view, { ...options, deviceId, tab });
+  }, [writeNavigationState]);
+
   const loadCurrentUser = useCallback(async () => {
     setAuthLoading(true);
     try {
@@ -245,6 +306,15 @@ export default function Home() {
     const id = window.setInterval(() => setCurrentTime(new Date()), 1000);
     return () => window.clearInterval(id);
   }, []);
+
+  useEffect(() => {
+    const id = window.setTimeout(applyNavigationState, 0);
+    window.addEventListener('popstate', applyNavigationState);
+    return () => {
+      window.clearTimeout(id);
+      window.removeEventListener('popstate', applyNavigationState);
+    };
+  }, [applyNavigationState]);
 
   const fetchBrowserHistory = useCallback(async (
     deviceId: string,
@@ -446,7 +516,7 @@ export default function Home() {
       setAuthUser(null);
       setDevices([]);
       setFocusCache({});
-      setCurrentPage('dashboard');
+      goToPage('dashboard', { replace: true });
       setAuthMode('login');
       void loadCurrentUser();
     }
@@ -698,8 +768,7 @@ export default function Home() {
         return next;
       });
       if (selectedDeviceId === deviceId) {
-        setSelectedDeviceId('');
-        setCurrentPage('inventory');
+        goToPage('inventory', { replace: true });
       }
     } catch {}
   };
@@ -752,6 +821,9 @@ export default function Home() {
   const getTab = (id: string): DeviceTab => activeTab[id] ?? 'overview';
   const setTab = (id: string, tab: DeviceTab) => {
     setActiveTab(prev => ({ ...prev, [id]: tab }));
+    if (selectedDeviceId === id && currentPage === 'inspect') {
+      writeNavigationState('inspect', { deviceId: id, tab, replace: true });
+    }
     if (tab === 'browser') void fetchBrowserHistory(id, browserHistoryRange);
     if (tab === 'focus') void fetchDailyAppUsage(id, appUsageDate);
   };
@@ -825,9 +897,7 @@ export default function Home() {
   ];
 
   const viewDeviceDetails = (deviceId: string) => {
-    setSelectedDeviceId(deviceId);
-    setCurrentPage('inspect');
-    setTab(deviceId, 'overview');
+    goToPage('inspect', { deviceId, tab: 'overview' });
   };
 
   const collectorControls: { key: CollectorPolicyKey; label: string; meta: string }[] = [
@@ -988,7 +1058,7 @@ export default function Home() {
             <button
               type="button"
               className={`nav-item ${currentPage === 'dashboard' ? 'active' : ''}`}
-              onClick={() => setCurrentPage('dashboard')}
+              onClick={() => goToPage('dashboard')}
               aria-current={currentPage === 'dashboard' ? 'page' : undefined}
             >
               <IconGrid />
@@ -997,7 +1067,7 @@ export default function Home() {
             <button
               type="button"
               className={`nav-item ${currentPage === 'inventory' ? 'active' : ''}`}
-              onClick={() => setCurrentPage('inventory')}
+              onClick={() => goToPage('inventory')}
               aria-current={currentPage === 'inventory' ? 'page' : undefined}
             >
               <IconList />
@@ -1006,7 +1076,7 @@ export default function Home() {
             <button
               type="button"
               className={`nav-item ${currentPage === 'settings' ? 'active' : ''}`}
-              onClick={() => setCurrentPage('settings')}
+              onClick={() => goToPage('settings')}
               aria-current={currentPage === 'settings' ? 'page' : undefined}
             >
               <IconSettings />
@@ -1016,7 +1086,7 @@ export default function Home() {
               <button
                 type="button"
                 className={`nav-item ${currentPage === 'access' ? 'active' : ''}`}
-                onClick={() => setCurrentPage('access')}
+                onClick={() => goToPage('access')}
                 aria-current={currentPage === 'access' ? 'page' : undefined}
               >
                 <IconSettings />
@@ -1092,7 +1162,7 @@ export default function Home() {
             </div>
             {currentPage === 'inspect' ? (
               <div className="toolbar">
-                <button type="button" className="btn" onClick={() => setCurrentPage('inventory')}>
+                <button type="button" className="btn" onClick={() => goToPage('inventory')}>
                   ‹ Back to Inventory
                 </button>
               </div>
@@ -1118,7 +1188,7 @@ export default function Home() {
                 className="dashboard-tile"
                 onClick={() => {
                   setStatusFilter('all');
-                  setCurrentPage('inventory');
+                  goToPage('inventory');
                 }}
               >
                 <span>Total Devices</span>
@@ -1129,7 +1199,7 @@ export default function Home() {
                 className="dashboard-tile tile-online"
                 onClick={() => {
                   setStatusFilter('online');
-                  setCurrentPage('inventory');
+                  goToPage('inventory');
                 }}
               >
                 <span>Online</span>
@@ -1140,7 +1210,7 @@ export default function Home() {
                 className="dashboard-tile tile-offline"
                 onClick={() => {
                   setStatusFilter('offline');
-                  setCurrentPage('inventory');
+                  goToPage('inventory');
                 }}
               >
                 <span>Offline</span>
@@ -1151,7 +1221,7 @@ export default function Home() {
                 className="dashboard-tile tile-uptime"
                 onClick={() => {
                   setStatusFilter('all');
-                  setCurrentPage('inventory');
+                  goToPage('inventory');
                 }}
               >
                 <span>Total Uptime</span>

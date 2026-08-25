@@ -153,11 +153,26 @@ func (a *ActiveWindowTracker) sample() {
 			return
 		case t := <-ticker.C:
 			app := getForegroundApp()
+
+			a.mu.Lock()
 			if app == "" {
+				if a.currentApp != "" {
+					dur := t.Sub(a.sessionStart).Seconds()
+					if dur > 0 {
+						a.sessions = append(a.sessions, focusSession{
+							AppName:   a.currentApp,
+							StartTime: a.sessionStart,
+							EndTime:   t,
+							DurationS: dur,
+						})
+					}
+					a.currentApp = ""
+					a.sessionStart = time.Time{}
+				}
+				a.mu.Unlock()
 				continue
 			}
 
-			a.mu.Lock()
 			if app != a.currentApp {
 				if a.currentApp != "" {
 					dur := t.Sub(a.sessionStart).Seconds()
@@ -233,7 +248,7 @@ func getForegroundAppLinux() string {
 	// Prefer X11 when DISPLAY is set; fall back to Wayland paths.
 	if os.Getenv("DISPLAY") != "" {
 		if name := getActiveWindowX11(); name != "" {
-			return name
+			return cleanLinuxForegroundApp(name)
 		}
 	}
 
@@ -241,20 +256,20 @@ func getForegroundAppLinux() string {
 	if os.Getenv("WAYLAND_DISPLAY") != "" || os.Getenv("XDG_SESSION_TYPE") == "wayland" {
 		// Try GNOME first (most deployed enterprise Linux desktop).
 		if name := getActiveWindowWaylandGNOME(); name != "" {
-			return name
+			return cleanLinuxForegroundApp(name)
 		}
 		// Try KDE Plasma.
 		if name := getActiveWindowWaylandKDE(); name != "" {
-			return name
+			return cleanLinuxForegroundApp(name)
 		}
 		// Try Sway / wlroots compositors.
 		if name := getActiveWindowSway(); name != "" {
-			return name
+			return cleanLinuxForegroundApp(name)
 		}
 	}
 
 	// /proc-based fallback — works even in headless/TTY sessions.
-	return getActiveWindowProcFallback()
+	return cleanLinuxForegroundApp(getActiveWindowProcFallback())
 }
 
 // ─── Linux / X11 (pure-Go XCB) ───────────────────────────────────────────────

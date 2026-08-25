@@ -13,6 +13,23 @@ interface Props {
   onUsageDateChange?: (date: string) => void;
 }
 
+const IGNORED_APP_USAGE_NAMES = new Set([
+  'apt-check',
+  'apt.systemd.daily',
+  'packagekitd',
+  'snapd',
+  'fwupd',
+  'devicepulse-age',
+  'devicepulse-agent',
+]);
+
+function isVisibleAppUsageName(name: string): boolean {
+  const key = name.trim().toLowerCase().replace(/\.service$/, '');
+  if (!key) return false;
+  if (IGNORED_APP_USAGE_NAMES.has(key)) return false;
+  return !key.startsWith('devicepulse-');
+}
+
 export default function FocusTab({ data, cachedSummaries, dailyUsage, dailyUsageLoading = false, usageDate, onUsageDateChange }: Props) {
   if (!data && cachedSummaries.length === 0 && !dailyUsage) {
     return <div className="no-data">No active window data yet.</div>;
@@ -23,8 +40,9 @@ export default function FocusTab({ data, cachedSummaries, dailyUsage, dailyUsage
     ...app,
     app_name: app.app_name,
     total_focus_seconds: app.total_focus_seconds ?? app.total_seconds ?? 0,
-  })));
-  const liveSummaries = dailyApps.length > 0 ? dailyApps : data?.cumulative_summaries ?? data?.app_summaries ?? [];
+  }))).filter(app => isVisibleAppUsageName(app.app_name));
+  const liveSummaries = (dailyApps.length > 0 ? dailyApps : data?.cumulative_summaries ?? data?.app_summaries ?? [])
+    .filter(app => isVisibleAppUsageName(app.app_name));
   const merged = new Map<string, AppFocusSummary>();
   for (const e of liveSummaries) {
     const seconds = e.total_focus_seconds ?? e.total_seconds ?? 0;
