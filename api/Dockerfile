@@ -1,4 +1,4 @@
-FROM golang:1.24-bookworm AS builder
+FROM golang:1.25-bookworm AS builder
 
 WORKDIR /src/api
 
@@ -8,7 +8,7 @@ RUN go mod download
 COPY api/. .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/devicepulse-api .
 
-FROM golang:1.24-bookworm AS runtime
+FROM golang:1.25-bookworm AS runtime
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates bash \
