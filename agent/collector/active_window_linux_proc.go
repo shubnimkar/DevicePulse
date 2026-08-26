@@ -29,6 +29,18 @@ import (
 	"strings"
 )
 
+// candidate represents a process being evaluated as the active window.
+type candidate struct {
+	name         string
+	rss          int64 // resident set size in pages (higher = more likely "active")
+	cpuJiffies   int64 // recent-ish process CPU from /proc stat totals
+	tty          int   // controlling tty (0 = no tty / daemon)
+	pgid         int   // process group ID
+	tpgid        int   // foreground process group of the tty
+	isForeground bool  // true when pgid == tpgid and tty != 0
+	isDesktopApp bool
+}
+
 // linuxProcFallbackActiveWindow is the entry point called from active_window.go.
 //
 // Key fix: when the agent runs as root (uid=0) it scans ALL real user sessions
@@ -53,17 +65,6 @@ func linuxProcFallbackActiveWindow() string {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return ""
-	}
-
-	type candidate struct {
-		name         string
-		rss          int64 // resident set size in pages (higher = more likely "active")
-		cpuJiffies   int64 // recent-ish process CPU from /proc stat totals
-		tty          int   // controlling tty (0 = no tty / daemon)
-		pgid         int   // process group ID
-		tpgid        int   // foreground process group of the tty
-		isForeground bool  // true when pgid == tpgid and tty != 0
-		isDesktopApp bool
 	}
 
 	var best candidate
@@ -374,7 +375,6 @@ func isLikelyLinuxDesktopApp(name string) bool {
 		"pgadmin":               {},
 		"mongodb compass":       {},
 		"mongodb-compass":       {},
-		"datagrip":              {},
 		"robo-3t":               {},
 		"robo3t":                {},
 		"redis-insight":         {},
