@@ -148,7 +148,11 @@ func buildFocusCacheFromMongo() {
 		// No limit — scan all telemetry to build accurate cumulative totals.
 		opts := options.Find().
 			SetSort(bson.D{{Key: "_id", Value: -1}}).
-			SetProjection(bson.M{"data.ActiveWindowTracker.app_summaries": 1, "_id": 0})
+			SetProjection(bson.M{
+				"data.ActiveWindowTracker.app_summaries":        1,
+				"data.ActiveWindowTracker.cumulative_summaries": 1,
+				"_id": 0,
+			})
 
 		cursor, err := coll.Find(ctx, bson.M{"device_id": deviceID}, opts)
 		if err != nil {
@@ -173,7 +177,8 @@ func buildFocusCacheFromMongo() {
 	}
 }
 
-// extractFocusSummaries pulls the app_summaries array out of a raw telemetry doc.
+// extractFocusSummaries pulls the app_summaries (or cumulative_summaries) array
+// out of a raw telemetry doc. Prefers cumulative_summaries when present.
 func extractFocusSummaries(doc bson.M) []interface{} {
 	data, ok := doc["data"].(bson.M)
 	if !ok {
@@ -183,7 +188,11 @@ func extractFocusSummaries(doc bson.M) []interface{} {
 	if !ok {
 		return nil
 	}
-	summaries, _ := awt["app_summaries"].(bson.A)
+	// Prefer cumulative_summaries; fall back to per-cycle app_summaries.
+	summaries, ok := awt["cumulative_summaries"].(bson.A)
+	if !ok || len(summaries) == 0 {
+		summaries, _ = awt["app_summaries"].(bson.A)
+	}
 	result := make([]interface{}, 0, len(summaries))
 	for _, s := range summaries {
 		if isVisibleAppUsageSummary(s) {
@@ -731,7 +740,12 @@ func focusSummariesFromPayload(payload map[string]interface{}) []interface{} {
 	if !ok {
 		return nil
 	}
-	raw, ok := awt["app_summaries"].([]interface{})
+	// Prefer cumulative_summaries (all apps since agent start) so persisted
+	// documents capture the full picture rather than just the current-cycle delta.
+	raw, ok := awt["cumulative_summaries"].([]interface{})
+	if !ok || len(raw) == 0 {
+		raw, ok = awt["app_summaries"].([]interface{})
+	}
 	if !ok || len(raw) == 0 {
 		return nil
 	}
@@ -2495,11 +2509,16 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Update focus cache from the per-cycle app_summaries in this payload
+	// Update focus cache from cumulative_summaries (all apps since agent start),
+	// falling back to the per-cycle app_summaries if cumulative is absent.
 	go func() {
 		if data, ok := payload["data"].(map[string]interface{}); ok {
 			if awt, ok := data["ActiveWindowTracker"].(map[string]interface{}); ok {
-				if raw, ok := awt["app_summaries"].([]interface{}); ok && len(raw) > 0 {
+				raw, ok := awt["cumulative_summaries"].([]interface{})
+				if !ok || len(raw) == 0 {
+					raw, ok = awt["app_summaries"].([]interface{})
+				}
+				if ok && len(raw) > 0 {
 					globalFocusCache.applyFocusSummaries(authDeviceID, raw)
 				}
 			}
