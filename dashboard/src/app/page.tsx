@@ -32,7 +32,7 @@ const DEFAULT_POLICY: EnterprisePolicy = {
   delta_upload_enabled: true,
   cache_unchanged_collector_data: true,
   browser_history_mode: 'full_url',
-  browser_history_limit: 10,
+  browser_history_limit: 200,
   collect_system_info: true,
   collect_hardware_stats: true,
   collect_processes: true,
@@ -93,10 +93,17 @@ function localDateKey(daysAgo: number): string {
 
 function browserHistoryQuery(range: BrowserHistoryRange): string {
   const params = new URLSearchParams({ limit: '500' });
-  const offset = range === 'recent' ? 0 : range === 'last_day' ? 1 : 2;
-  const date = localDateKey(offset);
-  params.set('from', date);
-  params.set('to', date);
+  if (range === 'recent') {
+    // Span today + yesterday so admins always see entries regardless of
+    // whether today's S3 archive has been written yet (early in the day).
+    params.set('from', localDateKey(1)); // yesterday
+    params.set('to', localDateKey(0));   // today
+  } else {
+    const offset = range === 'last_day' ? 1 : 2;
+    const date = localDateKey(offset);
+    params.set('from', date);
+    params.set('to', date);
+  }
   return params.toString();
 }
 

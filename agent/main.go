@@ -60,7 +60,7 @@ var (
 	collectOSUpdates      = true
 	collectUSBDevices     = true
 	browserHistoryMode    = "full_url"
-	browserHistoryLimit   = 10
+	browserHistoryLimit   = 200 // show up to 200 recent entries by default (was 10)
 	registerMu            sync.Mutex
 )
 
@@ -550,7 +550,9 @@ func applyBrowserHistoryPolicy(payload map[string]interface{}, mode string, limi
 				entries[i].Title = ""
 			}
 		}
-		if key == "top_recent_urls" && limit > 0 && len(entries) > limit {
+		// Apply the limit to both recent and new entries so the admin always
+		// sees a meaningful number of rows.  limit=0 means no cap.
+		if limit > 0 && len(entries) > limit {
 			entries = entries[:limit]
 		}
 		payload[key] = entries

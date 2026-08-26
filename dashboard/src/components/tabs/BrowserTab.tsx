@@ -69,8 +69,8 @@ export default function BrowserTab({
 
   if (!uniqueHistory.length && !canFilterHistory) return <div className="no-data">No browser history entries.</div>;
 
-  const topRecent = uniqueHistory.slice(0, 10);
-  const hasMore   = uniqueHistory.length > 10;
+  const topRecent = uniqueHistory.slice(0, 200);
+  const hasMore   = uniqueHistory.length > 200;
 
   const byBrowser = uniqueHistory.reduce((acc, h) => {
     const b = h.browser || 'Unknown';

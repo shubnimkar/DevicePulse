@@ -16,7 +16,6 @@ package collector
 
 import (
 	"log"
-	"os"
 	"runtime"
 	"sync"
 	"time"
@@ -224,62 +223,10 @@ func getForegroundAppMacOS() string {
 
 // ─── Linux ───────────────────────────────────────────────────────────────────
 //
-// Strategy (tried in order, first success wins):
-//
-//  1. X11  – pure-Go XCB via github.com/jezek/xgb
-//             Reads _NET_ACTIVE_WINDOW then _NET_WM_NAME / WM_CLASS.
-//             Works for any X11 desktop (GNOME-X, KDE-X, XFCE, i3, …).
-//             No xdotool, no xprop, no shell commands.
-//
-//  2. Wayland/GNOME  – D-Bus: org.gnome.Shell → org.gnome.Shell.FocusedWindow
-//                      Falls back to org.gnome.Shell.Eval for older GNOME.
-//
-//  3. Wayland/KDE    – D-Bus: org.kde.KWin → activeClient → caption
-//
-//  4. Wayland/Sway   – swaymsg -t get_tree (JSON) parsed purely in Go.
-//                      swaymsg is Sway's own IPC binary; it ships with Sway.
-//
-//  5. /proc fallback – enumerate /proc/[pid]/stat looking for the process that
-//                      has the same session ID as the user's login session and
-//                      is in the foreground process group.  Works on any kernel
-//                      without a display server requirement.
-
-func getForegroundAppLinux() string {
-	// Prefer X11 when DISPLAY is set; fall back to Wayland paths.
-	hasDisplay := os.Getenv("DISPLAY") != ""
-	hasWayland := os.Getenv("WAYLAND_DISPLAY") != "" || os.Getenv("XDG_SESSION_TYPE") == "wayland"
-
-	if hasDisplay {
-		if name := getActiveWindowX11(); name != "" {
-			return cleanLinuxForegroundApp(name)
-		}
-	}
-
-	// Wayland paths.
-	if hasWayland {
-		// Try GNOME first (most deployed enterprise Linux desktop).
-		if name := getActiveWindowWaylandGNOME(); name != "" {
-			return cleanLinuxForegroundApp(name)
-		}
-		// Try KDE Plasma.
-		if name := getActiveWindowWaylandKDE(); name != "" {
-			return cleanLinuxForegroundApp(name)
-		}
-		// Try Sway / wlroots compositors.
-		if name := getActiveWindowSway(); name != "" {
-			return cleanLinuxForegroundApp(name)
-		}
-	}
-
-	// Without a display session, /proc can only tell us about background
-	// processes, not the GUI app the person is using.
-	if !hasDisplay && !hasWayland {
-		return ""
-	}
-
-	// /proc-based fallback — best effort for broken display-server access.
-	return cleanLinuxForegroundApp(getActiveWindowProcFallback())
-}
+// getForegroundAppLinux is implemented in active_window_linux.go (build-tagged).
+// It tries X11 → Wayland/GNOME → Wayland/KDE → Sway → /proc fallback, and
+// when running as root also probes /proc/<pid>/environ to inject the user's
+// display session before attempting X11/Wayland queries.
 
 // ─── Linux / X11 (pure-Go XCB) ───────────────────────────────────────────────
 

@@ -211,7 +211,7 @@ func defaultPolicy() map[string]interface{} {
 		"delta_upload_enabled":           true,
 		"cache_unchanged_collector_data": true,
 		"browser_history_mode":           "full_url",
-		"browser_history_limit":          10,
+		"browser_history_limit":          200,
 		"collect_system_info":            true,
 		"collect_hardware_stats":         true,
 		"collect_processes":              true,
@@ -233,7 +233,7 @@ func normalizePolicy(input map[string]interface{}) map[string]interface{} {
 
 	clampNumber(policy, "sync_interval_seconds", 10, 3600)
 	clampNumber(policy, "telemetry_retention_days", 1, 3650)
-	clampNumber(policy, "browser_history_limit", 0, 1000)
+	clampNumber(policy, "browser_history_limit", 0, 5000)
 
 	mode, _ := policy["browser_history_mode"].(string)
 	switch mode {
@@ -772,16 +772,145 @@ func sanitizeActiveWindowPayload(payload map[string]interface{}) {
 }
 
 var ignoredAppUsageNames = map[string]struct{}{
-	"apt-check":         {},
-	"apt.systemd.daily": {},
-	"dbus-daemon":       {},
-	"fwupd":             {},
-	"packagekitd":       {},
-	"snapd":             {},
-	"systemd":           {},
-	"upowerd":           {},
+	// ── DevicePulse own processes ─────────────────────────────────────────────
 	"devicepulse-age":   {},
 	"devicepulse-agent": {},
+
+	// ── systemd / init ────────────────────────────────────────────────────────
+	"systemd":            {},
+	"systemd-journald":   {},
+	"systemd-logind":     {},
+	"systemd-udevd":      {},
+	"systemd-resolved":   {},
+	"systemd-networkd":   {},
+	"systemd-timesyncd":  {},
+	"init":               {},
+
+	// ── package managers / updaters ───────────────────────────────────────────
+	"apt-check":          {},
+	"apt.systemd.daily":  {},
+	"apt-get":            {},
+	"dpkg":               {},
+	"packagekitd":        {},
+	"packagekit":         {},
+	"snapd":              {},
+	"snap":               {},
+	"appstreamcli":       {},
+	"xdelta3":            {},
+	"unattended-upgr":    {},
+	"unattended-upgrade": {},
+	"update-notifier":    {},
+	"dnf":                {},
+	"yum":                {},
+	"rpm":                {},
+	"zypper":             {},
+	"pacman":             {},
+	"flatpak":            {},
+
+	// ── D-Bus / IPC daemons ───────────────────────────────────────────────────
+	"dbus-daemon":         {},
+	"dbus-launch":         {},
+	"gdbus":               {},
+	"ibus-daemon":         {},
+	"at-spi-bus-launcher": {},
+	"at-spi2-registryd":   {},
+
+	// ── display / compositor infrastructure ───────────────────────────────────
+	"xorg":          {},
+	"xwayland":      {},
+	"mutter":        {},
+	"kwin_wayland":  {},
+	"kwin_x11":      {},
+	"kwin":          {},
+	"openbox":       {},
+	"xfwm4":         {},
+	"picom":         {},
+	"compiz":        {},
+	"sway":          {},
+	"wayfire":       {},
+
+	// ── GNOME / KDE shell services ────────────────────────────────────────────
+	"gnome-shell":           {},
+	"gnome-session":         {},
+	"gnome-session-binary":  {},
+	"gnome-keyring-daemon":  {},
+	"gnome-settings-daemon": {},
+	"plasmashell":           {},
+	"kded5":                 {},
+	"kded6":                 {},
+	"baloo_file":            {},
+	"kactivitymanagerd":     {},
+
+	// ── hardware / power / device daemons ────────────────────────────────────
+	"upowerd":        {},
+	"udisksd":        {},
+	"bluetoothd":     {},
+	"networkmanager": {},
+	"modemmanager":   {},
+	"wpa_supplicant": {},
+	"avahi-daemon":   {},
+	"cupsd":          {},
+	"fwupd":          {},
+	"thermald":       {},
+	"rtkit-daemon":   {},
+	"polkitd":        {},
+	"colord":         {},
+	"geoclue":        {},
+
+	// ── logging / monitoring daemons ─────────────────────────────────────────
+	"rsyslogd": {},
+	"syslogd":  {},
+	"auditd":   {},
+	"crond":    {},
+	"cron":     {},
+	"atd":      {},
+
+	// ── network / server daemons ─────────────────────────────────────────────
+	"sshd":         {},
+	"firewalld":    {},
+	"nginx":        {},
+	"apache2":      {},
+	"httpd":        {},
+	"mysqld":       {},
+	"postgres":     {},
+	"redis-server": {},
+
+	// ── container / VM helpers ────────────────────────────────────────────────
+	"dockerd":          {},
+	"containerd":       {},
+	"containerd-shim":  {},
+
+	// ── generic shells / interpreters (never a visible "app") ────────────────
+	"sh":      {},
+	"bash":    {},
+	"dash":    {},
+	"zsh":     {},
+	"fish":    {},
+	"python":  {},
+	"python3": {},
+	"perl":    {},
+	"ruby":    {},
+	"node":    {},
+	"gjs":     {},
+
+	// ── audio / media pipeline daemons ───────────────────────────────────────
+	"pipewire":       {},
+	"pipewire-pulse": {},
+	"wireplumber":    {},
+	"pulseaudio":     {},
+}
+
+func isLinuxSystemProcessName(key string) bool {
+	return strings.HasPrefix(key, "systemd-") ||
+		strings.HasPrefix(key, "gsd-") ||
+		strings.HasPrefix(key, "gvfs") ||
+		strings.HasPrefix(key, "gnome-") ||
+		strings.HasPrefix(key, "plasma") ||
+		strings.HasPrefix(key, "akonadi") ||
+		strings.HasPrefix(key, "xdg-") ||
+		strings.HasPrefix(key, "tracker") ||
+		strings.HasPrefix(key, "evolution") ||
+		strings.HasPrefix(key, "devicepulse-")
 }
 
 func isVisibleAppUsageName(name string) bool {
@@ -793,7 +922,14 @@ func isVisibleAppUsageName(name string) bool {
 	if _, ignored := ignoredAppUsageNames[key]; ignored {
 		return false
 	}
-	return !strings.HasPrefix(key, "devicepulse-")
+	if isLinuxSystemProcessName(key) {
+		return false
+	}
+	// Catch any remaining packagekit variants
+	if strings.Contains(key, "packagekit") {
+		return false
+	}
+	return true
 }
 
 func isVisibleAppUsageSummary(raw interface{}) bool {
@@ -2699,7 +2835,7 @@ func devicesHandler(w http.ResponseWriter, r *http.Request) {
 	opts := options.Find().SetProjection(bson.M{
 		"api_key": 0,
 		"data.BrowserHistory.top_recent_urls": bson.M{
-			"$slice": 50,
+			"$slice": 200,
 		},
 	})
 	cursor, err := mongoClient.Database(dbName).Collection("devices").Find(ctx, bson.M{}, opts)

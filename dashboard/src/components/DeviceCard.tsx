@@ -68,7 +68,9 @@ export default function DeviceCard({
 }: Props) {
   const sys    = device.data?.SystemInfo;
   const procs  = device.data?.ProcessMonitor?.top_processes ?? [];
-  const history = browserHistory ?? (browserHistoryLoaded ? device.data?.BrowserHistory?.top_recent_urls : undefined) ?? [];
+  const history = (browserHistory && browserHistory.length > 0)
+    ? browserHistory
+    : (browserHistoryLoaded ? device.data?.BrowserHistory?.top_recent_urls : undefined) ?? [];
   const hw     = device.data?.HardwareStats;
   const online = isOnline(device.last_seen);
 

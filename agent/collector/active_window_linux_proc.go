@@ -30,8 +30,25 @@ import (
 )
 
 // linuxProcFallbackActiveWindow is the entry point called from active_window.go.
+//
+// Key fix: when the agent runs as root (uid=0) it scans ALL real user sessions
+// (UID >= 1000) instead of only root-owned processes.  Root processes like
+// xdelta3 or appstreamcli used to "win" the RSS race and pollute app-usage data.
 func linuxProcFallbackActiveWindow() string {
-	uid := getSelfUID()
+	selfUID := getSelfUID()
+
+	// Build the set of UIDs we care about.
+	// If we are root, scan all human user UIDs (>= 1000).
+	// Otherwise only scan our own UID.
+	targetUIDs := map[string]struct{}{}
+	if selfUID == "0" {
+		for _, uid := range humanUserUIDs() {
+			targetUIDs[uid] = struct{}{}
+		}
+	}
+	if len(targetUIDs) == 0 && selfUID != "" {
+		targetUIDs[selfUID] = struct{}{}
+	}
 
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -61,9 +78,12 @@ func linuxProcFallbackActiveWindow() string {
 			continue
 		}
 
-		// Filter by owner UID.
-		if uid != "" && !procOwnedByUID("/proc/"+pid+"/status", uid) {
-			continue
+		// Filter by target UID set.
+		if len(targetUIDs) > 0 {
+			procUID := getProcUID("/proc/" + pid + "/status")
+			if _, ok := targetUIDs[procUID]; !ok {
+				continue
+			}
 		}
 
 		// Skip kernel threads (no /proc/[pid]/exe).
@@ -124,28 +144,81 @@ func linuxProcFallbackActiveWindow() string {
 			isDesktopApp: isDesktopApp,
 		}
 
-		// Prefer foreground processes; among those, the one with the largest RSS.
+		// Desktop apps always beat non-desktop apps regardless of RSS.
+		// Among desktop apps, pick the one with the highest CPU+RSS score.
+		if isDesktopApp && betterLinuxDesktopCandidate(next, bestDesktop) {
+			bestDesktop = next
+		}
+
+		// Among all candidates: prefer foreground > highest RSS.
 		if isForeground && (!best.isForeground || rss > best.rss) {
 			best = next
 		} else if !best.isForeground && rss > best.rss {
 			best = next
 		}
-
-		if isDesktopApp && betterLinuxDesktopCandidate(next, bestDesktop) {
-			bestDesktop = next
-		}
 	}
 
-	if best.isForeground {
-		return best.name
-	}
+	// Desktop app match always wins over generic highest-RSS process.
 	if bestDesktop.name != "" {
 		return bestDesktop.name
+	}
+	if best.isForeground {
+		return best.name
 	}
 	if best.name != "" && best.tty != 0 {
 		return best.name
 	}
-	return best.name
+	// No user-facing app found — return nothing rather than a background daemon.
+	return ""
+}
+
+// humanUserUIDs reads /etc/passwd and returns all UIDs >= 1000 with login shells.
+// Used when the agent runs as root to scope /proc scanning to real users.
+func humanUserUIDs() []string {
+	data, err := os.ReadFile("/etc/passwd")
+	if err != nil {
+		return nil
+	}
+	var uids []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// passwd: username:password:uid:gid:comment:home:shell
+		fields := strings.Split(line, ":")
+		if len(fields) < 7 {
+			continue
+		}
+		uid, err := strconv.Atoi(fields[2])
+		if err != nil || uid < 1000 {
+			continue
+		}
+		shell := fields[6]
+		if strings.Contains(shell, "nologin") || strings.Contains(shell, "false") {
+			continue
+		}
+		uids = append(uids, fields[2])
+	}
+	return uids
+}
+
+// getProcUID reads the real UID from /proc/[pid]/status.
+func getProcUID(statusPath string) string {
+	data, err := os.ReadFile(statusPath)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "Uid:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				return fields[1] // real UID
+			}
+			return ""
+		}
+	}
+	return ""
 }
 
 func isLikelyLinuxDesktopApp(name string) bool {
@@ -153,38 +226,283 @@ func isLikelyLinuxDesktopApp(name string) bool {
 	if key == "" {
 		return false
 	}
+
+	// ── Exact-match allowlist ─────────────────────────────────────────────────
+	// All GUI apps that should be tracked as user-facing applications.
 	known := map[string]struct{}{
-		"chrome":          {},
-		"chromium":        {},
-		"firefox":         {},
-		"code":            {},
-		"code-insiders":   {},
-		"mongodb compass": {},
-		"mongodb-compass": {},
-		"slack":           {},
-		"teams":           {},
-		"zoom":            {},
-		"discord":         {},
-		"notion":          {},
-		"postman":         {},
-		"pgadmin4":        {},
-		"libreoffice":     {},
-		"soffice.bin":     {},
-		"gnome-terminal-": {},
-		"gnome-terminal":  {},
-		"konsole":         {},
-		"tilix":           {},
-		"alacritty":       {},
-		"kitty":           {},
-		"terminator":      {},
+		// Browsers
+		"chrome":                {},
+		"google-chrome":         {},
+		"google-chrome-stable":  {},
+		"chromium":              {},
+		"chromium-browser":      {},
+		"firefox":               {},
+		"firefox-esr":           {},
+		"brave":                 {},
+		"brave-browser":         {},
+		"microsoft-edge":        {},
+		"microsoft-edge-stable": {},
+		"opera":                 {},
+		"vivaldi":               {},
+		"vivaldi-stable":        {},
+		"epiphany":              {},
+		"epiphany-browser":      {},
+		"midori":                {},
+		"waterfox":              {},
+		"librewolf":             {},
+		"tor browser":           {},
+		"torbrowser-launcher":   {},
+
+		// Code editors / IDEs
+		"code":                  {},
+		"code-insiders":         {},
+		"codium":                {},
+		"vscodium":              {},
+		"cursor":                {},        // Cursor AI editor
+		"windsurf":              {},        // Windsurf AI editor
+		"zed":                   {},        // Zed editor
+		"zed-editor":            {},
+		"sublime_text":          {},
+		"sublime-text":          {},
+		"subl":                  {},
+		"atom":                  {},
+		"pulsar":                {},
+		"gedit":                 {},
+		"geany":                 {},
+		"kate":                  {},
+		"kwrite":                {},
+		"mousepad":              {},
+		"xed":                   {},
+		"pluma":                 {},
+		"idea":                  {},
+		"idea.sh":               {},
+		"goland":                {},
+		"goland.sh":             {},
+		"pycharm":               {},
+		"pycharm.sh":            {},
+		"clion":                 {},
+		"webstorm":              {},
+		"phpstorm":              {},
+		"rubymine":              {},
+		"datagrip":              {},
+		"rider":                 {},
+		"eclipse":               {},
+		"netbeans":              {},
+		"netbeans64":            {},
+		"android-studio":        {},
+		"studio.sh":             {},
+		"vim":                   {},
+		"nvim":                  {},
+		"neovim":                {},
+		"emacs":                 {},
+		"emacs-gtk":             {},
+
+		// AI agent / assistant apps
+		"claude":                {},  // Claude Desktop
+		"claude-desktop":        {},
+		"chatgpt":               {},  // ChatGPT desktop
+		"perplexity":            {},
+		"copilot":               {},
+		"github-copilot":        {},
+		"ollama":                {},
+		"lm-studio":             {},
+		"lmstudio":              {},
+		"jan":                   {},  // Jan.ai desktop
+		"gpt4all":               {},
+		"open-webui":            {},
+		"koboldcpp":             {},
+
+		// Communication / collaboration
+		"slack":                 {},
+		"teams":                 {},
+		"microsoft-teams":       {},
+		"zoom":                  {},
+		"zoom.us":               {},
+		"discord":               {},
+		"telegram-desktop":      {},
+		"telegram":              {},
+		"signal-desktop":        {},
+		"signal":                {},
+		"whatsapp-for-linux":    {},
+		"whatsapp":              {},
+		"element":               {},
+		"element-desktop":       {},
+		"skype":                 {},
+		"skypeforlinux":         {},
+		"thunderbird":           {},
+		"evolution":             {},
+		"geary":                 {},
+		"mailspring":            {},
+		"protonmail-bridge":     {},
+		"nylas-mail":            {},
+		"mattermost-desktop":    {},
+		"mattermost":            {},
+		"rocketchat-desktop":    {},
+		"webex":                 {},
+		"webex meetings":        {},
+
+		// Productivity / office
+		"notion":                {},
+		"notion-app":            {},
+		"obsidian":              {},
+		"logseq":                {},
+		"joplin":                {},
+		"zettlr":                {},
+		"libreoffice":           {},
+		"libreoffice-writer":    {},
+		"libreoffice-calc":      {},
+		"libreoffice-impress":   {},
+		"soffice":               {},
+		"soffice.bin":           {},
+		"onlyoffice-desktopeditors": {},
+		"wps":                   {},
+		"etherpad":              {},
+		"xournalpp":             {},
+		"okular":                {},
+		"evince":                {},
+		"zathura":               {},
+
+		// Developer tools
+		"postman":               {},
+		"insomnia":              {},
+		"hoppscotch":            {},
+		"dbeaver":               {},
+		"dbeaver-ce":            {},
+		"beekeeper-studio":      {},
+		"tableplus":             {},
+		"pgadmin4":              {},
+		"pgadmin":               {},
+		"mongodb compass":       {},
+		"mongodb-compass":       {},
+		"datagrip":              {},
+		"robo-3t":               {},
+		"robo3t":                {},
+		"redis-insight":         {},
+		"redisinsight":          {},
+		"responsively":          {},
+		"stoplight-studio":      {},
+		"pico8":                 {},
+		"docker desktop":        {},
+		"docker-desktop":        {},
+		"rancher-desktop":       {},
+		"podman-desktop":        {},
+		"helm-dashboard":        {},
+
+		// Terminals
+		"gnome-terminal":        {},
+		"gnome-terminal-server": {},
+		"konsole":               {},
+		"xterm":                 {},
+		"rxvt":                  {},
+		"urxvt":                 {},
+		"tilix":                 {},
+		"terminator":            {},
+		"alacritty":             {},
+		"kitty":                 {},
+		"wezterm":               {},
+		"wezterm-gui":           {},
+		"hyper":                 {},
+		"tabby":                 {},
+		"tabby-terminal":        {},
+		"yakuake":               {},
+		"guake":                 {},
+		"xfce4-terminal":        {},
+		"mate-terminal":         {},
+		"lxterminal":            {},
+		"st":                    {},
+		"foot":                  {},
+		"ghostty":               {},
+
+		// Design / creative
+		"figma":                 {},
+		"figma-linux":           {},
+		"gimp":                  {},
+		"inkscape":              {},
+		"blender":               {},
+		"darktable":             {},
+		"rawtherapee":           {},
+		"krita":                 {},
+		"kdenlive":              {},
+		"openshot":              {},
+		"shotcut":               {},
+		"obs":                   {},
+		"obs-studio":            {},
+		"audacity":              {},
+		"vlc":                   {},
+		"mpv":                   {},
+		"spotify":               {},
+		"rhythmbox":             {},
+		"clementine":            {},
+		"strawberry":            {},
+		"lollypop":              {},
+
+		// System / utility (user-facing)
+		"thunar":                {},
+		"nautilus":              {},
+		"nemo":                  {},
+		"pcmanfm":               {},
+		"dolphin":               {},
+		"ranger":                {},
+		"gnome-system-monitor":  {},
+		"gnome-disk-utility":    {},
+		"baobab":                {},
+		"gparted":               {},
+		"virtualbox":            {},
+		"vmware":                {},
+		"virt-manager":          {},
+		"remmina":               {},
+		"vinagre":               {},
+		"wireshark":             {},
+		"zenmap":                {},
+		"burpsuite":             {},
+		"ghidra":                {},
+		"1password":             {},
+		"bitwarden":             {},
+		"keepassxc":             {},
+		"seahorse":              {},
+		"calibre":               {},
 	}
+
 	if _, ok := known[key]; ok {
 		return true
 	}
+
+	// ── Substring patterns for app families ───────────────────────────────────
+	// These catch variant binary names, Electron app helpers, snap/flatpak
+	// wrappers, and version-suffixed binaries.
 	return strings.Contains(key, "chrome") ||
+		strings.Contains(key, "chromium") ||
 		strings.Contains(key, "firefox") ||
+		strings.Contains(key, "electron") ||
 		strings.Contains(key, "mongodb") ||
-		strings.Contains(key, "code")
+		strings.Contains(key, "cursor") ||
+		strings.Contains(key, "windsurf") ||
+		strings.Contains(key, "copilot") ||
+		strings.Contains(key, "claude") ||
+		strings.Contains(key, "chatgpt") ||
+		strings.Contains(key, "ollama") ||
+		strings.Contains(key, "vscode") ||
+		strings.Contains(key, "codium") ||
+		strings.Contains(key, "jetbrains") ||
+		strings.Contains(key, "intellij") ||
+		strings.Contains(key, "pycharm") ||
+		strings.Contains(key, "goland") ||
+		strings.Contains(key, "webstorm") ||
+		strings.Contains(key, "postman") ||
+		strings.Contains(key, "insomnia") ||
+		strings.Contains(key, "slack") ||
+		strings.Contains(key, "discord") ||
+		strings.Contains(key, "zoom") ||
+		strings.Contains(key, "teams") ||
+		strings.Contains(key, "notion") ||
+		strings.Contains(key, "obsidian") ||
+		strings.Contains(key, "figma") ||
+		strings.Contains(key, "1password") ||
+		strings.Contains(key, "bitwarden") ||
+		strings.Contains(key, "keepass") ||
+		strings.Contains(key, "wezterm") ||
+		strings.Contains(key, "alacritty") ||
+		strings.Contains(key, "ghostty")
 }
 
 func betterLinuxDesktopCandidate(next, current candidate) bool {
@@ -217,22 +535,9 @@ func getSelfUID() string {
 }
 
 // procOwnedByUID returns true if the process's status file shows the given UID.
+// Kept for compatibility — new code uses getProcUID instead.
 func procOwnedByUID(statusPath, uid string) bool {
-	data, err := os.ReadFile(statusPath)
-	if err != nil {
-		return false
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, "Uid:") {
-			fields := strings.Fields(line)
-			// fields: Uid: real effective saved fs
-			if len(fields) >= 2 && fields[1] == uid {
-				return true
-			}
-			return false
-		}
-	}
-	return false
+	return getProcUID(statusPath) == uid
 }
 
 // readProcStat parses /proc/[pid]/stat. The second field (comm) is wrapped in

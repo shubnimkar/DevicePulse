@@ -7,6 +7,7 @@ package collector
 // the actual implementations live in the active_window_linux_*.go files which
 // are only compiled on Linux via build tags.
 
+func getForegroundAppLinux() string           { return "" }
 func linuxX11ActiveWindow() string            { return "" }
 func linuxWaylandGNOMEActiveWindow() string   { return "" }
 func linuxWaylandKDEActiveWindow() string     { return "" }
