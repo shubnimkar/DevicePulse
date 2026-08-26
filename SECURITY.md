@@ -55,16 +55,24 @@ The agent stores credentials in `agent/data/registration.json` after its first r
 
 ---
 
-## Admin Endpoints
+## Privileged Endpoints & Roles
 
-The following endpoints require the `X-Admin-Secret` header:
+Privileged API routes are gated by **dashboard sessions** (HTTP-only signed
+cookie) with a role hierarchy: `viewer` < `manager` < `admin`.
 
-| Endpoint | Method | Purpose |
+| Endpoint | Method | Minimum role |
 |---|---|---|
-| `/policy` | POST | Update global policy (sync interval) |
-| `/update/release` | POST | Publish a new agent binary release |
+| `/policy` | GET | viewer |
+| `/policy` | POST | manager |
+| `/devices/{id}/commands` | POST | manager (admin-only types: `lock_screen`, quarantine, `wipe_agent`) |
+| `/users`, `/users/{id}/*` | any | admin |
+| `/update/release*`, `/update/builds` | any | admin |
+| `/devices/{id}` | DELETE | admin |
 
-**If `ADMIN_SECRET` is not set**, these endpoints return `503 Service Unavailable` to prevent accidental open access.
+The old `X-Admin-Secret` header gate has been removed. `ADMIN_SECRET` survives
+only as an optional fallback value for `SESSION_SECRET`. Sessions embed a token
+epoch: resetting a user's password bumps it and instantly invalidates their
+outstanding tokens.
 
 **Example authenticated request:**
 ```bash
@@ -100,6 +108,17 @@ MONGO_URI=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/?retryWrites=tru
 ## API Key Generation
 
 Device API keys are generated using `crypto/rand` (cryptographically secure randomness) and encoded as 48-character hex strings.
+
+**Keys are stored hashed** (`devices.api_key_hash` = sha256 hex); the plaintext
+exists only in the registration response the agent saves locally. On first
+startup after upgrading, the API automatically migrates any remaining plaintext
+keys — agents need no changes and no re-registration.
+
+Because plaintext keys can no longer be re-emitted, a device that re-registers
+with the same hardware UUID/MAC receives a **freshly rotated** key (the old one
+stops working immediately). This is strictly safer than re-issuing the original
+secret. Rolling back to a pre-hashing build after migration requires restoring
+MongoDB from backup.
 
 **Old versions** (before this security patch) used time-based pseudo-random generation. If you deployed an API before this fix, consider rotating all device keys by:
 1. Clearing the `devices` collection

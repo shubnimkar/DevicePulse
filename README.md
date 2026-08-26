@@ -17,7 +17,7 @@ Enterprise endpoint telemetry platform. Deploy a lightweight Go agent on any mac
 | Component | Stack | Default port |
 |-----------|-------|--------------|
 | `agent/`  | Go 1.25, gopsutil, modernc/sqlite | — |
-| `api/`    | Go 1.23, stdlib net/http, MongoDB driver | 8000 |
+| `api/`    | Go 1.24, stdlib net/http, MongoDB driver | 8000 |
 | `dashboard/` | Next.js 16, React 19, TypeScript, Tailwind 4 | 3000 |
 
 ---
@@ -365,16 +365,42 @@ DevicePulse/
 | `BROWSER_HISTORY_S3_PREFIX` | API | `browser-history` | S3 key prefix for browser-history archive objects |
 | `BROWSER_HISTORY_S3_ENDPOINT` | API | — | Optional S3-compatible endpoint, for example MinIO |
 | `BROWSER_HISTORY_S3_PATH_STYLE` | API | `false` | Force path-style S3 requests; automatically enabled when endpoint is set |
+| `ACTIVITY_S3_BUCKET` | API | fallback chain | Daily app-usage bucket: `TELEMETRY_S3_BUCKET` → `BROWSER_HISTORY_S3_BUCKET` → `S3_BUCKET` |
+| `ACTIVITY_S3_PREFIX` | API | `app-usage` | S3 key prefix for daily app-usage objects |
+| `ACTIVITY_S3_ENDPOINT` | API | fallback chain | Optional S3-compatible endpoint: `TELEMETRY_S3_ENDPOINT` → `S3_ENDPOINT` |
+| `ACTIVITY_S3_PATH_STYLE` | API | auto | Force path-style requests (auto-on when an endpoint is set) |
 | `DEVICEPULSE_API_URL` | Agent | `http://localhost:8000` | API endpoint override at runtime |
+| `SESSION_SECRET` | API | falls back to `ADMIN_SECRET` | HMAC key signing dashboard session cookies |
+| `DASHBOARD_EXTRA_ORIGINS` | API | — | Comma-separated extra browser origins allowed for credentialed CORS |
+| `COOKIE_SECURE` | API | `false` | Mark the session cookie Secure (enable behind HTTPS) |
+| `LOGIN_RATE_LIMIT_PER_MINUTE` | API | `30` | Per-IP login attempts per minute (0 disables) |
+| `REGISTER_RATE_LIMIT_PER_MINUTE` | API | `10` | Per-IP device registrations per minute (0 disables) |
 | `NEXT_PUBLIC_API_URL` | Dashboard | `/api` | API URL used by the browser dashboard |
 | `API_INTERNAL_URL` | Dashboard | `http://127.0.0.1:8000` | Server-side Next.js rewrite target for `/api/*` when nginx sends API traffic to the dashboard |
-| `NEXT_PUBLIC_DASHBOARD_TOKEN` | Dashboard | — | Dashboard token sent to read endpoints when `DASHBOARD_TOKEN` is configured |
-| `NEXT_PUBLIC_ADMIN_SECRET` | Dashboard | — | Admin secret sent for policy updates in simple dashboard deployments |
+| `NEXT_PUBLIC_DASHBOARD_TOKEN` | Dashboard | — | Legacy; read endpoints now require dashboard login sessions |
+| `NEXT_PUBLIC_ADMIN_SECRET` | Dashboard | — | Legacy; privileged routes are role-gated by dashboard sessions |
 
 The agent API URL can also be baked in at build time:
 ```bash
 go build -ldflags "-X main.defaultAPIURL=https://your-ec2-domain.com" -o agent_bin .
 ```
+
+---
+
+## Security Hardening (August 2026)
+
+Behavioral changes shipped with the backend audit fixes:
+
+- **Accurate focus totals** — `/focus/*` aggregates per-cycle deltas only; previously cumulative-since-start totals were re-added every sync and grew quadratically. Historical inflation decays as old telemetry hits its retention TTL.
+- **Hashed device keys + rotation** — devices store only `sha256(api_key)`. A one-time startup migration converts existing plaintext keys; agents keep working unchanged. Re-registering known hardware now issues a *fresh* key instead of re-emitting the original secret.
+- **Bounded reads** — `/devices/{id}/history` returns ≤500 docs (hydrated from S3 concurrently); browser-history date ranges are capped at ~92 days or the retention window, whichever is larger.
+- **Hardened HTTP server** — explicit header/read/write/idle timeouts plus a 1MB body cap on all routes except `/ingest` (5MB).
+- **Login/register rate limits** — 30/min and 10/min per IP respectively (`*_RATE_LIMIT_PER_MINUTE`, 0 disables).
+- **Strict CORS** — only exact origins from `DASHBOARD_ORIGIN`/`DASHBOARD_EXTRA_ORIGINS` get credentialed responses.
+- **Revocable sessions** — tokens embed a user epoch bumped on password reset; stale cookies die instantly.
+- **Safer registration** — credential recovery requires hardware UUID/MAC match; hostname-only requests always mint fresh devices; concurrent first-registrations resolve cleanly instead of 500-ing.
+- **No agent downgrades** — update checks offer releases strictly newer than the running version.
+- **Non-root container** — runtime image drops privileges to uid 10001.
 
 ---
 

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -42,13 +43,15 @@ import (
 var (
 	mongoClient *mongo.Client
 	dbName      = "devicepulse"
-	// adminSecret is loaded from ADMIN_SECRET env var and required for
-	// privileged endpoints: POST /policy and POST /update/release.
-	adminSecret    string
-	sessionSecret  string
-	browserArchive *BrowserHistoryArchive
-	telemetryStore *TelemetryArchive
-	activityStore  *DailyActivityArchive
+	// sessionSecret signs dashboard session tokens (HMAC-SHA256). It comes from
+	// SESSION_SECRET, falling back to ADMIN_SECRET for simple deployments.
+	sessionSecret string
+	// Optional in-memory request-rate limiters (login / device registration).
+	loginLimiter    *rateLimiter
+	registerLimiter *rateLimiter
+	browserArchive  *BrowserHistoryArchive
+	telemetryStore  *TelemetryArchive
+	activityStore   *DailyActivityArchive
 )
 
 // ─── Focus Cache ──────────────────────────────────────────────────────────────
@@ -145,13 +148,12 @@ func buildFocusCacheFromMongo() {
 			continue
 		}
 
-		// No limit — scan all telemetry to build accurate cumulative totals.
+		// Deltas only — do not project cumulative_summaries into the rebuild.
 		opts := options.Find().
 			SetSort(bson.D{{Key: "_id", Value: -1}}).
 			SetProjection(bson.M{
-				"data.ActiveWindowTracker.app_summaries":        1,
-				"data.ActiveWindowTracker.cumulative_summaries": 1,
-				"_id": 0,
+				"data.ActiveWindowTracker.app_summaries": 1,
+				"_id":                                    0,
 			})
 
 		cursor, err := coll.Find(ctx, bson.M{"device_id": deviceID}, opts)
@@ -177,8 +179,49 @@ func buildFocusCacheFromMongo() {
 	}
 }
 
-// extractFocusSummaries pulls the app_summaries (or cumulative_summaries) array
-// out of a raw telemetry doc. Prefers cumulative_summaries when present.
+// pruneFocusCacheStaleDevices drops focus-cache entries whose device no longer
+// exists in the devices collection (deleted on another instance, TTL'd, etc.)
+// so the in-memory cache tracks reality.
+func pruneFocusCacheStaleDevices() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ids, err := mongoClient.Database(dbName).Collection("devices").Distinct(ctx, "device_id", bson.M{})
+	if err != nil {
+		log.Printf("FocusCache: stale-entry prune skipped: %v", err)
+		return
+	}
+	active := make(map[string]struct{}, len(ids))
+	for _, raw := range ids {
+		if id, ok := raw.(string); ok && id != "" {
+			active[id] = struct{}{}
+		}
+	}
+	globalFocusCache.mu.Lock()
+	removed := 0
+	for id := range globalFocusCache.data {
+		if _, ok := active[id]; !ok {
+			delete(globalFocusCache.data, id)
+			removed++
+		}
+	}
+	globalFocusCache.mu.Unlock()
+	if removed > 0 {
+		log.Printf("FocusCache: pruned %d stale device entry(ies)", removed)
+	}
+}
+
+func startFocusCacheJanitor(interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for range ticker.C {
+			pruneFocusCacheStaleDevices()
+		}
+	}()
+}
+
+// extractFocusSummaries pulls the per-cycle app_summaries array out of a raw
+// telemetry doc. Deltas only — see the note below on cumulative_summaries.
 func extractFocusSummaries(doc bson.M) []interface{} {
 	data, ok := doc["data"].(bson.M)
 	if !ok {
@@ -188,11 +231,9 @@ func extractFocusSummaries(doc bson.M) []interface{} {
 	if !ok {
 		return nil
 	}
-	// Prefer cumulative_summaries; fall back to per-cycle app_summaries.
-	summaries, ok := awt["cumulative_summaries"].(bson.A)
-	if !ok || len(summaries) == 0 {
-		summaries, _ = awt["app_summaries"].(bson.A)
-	}
+	// Sum per-cycle app_summaries deltas across documents. Never read
+	// cumulative_summaries here — those are running totals, not deltas.
+	summaries, _ := awt["app_summaries"].(bson.A)
 	result := make([]interface{}, 0, len(summaries))
 	for _, s := range summaries {
 		if isVisibleAppUsageSummary(s) {
@@ -236,8 +277,13 @@ func defaultPolicy() map[string]interface{} {
 
 func normalizePolicy(input map[string]interface{}) map[string]interface{} {
 	policy := defaultPolicy()
-	for k, v := range input {
-		policy[k] = v
+	// Whitelist: only known policy keys are copied. Anything else a client
+	// sends is ignored so junk (or "_id") never reaches the persisted config
+	// document and cannot break savePolicyToMongo's $set.
+	for k := range policy {
+		if v, ok := input[k]; ok {
+			policy[k] = v
+		}
 	}
 
 	clampNumber(policy, "sync_interval_seconds", 10, 3600)
@@ -523,70 +569,103 @@ func (a *DailyActivityArchive) Archive(ctx context.Context, deviceID string, pay
 	date := eventTime.UTC().Format("2006-01-02")
 	key := dailyActivityS3Key(a.prefix, deviceID, username, date)
 
-	doc := map[string]interface{}{
-		"date":       date,
-		"device_id":  deviceID,
-		"username":   username,
-		"sessions":   []interface{}{},
-		"apps":       []interface{}{},
-		"updated_at": time.Now().UTC(),
-	}
-	existing, err := a.readObject(ctx, key)
-	if err != nil {
-		return nil, err
-	}
-	if existing != nil {
-		doc = existing
-	}
-	doc["date"] = date
-	doc["device_id"] = deviceID
-	doc["username"] = username
-	doc["updated_at"] = time.Now().UTC()
-
-	allSessions := appendInterfaceSlice(doc["sessions"], sessions)
-	sort.Slice(allSessions, func(i, j int) bool {
-		return activitySessionStart(allSessions[i]).Before(activitySessionStart(allSessions[j]))
-	})
-	// Merge adjacent fragments of the same app so the archive stores real focus
-	// periods instead of one row per sync cycle (the agent soft-closes the
-	// in-progress session on every sync, which used to inflate both the stored
-	// session list and the per-app session counts).
-	allSessions = mergeActivitySessions(allSessions, activitySessionMergeGap)
-	doc["sessions"] = allSessions
-	apps, totalS := summarizeActivitySessions(allSessions)
-	doc["apps"] = apps
-	doc["total_seconds"] = totalS
-	doc["session_count"] = len(allSessions)
-
-	body, err := json.Marshal(doc)
-	if err != nil {
-		return nil, err
-	}
-	if _, err = a.client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:      aws.String(a.bucket),
-		Key:         aws.String(key),
-		Body:        bytes.NewReader(body),
-		ContentType: aws.String("application/json"),
-	}); err != nil {
-		return nil, err
+	buildResult := func(apps []interface{}, totalS float64, sessionCount int) *DailyActivityArchiveResult {
+		topApps := apps
+		if len(topApps) > 10 {
+			topApps = topApps[:10]
+		}
+		return &DailyActivityArchiveResult{
+			Bucket:     a.bucket,
+			Key:        key,
+			Date:       date,
+			Username:   username,
+			TotalS:     totalS,
+			TopApps:    topApps,
+			SessionCnt: sessionCount,
+		}
 	}
 
-	topApps := apps
-	if len(topApps) > 10 {
-		topApps = topApps[:10]
+	// Optimistic-concurrency write: re-read → re-merge → conditional PUT. Two
+	// writers racing the same day-object used to last-write-wins and silently
+	// drop one side's sessions; IfMatch/IfNoneMatch turns that into a retry.
+	const maxWriteAttempts = 3
+	var lastErr error
+	for attempt := 0; attempt < maxWriteAttempts; attempt++ {
+		existing, etag, err := a.readObject(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		doc := map[string]interface{}{
+			"date":       date,
+			"device_id":  deviceID,
+			"username":   username,
+			"sessions":   []interface{}{},
+			"apps":       []interface{}{},
+			"updated_at": time.Now().UTC(),
+		}
+		if existing != nil {
+			doc = existing
+		}
+		doc["date"] = date
+		doc["device_id"] = deviceID
+		doc["username"] = username
+		doc["updated_at"] = time.Now().UTC()
+
+		allSessions := appendInterfaceSlice(doc["sessions"], sessions)
+		sort.Slice(allSessions, func(i, j int) bool {
+			return activitySessionStart(allSessions[i]).Before(activitySessionStart(allSessions[j]))
+		})
+		// Merge adjacent fragments of the same app so the archive stores real focus
+		// periods instead of one row per sync cycle (the agent soft-closes the
+		// in-progress session on every sync, which used to inflate both the stored
+		// session list and the per-app session counts).
+		allSessions = mergeActivitySessions(allSessions, activitySessionMergeGap)
+		doc["sessions"] = allSessions
+		apps, totalS := summarizeActivitySessions(allSessions)
+		doc["apps"] = apps
+		doc["total_seconds"] = totalS
+		doc["session_count"] = len(allSessions)
+
+		body, err := json.Marshal(doc)
+		if err != nil {
+			return nil, err
+		}
+		putInput := &s3.PutObjectInput{
+			Bucket:      aws.String(a.bucket),
+			Key:         aws.String(key),
+			Body:        bytes.NewReader(body),
+			ContentType: aws.String("application/json"),
+		}
+		if etag != nil {
+			putInput.IfMatch = etag
+		} else {
+			putInput.IfNoneMatch = aws.String("*")
+		}
+		if _, err = a.client.PutObject(ctx, putInput); err == nil {
+			return buildResult(apps, totalS, len(allSessions)), nil
+		}
+		switch code := s3ErrorCode(err); code {
+		case "PreconditionFailed", "ConditionalRequestConflict":
+			lastErr = err // another writer won — re-read and re-merge
+		default:
+			if code != "" && code != "NotImplemented" && code != "MethodNotAllowed" && code != "InvalidRequest" && code != "InvalidArgument" {
+				return nil, err
+			}
+			// Provider lacks conditional writes (e.g. older MinIO): degrade to
+			// the historical unconditional write instead of failing ingestion.
+			log.Printf("Daily activity archive: conditional write unsupported (code=%q), falling back to plain write", code)
+			putInput.IfMatch = nil
+			putInput.IfNoneMatch = nil
+			if _, err = a.client.PutObject(ctx, putInput); err != nil {
+				return nil, err
+			}
+			return buildResult(apps, totalS, len(allSessions)), nil
+		}
 	}
-	return &DailyActivityArchiveResult{
-		Bucket:     a.bucket,
-		Key:        key,
-		Date:       date,
-		Username:   username,
-		TotalS:     totalS,
-		TopApps:    topApps,
-		SessionCnt: len(allSessions),
-	}, nil
+	return nil, fmt.Errorf("activity archive write raced %d attempts: %w", maxWriteAttempts, lastErr)
 }
 
-func (a *DailyActivityArchive) readObject(ctx context.Context, key string) (map[string]interface{}, error) {
+func (a *DailyActivityArchive) readObject(ctx context.Context, key string) (map[string]interface{}, *string, error) {
 	raw, err := a.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(a.bucket),
 		Key:    aws.String(key),
@@ -594,16 +673,16 @@ func (a *DailyActivityArchive) readObject(ctx context.Context, key string) (map[
 	if err != nil {
 		var notFound interface{ ErrorCode() string }
 		if ok := errors.As(err, &notFound); ok && (notFound.ErrorCode() == "NoSuchKey" || notFound.ErrorCode() == "NotFound") {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	defer raw.Body.Close()
 	var doc map[string]interface{}
 	if err := json.NewDecoder(raw.Body).Decode(&doc); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return doc, nil
+	return doc, raw.ETag, nil
 }
 
 func (a *DailyActivityArchive) DeleteDevice(ctx context.Context, deviceID string) (int, error) {
@@ -745,12 +824,10 @@ func focusSummariesFromPayload(payload map[string]interface{}) []interface{} {
 	if !ok {
 		return nil
 	}
-	// Prefer cumulative_summaries (all apps since agent start) so persisted
-	// documents capture the full picture rather than just the current-cycle delta.
-	raw, ok := awt["cumulative_summaries"].([]interface{})
-	if !ok || len(raw) == 0 {
-		raw, ok = awt["app_summaries"].([]interface{})
-	}
+	// Persist per-cycle app_summaries deltas only. cumulative_summaries holds
+	// totals-since-agent-start; storing those here would poison any consumer
+	// that sums documents across time (the focus-cache rebuild).
+	raw, ok := awt["app_summaries"].([]interface{})
 	if !ok || len(raw) == 0 {
 		return nil
 	}
@@ -796,14 +873,14 @@ var ignoredAppUsageNames = map[string]struct{}{
 	"devicepulse-agent": {},
 
 	// ── systemd / init ────────────────────────────────────────────────────────
-	"systemd":            {},
-	"systemd-journald":   {},
-	"systemd-logind":     {},
-	"systemd-udevd":      {},
-	"systemd-resolved":   {},
-	"systemd-networkd":   {},
-	"systemd-timesyncd":  {},
-	"init":               {},
+	"systemd":           {},
+	"systemd-journald":  {},
+	"systemd-logind":    {},
+	"systemd-udevd":     {},
+	"systemd-resolved":  {},
+	"systemd-networkd":  {},
+	"systemd-timesyncd": {},
+	"init":              {},
 
 	// ── package managers / updaters ───────────────────────────────────────────
 	"apt-check":          {},
@@ -835,18 +912,18 @@ var ignoredAppUsageNames = map[string]struct{}{
 	"at-spi2-registryd":   {},
 
 	// ── display / compositor infrastructure ───────────────────────────────────
-	"xorg":          {},
-	"xwayland":      {},
-	"mutter":        {},
-	"kwin_wayland":  {},
-	"kwin_x11":      {},
-	"kwin":          {},
-	"openbox":       {},
-	"xfwm4":         {},
-	"picom":         {},
-	"compiz":        {},
-	"sway":          {},
-	"wayfire":       {},
+	"xorg":         {},
+	"xwayland":     {},
+	"mutter":       {},
+	"kwin_wayland": {},
+	"kwin_x11":     {},
+	"kwin":         {},
+	"openbox":      {},
+	"xfwm4":        {},
+	"picom":        {},
+	"compiz":       {},
+	"sway":         {},
+	"wayfire":      {},
 
 	// ── GNOME / KDE shell services ────────────────────────────────────────────
 	"gnome-shell":           {},
@@ -895,9 +972,9 @@ var ignoredAppUsageNames = map[string]struct{}{
 	"redis-server": {},
 
 	// ── container / VM helpers ────────────────────────────────────────────────
-	"dockerd":          {},
-	"containerd":       {},
-	"containerd-shim":  {},
+	"dockerd":         {},
+	"containerd":      {},
+	"containerd-shim": {},
 
 	// ── generic shells / interpreters (never a visible "app") ────────────────
 	"sh":      {},
@@ -1514,6 +1591,15 @@ func payloadTime(v interface{}) time.Time {
 	return time.Now().UTC()
 }
 
+// s3ErrorCode extracts the AWS error code from an S3 API failure, if present.
+func s3ErrorCode(err error) string {
+	var coded interface{ ErrorCode() string }
+	if errors.As(err, &coded) {
+		return coded.ErrorCode()
+	}
+	return ""
+}
+
 func safeS3PathSegment(s string) string {
 	replacer := strings.NewReplacer("/", "_", "\\", "_", " ", "_", ":", "_")
 	return replacer.Replace(s)
@@ -1635,27 +1721,143 @@ func savePolicyToMongo(cfg map[string]interface{}) {
 
 // ─── CORS Middleware ───────────────────────────────────────────────────────────
 
+// allowedOrigins returns the exact set of browser origins permitted to send
+// credentialed cross-origin requests. Only exact matches are reflected — no
+// wildcard prefixes — so an arbitrary http://localhost:* page cannot talk to
+// the API with cookies attached.
+//
+//	DASHBOARD_ORIGIN          primary origin (default http://localhost:3000)
+//	DASHBOARD_EXTRA_ORIGINS   comma-separated additional origins
+func allowedOrigins() map[string]struct{} {
+	base := strings.TrimSpace(os.Getenv("DASHBOARD_ORIGIN"))
+	set := map[string]struct{}{}
+	if base == "" {
+		base = "http://localhost:3000"
+		// Fresh dev checkouts with no config: accept both loopback spellings.
+		set["http://127.0.0.1:3000"] = struct{}{}
+	}
+	set[base] = struct{}{}
+	for _, extra := range strings.Split(os.Getenv("DASHBOARD_EXTRA_ORIGINS"), ",") {
+		if extra = strings.TrimSpace(extra); extra != "" {
+			set[extra] = struct{}{}
+		}
+	}
+	return set
+}
+
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		allowedOrigin := os.Getenv("DASHBOARD_ORIGIN")
-		if allowedOrigin == "" {
-			allowedOrigin = "http://localhost:3000"
-		}
-		if origin != "" && (origin == allowedOrigin || strings.HasPrefix(origin, "http://localhost:")) {
+		w.Header().Add("Vary", "Origin")
+		if _, isAllowed := allowedOrigins()[origin]; origin != "" && isAllowed {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Vary", "Origin")
-		} else {
-			w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
 		}
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
 		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
-		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, Authorization, X-API-Key, X-Admin-Secret, X-Dashboard-Token")
+		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, Authorization, X-API-Key")
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
 		next(w, r)
+	}
+}
+
+// ─── Rate Limiting ─────────────────────────────────────────────────────────────
+
+// rateLimiter is a per-key fixed-window counter for throttling unauthenticated
+// endpoints (/auth/login, /devices/register). It never guards agent data paths.
+// State is in-memory: limits apply per API instance and reset on restart,
+// which is sufficient to blunt credential stuffing and registration floods.
+type rateLimiter struct {
+	mu     sync.Mutex
+	limit  int
+	window time.Duration
+	hits   map[string]*rateWindow
+}
+
+type rateWindow struct {
+	start time.Time
+	count int
+}
+
+func newRateLimiter(limit int, window time.Duration) *rateLimiter {
+	rl := &rateLimiter{limit: limit, window: window, hits: map[string]*rateWindow{}}
+	if limit > 0 {
+		go func() {
+			ticker := time.NewTicker(window)
+			defer ticker.Stop()
+			for range ticker.C {
+				cutoff := time.Now().Add(-window)
+				rl.mu.Lock()
+				for key, w := range rl.hits {
+					if w.start.Before(cutoff) {
+						delete(rl.hits, key)
+					}
+				}
+				rl.mu.Unlock()
+			}
+		}()
+	}
+	return rl
+}
+
+func (rl *rateLimiter) Allow(key string) bool {
+	if rl == nil || rl.limit <= 0 {
+		return true
+	}
+	now := time.Now()
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	w, ok := rl.hits[key]
+	if !ok || now.Sub(w.start) >= rl.window {
+		w = &rateWindow{start: now}
+		rl.hits[key] = w
+	}
+	w.count++
+	return w.count <= rl.limit
+}
+
+// clientIP prefers the left-most X-Forwarded-For entry (the API already trusts
+// proxy headers for PUBLIC_API_URL), falling back to the TCP peer address.
+func clientIP(r *http.Request) string {
+	if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
+		if i := strings.IndexByte(xff, ','); i >= 0 {
+			xff = xff[:i]
+		}
+		return strings.TrimSpace(xff)
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+// requireRateLimit rejects requests once the caller exceeds its window. A nil
+// limiter (limit <= 0) passes everything through, which also disables the
+// throttle via env without code changes.
+func requireRateLimit(rl *rateLimiter, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !rl.Allow(clientIP(r)) {
+			w.Header().Set("Retry-After", strconv.Itoa(int(rl.window.Seconds())))
+			http.Error(w, "Too many requests", http.StatusTooManyRequests)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// limitRequestBody caps JSON bodies on every route except /ingest, which
+// applies its own larger 5MB cap inside ingestHandler (offline queue flushes
+// can legitimately be big). Oversized bodies surface as a JSON decode error →
+// 400 from the individual handler.
+func limitRequestBody(next http.Handler) http.HandlerFunc {
+	const maxBodyBytes = 1 << 20 // 1MB
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil && r.URL.Path != "/ingest" {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		}
+		next.ServeHTTP(w, r)
 	}
 }
 
@@ -1682,6 +1884,11 @@ type DashboardUser struct {
 	Status       string             `bson:"status" json:"status"`
 	CreatedAt    time.Time          `bson:"created_at" json:"created_at"`
 	UpdatedAt    time.Time          `bson:"updated_at" json:"updated_at"`
+	// TokenEpoch is bumped on password change/reset. Session tokens embed the
+	// epoch they were issued with and stop working when it moves. Zero for all
+	// pre-existing users, so legacy tokens (epoch 0) stay valid until their
+	// natural expiry or the next password change — no forced logouts on deploy.
+	TokenEpoch int `bson:"token_epoch,omitempty" json:"-"`
 }
 
 type SessionClaims struct {
@@ -1690,6 +1897,7 @@ type SessionClaims struct {
 	Name   string   `json:"name"`
 	Role   UserRole `json:"role"`
 	Exp    int64    `json:"exp"`
+	Epoch  int      `json:"epoch,omitempty"` // must equal users.token_epoch
 }
 
 type authRequest struct {
@@ -1766,6 +1974,7 @@ func createSessionToken(user DashboardUser) (string, error) {
 		Name:   user.Name,
 		Role:   user.Role,
 		Exp:    time.Now().Add(24 * time.Hour).Unix(),
+		Epoch:  user.TokenEpoch,
 	}
 	payload, err := json.Marshal(claims)
 	if err != nil {
@@ -1863,6 +2072,12 @@ func requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
+		// Token issued before a password change/reset carries a stale epoch.
+		// Legacy tokens (no epoch field → 0) match users that never had one.
+		if claims.Epoch != user.TokenEpoch {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
 		claims.Email = user.Email
 		claims.Name = user.Name
 		claims.Role = user.Role
@@ -1884,13 +2099,34 @@ func requireRole(required UserRole, next http.HandlerFunc) http.HandlerFunc {
 
 // authMiddleware validates the X-API-Key header against the devices collection.
 // It returns the device_id associated with the key, or "" if invalid.
+//
+// Keys are stored hashed (devices.api_key_hash = hex(sha256(key))). The exact
+// match runs through a unique index; hmac.Equal keeps the comparison
+// constant-time. Devices migrated from legacy plaintext storage are upgraded
+// opportunistically on first successful login.
 func resolveAPIKey(ctx context.Context, key string) (string, bool) {
 	if key == "" {
 		return "", false
 	}
 	coll := mongoClient.Database(dbName).Collection("devices")
+	keyHash := hashAPIKey(key)
+
 	var device bson.M
 	err := coll.FindOne(ctx, bson.M{
+		"api_key_hash": keyHash,
+		"status":       bson.M{"$ne": "revoked"},
+	}).Decode(&device)
+	if err == nil {
+		stored, _ := device["api_key_hash"].(string)
+		if !hmac.Equal([]byte(stored), []byte(keyHash)) {
+			return "", false
+		}
+		deviceID, _ := device["device_id"].(string)
+		return deviceID, deviceID != ""
+	}
+
+	// Legacy fallback: device registered before hashing was introduced.
+	err = coll.FindOne(ctx, bson.M{
 		"api_key": key,
 		"status":  bson.M{"$ne": "revoked"},
 	}).Decode(&device)
@@ -1898,25 +2134,17 @@ func resolveAPIKey(ctx context.Context, key string) (string, bool) {
 		return "", false
 	}
 	deviceID, _ := device["device_id"].(string)
-	return deviceID, deviceID != ""
-}
-
-// requireAdmin is a middleware that enforces the X-Admin-Secret header.
-// Returns 401 if the header is missing or doesn't match ADMIN_SECRET.
-func requireAdmin(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if adminSecret == "" {
-			// ADMIN_SECRET not configured — block all admin requests so a
-			// misconfigured deployment doesn't accidentally allow open access.
-			http.Error(w, "Admin access not configured (set ADMIN_SECRET)", http.StatusServiceUnavailable)
-			return
-		}
-		if r.Header.Get("X-Admin-Secret") != adminSecret {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-		next(w, r)
+	if deviceID == "" {
+		return "", false
 	}
+	// Opportunistic upgrade to hashed storage.
+	if _, err := coll.UpdateOne(ctx, bson.M{"device_id": deviceID}, bson.M{
+		"$set":   bson.M{"api_key_hash": keyHash},
+		"$unset": bson.M{"api_key": ""},
+	}); err != nil {
+		log.Printf("API-key hash upgrade failed for %s: %v", deviceID, err)
+	}
+	return deviceID, true
 }
 
 // requireAgent validates that the request belongs to a registered agent.
@@ -2240,42 +2468,48 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 
 	coll := mongoClient.Database(dbName).Collection("devices")
 
-	// Build a dedup filter in priority order.
-	// We try the most stable identifier first.
-	var dedupFilter bson.M
+	// Credential recovery trusts only stable hardware identity (SMBIOS UUID or
+	// NIC MAC). A bare hostname match used to hand the existing api_key to
+	// anyone who could guess the name, so hostname-only requests always mint a
+	// fresh registration instead.
+	var recoveryFilter bson.M
 	switch {
 	case hardwareUUID != "":
-		dedupFilter = bson.M{"hardware_uuid": hardwareUUID}
+		recoveryFilter = bson.M{"hardware_uuid": hardwareUUID}
 	case macAddress != "":
-		dedupFilter = bson.M{"mac_address": macAddress}
-	default:
-		dedupFilter = bson.M{"hostname": hostname}
+		recoveryFilter = bson.M{"mac_address": macAddress}
 	}
 
-	var existing bson.M
-	if err := coll.FindOne(ctx, dedupFilter).Decode(&existing); err == nil {
-		deviceID, _ := existing["device_id"].(string)
-		if isDeviceRevoked(ctx, deviceID, hardwareUUID, macAddress, hostname) {
-			http.Error(w, "Device registration is revoked", http.StatusForbidden)
+	if recoveryFilter != nil {
+		var existing bson.M
+		if err := coll.FindOne(ctx, recoveryFilter).Decode(&existing); err == nil {
+			deviceID, _ := existing["device_id"].(string)
+			if isDeviceRevoked(ctx, deviceID, hardwareUUID, macAddress, hostname) {
+				http.Error(w, "Device registration is revoked", http.StatusForbidden)
+				return
+			}
+			// Known hardware. Keys are stored hashed, so the plaintext cannot
+			// be re-emitted — rotate instead. Also refresh identity fields in
+			// case they changed (NIC swap / hostname rename).
+			apiKey, err := rotateDeviceKey(ctx, coll, recoveryFilter, bson.M{
+				"hostname":      hostname,
+				"hardware_uuid": hardwareUUID,
+				"mac_address":   macAddress,
+			})
+			if err != nil {
+				log.Printf("Registration key rotation error for %s: %v", deviceID, err)
+				http.Error(w, "Database error", http.StatusInternalServerError)
+				return
+			}
+			log.Printf("Known device re-registered (key rotated): %s (uuid=%s mac=%s host=%s)",
+				deviceID, hardwareUUID, macAddress, hostname)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{
+				"device_id": deviceID,
+				"api_key":   apiKey,
+			})
 			return
 		}
-		// Device already registered — return existing credentials.
-		// Also update hostname/mac/uuid in case they changed (e.g. NIC swap).
-		update := bson.M{"$set": bson.M{
-			"hostname":      hostname,
-			"hardware_uuid": hardwareUUID,
-			"mac_address":   macAddress,
-			"last_seen":     time.Now(),
-		}}
-		coll.UpdateOne(ctx, dedupFilter, update)
-
-		apiKey, _ := existing["api_key"].(string)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
-			"device_id": deviceID,
-			"api_key":   apiKey,
-		})
-		return
 	}
 
 	// New device — mint a stable device_id derived from hardware UUID when available.
@@ -2292,7 +2526,7 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 
 	doc := bson.M{
 		"device_id":     deviceID,
-		"api_key":       apiKey,
+		"api_key_hash":  hashAPIKey(apiKey),
 		"hostname":      hostname,
 		"hardware_uuid": hardwareUUID,
 		"mac_address":   macAddress,
@@ -2302,6 +2536,24 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, err := coll.InsertOne(ctx, doc); err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			// Two concurrent first-registrations of the same hardware can race
+			// the unique device_id index. The stored record wins — rotate its
+			// key and answer with those credentials instead of a 500.
+			apiKey, rotErr := rotateDeviceKey(ctx, coll, bson.M{"device_id": deviceID}, bson.M{})
+			if rotErr != nil {
+				log.Printf("Registration race resolution failed for %s: %v", deviceID, rotErr)
+				http.Error(w, "Database error", http.StatusInternalServerError)
+				return
+			}
+			log.Printf("Concurrent registration resolved via key rotation: %s", deviceID)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{
+				"device_id": deviceID,
+				"api_key":   apiKey,
+			})
+			return
+		}
 		log.Printf("Registration insert error: %v", err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
@@ -2314,6 +2566,65 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 		"device_id": deviceID,
 		"api_key":   apiKey,
 	})
+}
+
+// rotateDeviceKey mints a fresh API key for an existing device record and
+// swaps its hash in place. Used by credential recovery and by the concurrent
+// registration race path. extraSet carries additional $set fields.
+func rotateDeviceKey(ctx context.Context, coll *mongo.Collection, filter, extraSet bson.M) (string, error) {
+	apiKey := generateAPIKey()
+	set := bson.M{
+		"api_key_hash": hashAPIKey(apiKey),
+		"last_seen":    time.Now(),
+	}
+	for k, v := range extraSet {
+		set[k] = v
+	}
+	res, err := coll.UpdateOne(ctx, filter, bson.M{"$set": set})
+	if err != nil {
+		return "", err
+	}
+	if res.MatchedCount == 0 {
+		return "", mongo.ErrNoDocuments
+	}
+	return apiKey, nil
+}
+
+// migrateDeviceAPIKeys replaces every remaining plaintext devices.api_key with
+// its sha256 hash (api_key_hash) and drops the plaintext field. Idempotent —
+// already-migrated documents no longer carry api_key. Existing agents are
+// unaffected: they resend the same key, which resolves against its hash.
+// Run once at startup before traffic is accepted.
+func migrateDeviceAPIKeys(ctx context.Context) (int64, error) {
+	coll := mongoClient.Database(dbName).Collection("devices")
+	findOpts := options.Find().SetBatchSize(200).SetProjection(bson.M{"_id": 1, "api_key": 1})
+	cursor, err := coll.Find(ctx, bson.M{
+		"api_key": bson.M{"$exists": true, "$ne": ""},
+	}, findOpts)
+	if err != nil {
+		return 0, err
+	}
+	defer cursor.Close(ctx)
+
+	var migrated int64
+	for cursor.Next(ctx) {
+		var doc struct {
+			ID     primitive.ObjectID `bson:"_id"`
+			APIKey string             `bson:"api_key"`
+		}
+		if err := cursor.Decode(&doc); err != nil || doc.APIKey == "" {
+			continue
+		}
+		res, err := coll.UpdateOne(ctx, bson.M{"_id": doc.ID}, bson.M{
+			"$set":   bson.M{"api_key_hash": hashAPIKey(doc.APIKey)},
+			"$unset": bson.M{"api_key": ""},
+		})
+		if err != nil {
+			return migrated, err
+		}
+		migrated += res.ModifiedCount
+	}
+	return migrated, cursor.Err()
 }
 
 // POST /auth/register
@@ -2614,11 +2925,15 @@ func userPasswordHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	update := bson.M{"$set": bson.M{
-		"password_hash": string(passwordHash),
-		"updated_at":    time.Now(),
-		"status":        "active",
-	}}
+	update := bson.M{
+		"$set": bson.M{
+			"password_hash": string(passwordHash),
+			"updated_at":    time.Now(),
+			"status":        "active",
+		},
+		// Invalidate every outstanding session token for this user.
+		"$inc": bson.M{"token_epoch": 1},
+	}
 	res, err := mongoClient.Database(dbName).Collection("users").UpdateOne(ctx, bson.M{"_id": userID}, update)
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
@@ -2705,6 +3020,26 @@ func generateAPIKey() string {
 	return hex.EncodeToString(b)
 }
 
+// hashAPIKey derives the at-rest representation of a device API key. Only the
+// hash is persisted; the plaintext exists solely in the registration response.
+func hashAPIKey(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:])
+}
+
+// envInt reads an integer env var, falling back to def when unset or unparsable.
+func envInt(key string, def int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return def
+	}
+	return n
+}
+
 // ─── Ingest Handler ────────────────────────────────────────────────────────────
 
 func ingestHandler(w http.ResponseWriter, r *http.Request) {
@@ -2730,7 +3065,6 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body, err := io.ReadAll(r.Body)
-	defer r.Body.Close()
 	if err != nil {
 		http.Error(w, "Error reading body", http.StatusInternalServerError)
 		return
@@ -2867,16 +3201,14 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Update focus cache from cumulative_summaries (all apps since agent start),
-	// falling back to the per-cycle app_summaries if cumulative is absent.
+	// Update the focus cache from per-cycle app_summaries deltas ONLY.
+	// cumulative_summaries holds totals-since-agent-start — adding those on
+	// every sync re-counts every previous cycle and inflates totals
+	// quadratically over time.
 	go func() {
 		if data, ok := payload["data"].(map[string]interface{}); ok {
 			if awt, ok := data["ActiveWindowTracker"].(map[string]interface{}); ok {
-				raw, ok := awt["cumulative_summaries"].([]interface{})
-				if !ok || len(raw) == 0 {
-					raw, ok = awt["app_summaries"].([]interface{})
-				}
-				if ok && len(raw) > 0 {
+				if raw, ok := awt["app_summaries"].([]interface{}); ok && len(raw) > 0 {
 					globalFocusCache.applyFocusSummaries(authDeviceID, raw)
 				}
 			}
@@ -3017,7 +3349,7 @@ func devicePingHandler(w http.ResponseWriter, r *http.Request) {
 	err := mongoClient.Database(dbName).Collection("devices").FindOne(
 		ctx,
 		bson.M{"device_id": deviceID},
-		options.FindOne().SetProjection(bson.M{"api_key": 0}),
+		options.FindOne().SetProjection(bson.M{"api_key": 0, "api_key_hash": 0}),
 	).Decode(&device)
 	if err == mongo.ErrNoDocuments {
 		http.Error(w, "Device not found", http.StatusNotFound)
@@ -3210,7 +3542,8 @@ func devicesHandler(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	opts := options.Find().SetProjection(bson.M{
-		"api_key": 0,
+		"api_key":      0,
+		"api_key_hash": 0,
 		"data.BrowserHistory.top_recent_urls": bson.M{
 			"$slice": 200,
 		},
@@ -3235,6 +3568,15 @@ func devicesHandler(w http.ResponseWriter, r *http.Request) {
 
 // ─── History Handler ───────────────────────────────────────────────────────────
 
+// maxTelemetryHistoryDocs caps /devices/{id}/history responses. Every archived
+// document costs one S3 GET to hydrate, and the previous unbounded default let
+// a single request hammer S3 thousands of times. The dashboard always requests
+// exactly this many.
+const maxTelemetryHistoryDocs = 500
+
+// telemetryHydrationWorkers bounds concurrent S3 reads during hydration.
+const telemetryHydrationWorkers = 8
+
 func historyHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -3248,20 +3590,29 @@ func historyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	deviceID := parts[2]
 
-	// Optional ?limit=N query param. Defaults to 0 (no limit) for full history.
-	// Dashboard live view uses a small limit; report generation omits it.
-	var findOpts *options.FindOptions
+	// Optional ?limit=N. Omitted or 0 → the capped default; values above the
+	// cap are clamped so no caller can fan out more S3 reads than allowed.
+	limit := maxTelemetryHistoryDocs
 	if lStr := r.URL.Query().Get("limit"); lStr != "" {
-		if l, err := strconv.ParseInt(lStr, 10, 64); err == nil && l > 0 {
-			findOpts = options.Find().SetSort(bson.D{{Key: "_id", Value: -1}}).SetLimit(l)
+		l, err := strconv.Atoi(lStr)
+		if err != nil || l < 0 {
+			http.Error(w, "Invalid limit", http.StatusBadRequest)
+			return
+		}
+		if l > 0 {
+			limit = l
 		}
 	}
-	if findOpts == nil {
-		findOpts = options.Find().SetSort(bson.D{{Key: "_id", Value: -1}})
+	if limit > maxTelemetryHistoryDocs {
+		limit = maxTelemetryHistoryDocs
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+
+	findOpts := options.Find().
+		SetSort(bson.D{{Key: "_id", Value: -1}}).
+		SetLimit(int64(limit))
 
 	cursor, err := mongoClient.Database(dbName).Collection("telemetry").Find(ctx, bson.M{"device_id": deviceID}, findOpts)
 	if err != nil {
@@ -3275,25 +3626,62 @@ func historyHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Parsing error", http.StatusInternalServerError)
 		return
 	}
+
+	// Hydrate archived payloads concurrently, preserving document order.
+	type hydrationJob struct {
+		idx     int
+		archive bson.M
+	}
+	var jobs []hydrationJob
 	for i, doc := range history {
-		archive, ok := doc["telemetry_archive"].(bson.M)
-		if !ok {
-			continue
+		if archive, ok := doc["telemetry_archive"].(bson.M); ok && archive != nil {
+			if telemetryStore == nil {
+				log.Printf("Telemetry history read failed for %s: archive is configured in Mongo but S3 store is disabled", deviceID)
+				http.Error(w, "Telemetry S3 archive is not configured", http.StatusServiceUnavailable)
+				return
+			}
+			jobs = append(jobs, hydrationJob{idx: i, archive: archive})
 		}
-		if telemetryStore == nil {
-			log.Printf("Telemetry history read failed for %s: archive is configured in Mongo but S3 store is disabled", deviceID)
-			http.Error(w, "Telemetry S3 archive is not configured", http.StatusServiceUnavailable)
-			return
+	}
+	if len(jobs) > 0 {
+		results := make([]bson.M, len(jobs))
+		sem := make(chan struct{}, telemetryHydrationWorkers)
+		var (
+			wg       sync.WaitGroup
+			mu       sync.Mutex
+			firstErr error
+		)
+		for j, job := range jobs {
+			wg.Add(1)
+			go func(slot int, job hydrationJob) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				payload, err := telemetryStore.Read(ctx, job.archive)
+				mu.Lock()
+				defer mu.Unlock()
+				if err != nil {
+					if firstErr == nil {
+						firstErr = err
+					}
+					return
+				}
+				payload["_id"] = history[job.idx]["_id"]
+				payload["telemetry_archive"] = job.archive
+				results[slot] = payload
+			}(j, job)
 		}
-		payload, err := telemetryStore.Read(ctx, archive)
-		if err != nil {
-			log.Printf("Telemetry S3 read error for %s: %v", deviceID, err)
+		wg.Wait()
+		if firstErr != nil {
+			log.Printf("Telemetry S3 read error for %s: %v", deviceID, firstErr)
 			http.Error(w, "S3 archive read error", http.StatusInternalServerError)
 			return
 		}
-		payload["_id"] = doc["_id"]
-		payload["telemetry_archive"] = doc["telemetry_archive"]
-		history[i] = payload
+		for slot, payload := range results {
+			if payload != nil {
+				history[jobs[slot].idx] = payload
+			}
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -3333,6 +3721,18 @@ func browserHistoryHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if to.Before(from) {
 		http.Error(w, "to must be on or after from", http.StatusBadRequest)
+		return
+	}
+
+	// Bound the scanned window: ReadEntries walks day-by-day issuing S3
+	// ListObjectsV2 + GetObject calls, so an unbounded range is a cheap DoS.
+	// When retention policy exceeds the hard default, allow at least that.
+	maxRange := 92 * 24 * time.Hour
+	if days := currentRetentionDays(); days > 90 {
+		maxRange = time.Duration(days+2) * 24 * time.Hour
+	}
+	if to.Sub(from) > maxRange {
+		http.Error(w, fmt.Sprintf("Date range too large; maximum is %d days", int(maxRange.Hours()/24)), http.StatusBadRequest)
 		return
 	}
 
@@ -3554,7 +3954,10 @@ func updateCheckHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if latest.Version == currentVersion {
+	// Only offer an update when the latest release is strictly newer than what
+	// the agent runs. Plain inequality would push older releases onto devices
+	// that are already ahead.
+	if compareAgentVersions(latest.Version, currentVersion) <= 0 {
 		log.Printf("Update check: device=%s %s/%s current=%s latest=%s update=false", checkingDeviceID, agentOS, agentArch, currentVersion, latest.Version)
 		markAgentUpdateStatus(ctx, r, "up_to_date")
 		w.Header().Set("Content-Type", "application/json")
@@ -3776,10 +4179,23 @@ func releaseActivateHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Release not found", http.StatusNotFound)
 		return
 	}
-	rel.PublishedAt = time.Now()
-	if _, err := coll.InsertOne(ctx, rel); err != nil {
+	now := time.Now()
+	rel.PublishedAt = now
+	// Bump published_at on existing rows instead of cloning the document every
+	// activation — the clone path grew agent_releases unboundedly.
+	res, err := coll.UpdateMany(ctx,
+		bson.M{"os": req.OS, "arch": req.Arch, "version": req.Version},
+		bson.M{"$set": bson.M{"published_at": now}},
+	)
+	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
+	}
+	if res.MatchedCount == 0 {
+		if _, err := coll.InsertOne(ctx, rel); err != nil {
+			http.Error(w, "Database error", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -3836,9 +4252,19 @@ func releaseRolloutLatestHandler(w http.ResponseWriter, r *http.Request) {
 	devicesMarked := int64(0)
 	for _, rel := range latestByTarget {
 		rel.PublishedAt = now
-		if _, err := coll.InsertOne(ctx, rel); err != nil {
-			http.Error(w, "Database error", http.StatusInternalServerError)
-			return
+		// Re-activate by bumping published_at on the existing row(s). Inserting
+		// a duplicate copy on every rollout made agent_releases grow forever.
+		res, updErr := coll.UpdateMany(ctx,
+			bson.M{"os": rel.OS, "arch": rel.Arch, "version": rel.Version},
+			bson.M{"$set": bson.M{"published_at": now}},
+		)
+		if updErr != nil {
+			log.Printf("Agent rollout: publish bump failed for %s/%s: %v", rel.OS, rel.Arch, updErr)
+		} else if res.MatchedCount == 0 {
+			if _, err := coll.InsertOne(ctx, rel); err != nil {
+				http.Error(w, "Database error", http.StatusInternalServerError)
+				return
+			}
 		}
 		activated = append(activated, rel)
 		log.Printf("Agent rollout: activated %s for %s/%s", rel.Version, rel.OS, rel.Arch)
@@ -4498,11 +4924,15 @@ func resetDashboardPasswordCommand(mongoURI string, args []string) {
 		log.Fatalf("Password hashing error: %v", err)
 	}
 
-	update := bson.M{"$set": bson.M{
-		"password_hash": string(passwordHash),
-		"updated_at":    time.Now(),
-		"status":        "active",
-	}}
+	update := bson.M{
+		"$set": bson.M{
+			"password_hash": string(passwordHash),
+			"updated_at":    time.Now(),
+			"status":        "active",
+		},
+		// Invalidate outstanding sessions for this account.
+		"$inc": bson.M{"token_epoch": 1},
+	}
 	res, err := client.Database(dbName).Collection("users").UpdateOne(ctx, bson.M{"email": email}, update)
 	if err != nil {
 		log.Fatalf("Password reset failed: %v", err)
@@ -4529,18 +4959,20 @@ func main() {
 		return
 	}
 
-	// Load admin secret for privileged endpoints.
-	adminSecret = os.Getenv("ADMIN_SECRET")
-	if adminSecret == "" {
-		log.Println("WARNING: ADMIN_SECRET is not set — POST /policy and POST /update/release are disabled")
-	}
-	sessionSecret = os.Getenv("SESSION_SECRET")
+	// Dashboard session signing key: SESSION_SECRET, or ADMIN_SECRET as a
+	// fallback for simple single-secret deployments. Privileged API routes are
+	// gated by dashboard roles (see registerRoutes), not by this secret.
+	sessionSecret = strings.TrimSpace(os.Getenv("SESSION_SECRET"))
 	if sessionSecret == "" {
-		sessionSecret = adminSecret
+		sessionSecret = strings.TrimSpace(os.Getenv("ADMIN_SECRET"))
 	}
 	if sessionSecret == "" {
 		log.Fatal("SESSION_SECRET environment variable must be set for dashboard authentication")
 	}
+
+	// Optional throttles for unauthenticated endpoints; 0 disables a limiter.
+	loginLimiter = newRateLimiter(envInt("LOGIN_RATE_LIMIT_PER_MINUTE", 30), time.Minute)
+	registerLimiter = newRateLimiter(envInt("REGISTER_RATE_LIMIT_PER_MINUTE", 10), time.Minute)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -4555,8 +4987,23 @@ func main() {
 	mongoClient = client
 	log.Println("Connected to MongoDB")
 
-	// Ensure indexes
-	go ensureIndexes()
+	// Ensure indexes synchronously so queries never race index creation, and
+	// surface failures loudly instead of silently swallowing them.
+	if err := ensureIndexes(); err != nil {
+		log.Printf("WARNING: index setup reported errors (server continues): %v", err)
+	}
+
+	// One-time migration: swap plaintext device API keys for hashes. Existing
+	// agents keep working unchanged — they resend the same key and it resolves
+	// against its hash. NOTE: after this runs, rolling back to a pre-hash build
+	// requires restoring MongoDB from backup.
+	bootCtx, bootCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	if migrated, err := migrateDeviceAPIKeys(bootCtx); err != nil {
+		log.Printf("WARNING: API-key migration incomplete (%d migrated): %v", migrated, err)
+	} else if migrated > 0 {
+		log.Printf("Migrated %d device API key(s) to hashed storage", migrated)
+	}
+	bootCancel()
 
 	// Restore persisted policy so sync intervals survive restarts.
 	loadPolicyFromMongo()
@@ -4566,6 +5013,8 @@ func main() {
 	browserArchive = initBrowserHistoryArchive(ctx)
 	activityStore = initDailyActivityArchive(ctx)
 
+	startFocusCacheJanitor(time.Hour)
+
 	// Build focus cache from existing telemetry data
 	go buildFocusCacheFromMongo()
 
@@ -4573,16 +5022,27 @@ func main() {
 	registerRoutes(apiMux)
 
 	rootMux := http.NewServeMux()
-	rootMux.Handle("/api/", http.StripPrefix("/api", apiMux))
+	rootMux.Handle("/api/", http.StripPrefix("/api", limitRequestBody(apiMux)))
 	rootMux.Handle("/api", http.RedirectHandler("/api/health", http.StatusTemporaryRedirect))
-	rootMux.Handle("/", apiMux)
+	rootMux.Handle("/", limitRequestBody(apiMux))
 
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8000"
 	}
+
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           rootMux,
+		ReadHeaderTimeout: 10 * time.Second,
+		// Generous read/write windows: agent queue flushes can push multi-MB
+		// payloads over slow links, and /history hydration fans out to S3.
+		ReadTimeout:  120 * time.Second,
+		WriteTimeout: 180 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
 	log.Printf("DevicePulse API listening on :%s", port)
-	if err := http.ListenAndServe(":"+port, rootMux); err != nil {
+	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
 }
@@ -4591,8 +5051,8 @@ func registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/health", corsMiddleware(healthHandler))
 	mux.HandleFunc("/devices/register", corsMiddleware(registerHandler))
 	mux.HandleFunc("/auth/bootstrap", corsMiddleware(authBootstrapHandler))
-	mux.HandleFunc("/auth/register", corsMiddleware(authRegisterHandler))
-	mux.HandleFunc("/auth/login", corsMiddleware(authLoginHandler))
+	mux.HandleFunc("/auth/register", corsMiddleware(requireRateLimit(registerLimiter, authRegisterHandler)))
+	mux.HandleFunc("/auth/login", corsMiddleware(requireRateLimit(loginLimiter, authLoginHandler)))
 	mux.HandleFunc("/auth/logout", corsMiddleware(authLogoutHandler))
 	mux.HandleFunc("/auth/me", corsMiddleware(requireAuth(authMeHandler)))
 	mux.HandleFunc("/users/", corsMiddleware(requireRole(RoleAdmin, userDetailHandler)))
@@ -4642,21 +5102,26 @@ func registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/update/builds", corsMiddleware(requireRole(RoleAdmin, agentBuildsHandler)))
 }
 
-func ensureIndexes() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func ensureIndexes() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	db := mongoClient.Database(dbName)
+	var errs []error
 
-	// devices: unique on device_id, api_key; sparse indexes on fingerprint fields
+	// devices: unique on device_id, api_key_hash (+ legacy api_key while any
+	// pre-migration documents remain); sparse indexes on fingerprint fields.
 	deviceIdx := []mongo.IndexModel{
 		{Keys: bson.D{{Key: "device_id", Value: 1}}, Options: options.Index().SetUnique(true).SetSparse(true)},
+		{Keys: bson.D{{Key: "api_key_hash", Value: 1}}, Options: options.Index().SetUnique(true).SetSparse(true)},
 		{Keys: bson.D{{Key: "api_key", Value: 1}}, Options: options.Index().SetUnique(true).SetSparse(true)},
 		{Keys: bson.D{{Key: "hostname", Value: 1}}, Options: options.Index().SetSparse(true)},
 		{Keys: bson.D{{Key: "hardware_uuid", Value: 1}}, Options: options.Index().SetSparse(true)},
 		{Keys: bson.D{{Key: "mac_address", Value: 1}}, Options: options.Index().SetSparse(true)},
 	}
-	db.Collection("devices").Indexes().CreateMany(ctx, deviceIdx)
+	if _, err := db.Collection("devices").Indexes().CreateMany(ctx, deviceIdx); err != nil {
+		errs = append(errs, fmt.Errorf("devices indexes: %w", err))
+	}
 
 	revocationIdx := []mongo.IndexModel{
 		{Keys: bson.D{{Key: "device_id", Value: 1}}, Options: options.Index().SetSparse(true)},
@@ -4665,16 +5130,22 @@ func ensureIndexes() {
 		{Keys: bson.D{{Key: "hostname", Value: 1}}, Options: options.Index().SetSparse(true)},
 		{Keys: bson.D{{Key: "revoked_at", Value: -1}}},
 	}
-	db.Collection("device_revocations").Indexes().CreateMany(ctx, revocationIdx)
+	if _, err := db.Collection("device_revocations").Indexes().CreateMany(ctx, revocationIdx); err != nil {
+		errs = append(errs, fmt.Errorf("device_revocations indexes: %w", err))
+	}
 
 	// telemetry: index on device_id + _id for fast history queries
-	db.Collection("telemetry").Indexes().CreateOne(ctx,
-		mongo.IndexModel{Keys: bson.D{{Key: "device_id", Value: 1}, {Key: "_id", Value: -1}}})
-	db.Collection("telemetry").Indexes().CreateOne(ctx,
+	if _, err := db.Collection("telemetry").Indexes().CreateOne(ctx,
+		mongo.IndexModel{Keys: bson.D{{Key: "device_id", Value: 1}, {Key: "_id", Value: -1}}}); err != nil {
+		errs = append(errs, fmt.Errorf("telemetry history index: %w", err))
+	}
+	if _, err := db.Collection("telemetry").Indexes().CreateOne(ctx,
 		mongo.IndexModel{
 			Keys:    bson.D{{Key: "telemetry_expires_at", Value: 1}},
 			Options: options.Index().SetExpireAfterSeconds(0).SetSparse(true),
-		})
+		}); err != nil {
+		errs = append(errs, fmt.Errorf("telemetry TTL index: %w", err))
+	}
 
 	activityIdx := []mongo.IndexModel{
 		{
@@ -4687,22 +5158,28 @@ func ensureIndexes() {
 		},
 		{Keys: bson.D{{Key: "device_id", Value: 1}, {Key: "date", Value: -1}}},
 	}
-	db.Collection("app_usage_daily").Indexes().CreateMany(ctx, activityIdx)
+	if _, err := db.Collection("app_usage_daily").Indexes().CreateMany(ctx, activityIdx); err != nil {
+		errs = append(errs, fmt.Errorf("app_usage_daily indexes: %w", err))
+	}
 
 	// agent_releases: index on os+arch+published_at for fast latest-release lookup
-	db.Collection("agent_releases").Indexes().CreateOne(ctx,
+	if _, err := db.Collection("agent_releases").Indexes().CreateOne(ctx,
 		mongo.IndexModel{Keys: bson.D{
 			{Key: "os", Value: 1},
 			{Key: "arch", Value: 1},
 			{Key: "published_at", Value: -1},
-		}})
+		}}); err != nil {
+		errs = append(errs, fmt.Errorf("agent_releases indexes: %w", err))
+	}
 
 	// users: unique email for dashboard login and quick role/status filtering
 	userIdx := []mongo.IndexModel{
 		{Keys: bson.D{{Key: "email", Value: 1}}, Options: options.Index().SetUnique(true)},
 		{Keys: bson.D{{Key: "role", Value: 1}, {Key: "status", Value: 1}}},
 	}
-	db.Collection("users").Indexes().CreateMany(ctx, userIdx)
+	if _, err := db.Collection("users").Indexes().CreateMany(ctx, userIdx); err != nil {
+		errs = append(errs, fmt.Errorf("users indexes: %w", err))
+	}
 
 	// device_commands: claim + history lookups; TTL on expires_at auto-removes
 	// finished/expired commands so stale instructions never execute late.
@@ -4713,5 +5190,9 @@ func ensureIndexes() {
 			Options: options.Index().SetExpireAfterSeconds(0),
 		},
 	}
-	db.Collection("device_commands").Indexes().CreateMany(ctx, cmdIdx)
+	if _, err := db.Collection("device_commands").Indexes().CreateMany(ctx, cmdIdx); err != nil {
+		errs = append(errs, fmt.Errorf("device_commands indexes: %w", err))
+	}
+
+	return errors.Join(errs...)
 }

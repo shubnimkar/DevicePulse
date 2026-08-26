@@ -10,17 +10,27 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/devicep
 
 FROM golang:1.25-bookworm AS runtime
 
+# bash + dpkg-dev support in-container agent builds (POST /update/builds).
+# fakeroot is unnecessary: packaging/linux/build_deb.sh passes
+# dpkg-deb --root-owner-group, so non-root builds still produce root-owned debs.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates bash dpkg-dev \
-  && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/* \
+  && useradd --create-home --uid 10001 appuser
 
 WORKDIR /workspace
 COPY --from=builder /out/devicepulse-api /usr/local/bin/devicepulse-api
-COPY agent ./agent
-COPY packaging ./packaging
+COPY --chown=appuser:appuser agent ./agent
+COPY --chown=appuser:appuser packaging ./packaging
 
-ENV PORT=8000
-ENV AGENT_BUILD_ROOT=/workspace
+ENV PORT=8000 \
+    AGENT_BUILD_ROOT=/workspace \
+    HOME=/home/appuser \
+    GOPATH=/home/appuser/go \
+    GOCACHE=/tmp/devicepulse-go-build-cache
 EXPOSE 8000
 
+# Run unprivileged. Build artifacts land in $GOCACHE and os.MkdirTemp dirs,
+# both of which are world-writable locations.
+USER appuser
 CMD ["devicepulse-api"]
