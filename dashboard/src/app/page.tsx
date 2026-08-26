@@ -156,6 +156,49 @@ const IconLogo = () => (
     <path d="M8 2v2M8 12v2M2 8h2M12 8h2" stroke="white" strokeWidth="1.5" strokeLinecap="round"/>
   </svg>
 );
+const IconMail = () => (
+  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
+    <rect x="1.75" y="3.25" width="12.5" height="9.5" rx="1.5"/>
+    <path d="M2.5 4.5L8 8.75l5.5-4.25"/>
+  </svg>
+);
+const IconLock = () => (
+  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
+    <rect x="3" y="7" width="10" height="7" rx="1.5"/>
+    <path d="M5.5 7V5a2.5 2.5 0 015 0v2"/>
+  </svg>
+);
+const IconEye = () => (
+  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round">
+    <path d="M1.5 8s2.4-4.25 6.5-4.25S14.5 8 14.5 8 12.1 12.25 8 12.25 1.5 8 1.5 8z"/>
+    <circle cx="8" cy="8" r="2"/>
+  </svg>
+);
+const IconEyeOff = () => (
+  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 3l10 10"/>
+    <path d="M10.6 10.9a6.4 6.4 0 01-2.6.6c-4.1 0-6.5-4.25-6.5-4.25a10.6 10.6 0 013.2-3.3M6.6 3.4a6.9 6.9 0 011.4-.15c4.1 0 6.5 4 6.5 4a11 11 0 01-2.1 2.6"/>
+    <path d="M6.2 6.4a2 2 0 003.1 2.5"/>
+  </svg>
+);
+const IconPulse = () => (
+  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M1.5 8.5h3l1.75-4.5 3.5 8 1.75-3.5h3"/>
+  </svg>
+);
+const IconShield = () => (
+  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M8 1.75l5 1.9v4.1c0 3.1-2.1 5.4-5 6.5-2.9-1.1-5-3.4-5-6.5v-4.1z"/>
+    <path d="M5.9 8l1.5 1.5 2.7-2.9"/>
+  </svg>
+);
+const IconDevices = () => (
+  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
+    <rect x="1.5" y="2.5" width="9.5" height="7" rx="1"/>
+    <path d="M4 12.5h4.5"/>
+    <rect x="11.5" y="6.5" width="3.5" height="6" rx="0.75"/>
+  </svg>
+);
 const IconSettings = () => (
   <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
     <circle cx="8" cy="8" r="2.25"/>
@@ -169,6 +212,8 @@ export default function Home() {
   const [authMode, setAuthMode]       = useState<AuthMode>('login');
   const [authError, setAuthError]     = useState('');
   const [authForm, setAuthForm]       = useState({ name: '', email: '', password: '' });
+  const [showAuthPassword, setShowAuthPassword] = useState(false);
+  const [authSubmitting, setAuthSubmitting] = useState(false);
   const [bootstrapRequired, setBootstrapRequired] = useState(false);
   const [users, setUsers]             = useState<DashboardUser[]>([]);
   const [userForm, setUserForm]       = useState<{ name: string; email: string; password: string; role: UserRole }>({
@@ -498,6 +543,7 @@ export default function Home() {
   const submitAuth = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setAuthError('');
+    setAuthSubmitting(true);
     const endpoint = authMode === 'register' ? '/auth/register' : '/auth/login';
     try {
       const res = await apiFetch(endpoint, {
@@ -512,9 +558,12 @@ export default function Home() {
       const data = await res.json();
       setAuthUser(data.user);
       setAuthForm({ name: '', email: '', password: '' });
+      setShowAuthPassword(false);
       setLoading(true);
     } catch {
       setAuthError('Could not sign in. Check the API connection and try again.');
+    } finally {
+      setAuthSubmitting(false);
     }
   };
 
@@ -998,11 +1047,13 @@ export default function Home() {
 
   if (authLoading) {
     return (
-      <div className="auth-shell">
-        <div className="auth-panel">
-          <div className="header-logo"><IconLogo /></div>
-          <h1>DevicePulse</h1>
-          <p>Checking dashboard session…</p>
+      <div className="auth-shell auth-shell-solo">
+        <div className="auth-form-col">
+          <div className="auth-panel">
+            <div className="auth-logo-lg pulse"><IconLogo /></div>
+            <h1>DevicePulse</h1>
+            <p>Checking dashboard session…</p>
+          </div>
         </div>
       </div>
     );
@@ -1012,53 +1063,122 @@ export default function Home() {
     const isBootstrap = authMode === 'register' && bootstrapRequired;
     return (
       <div className="auth-shell">
-        <form className="auth-panel" onSubmit={submitAuth}>
-          <div className="header-logo"><IconLogo /></div>
-          <h1>{isBootstrap ? 'Create first admin' : 'Sign in'}</h1>
-          <p>
-            {isBootstrap
-              ? 'Bootstrap the first administrator account for this DevicePulse dashboard.'
-              : 'Use your dashboard account to view endpoint telemetry.'}
-          </p>
-          {authMode === 'register' && (
+        {/* ── Brand panel ── */}
+        <aside className="auth-brand" aria-hidden="true">
+          <div className="auth-brand-inner">
+            <div className="auth-brand-mark"><IconLogo /></div>
+            <div className="auth-brand-name">DevicePulse</div>
+            <h2 className="auth-brand-headline">Your fleet,<br />at a glance.</h2>
+            <p className="auth-brand-sub">
+              Real-time endpoint telemetry for Linux, Windows and macOS — hardware,
+              processes, browser activity and security posture in a single console.
+            </p>
+            <ul className="auth-brand-points">
+              <li><IconPulse /> Live telemetry, refreshed every few seconds</li>
+              <li><IconShield /> Role-based access with remote quarantine</li>
+              <li><IconDevices /> Cross-platform agents, one dashboard</li>
+            </ul>
+            <div className="auth-demo">
+              <div className="auth-demo-title"><span className="auth-demo-dot" />Live fleet snapshot</div>
+              <div className="auth-demo-row">
+                <span className="auth-demo-label">CPU</span>
+                <span className="auth-demo-track"><span className="auth-demo-fill" style={{ width: '34%' }} /></span>
+                <span className="auth-demo-val">34%</span>
+              </div>
+              <div className="auth-demo-row">
+                <span className="auth-demo-label">MEM</span>
+                <span className="auth-demo-track"><span className="auth-demo-fill warn" style={{ width: '58%' }} /></span>
+                <span className="auth-demo-val">58%</span>
+              </div>
+              <div className="auth-demo-row">
+                <span className="auth-demo-label">Online</span>
+                <span className="auth-demo-track"><span className="auth-demo-fill ok" style={{ width: '86%' }} /></span>
+                <span className="auth-demo-val">128</span>
+              </div>
+            </div>
+          </div>
+          <div className="auth-brand-foot">Sessions are secured with HTTP-only cookies over TLS.</div>
+        </aside>
+
+        {/* ── Form panel ── */}
+        <main className="auth-form-col">
+          <form className="auth-form" onSubmit={submitAuth}>
+            <div className="auth-form-brand">
+              <div className="auth-logo-lg"><IconLogo /></div>
+              <span>DevicePulse</span>
+            </div>
+            <h1>{isBootstrap ? 'Create first admin' : 'Sign in'}</h1>
+            <p className="auth-form-sub">
+              {isBootstrap
+                ? 'Bootstrap the first administrator account for this DevicePulse dashboard.'
+                : 'Use your dashboard account to view endpoint telemetry.'}
+            </p>
+
+            {authMode === 'register' && (
+              <label className="auth-field">
+                <span>Name</span>
+                <input
+                  value={authForm.name}
+                  onChange={e => setAuthForm(f => ({ ...f, name: e.target.value }))}
+                  autoComplete="name"
+                  required
+                />
+              </label>
+            )}
+
             <label className="auth-field">
-              <span>Name</span>
-              <input
-                value={authForm.name}
-                onChange={e => setAuthForm(f => ({ ...f, name: e.target.value }))}
-                autoComplete="name"
-              />
+              <span>Email</span>
+              <span className="auth-input-wrap">
+                <span className="auth-input-icon"><IconMail /></span>
+                <input
+                  type="email"
+                  value={authForm.email}
+                  onChange={e => setAuthForm(f => ({ ...f, email: e.target.value }))}
+                  autoComplete="email"
+                  required
+                />
+              </span>
             </label>
-          )}
-          <label className="auth-field">
-            <span>Email</span>
-            <input
-              type="email"
-              value={authForm.email}
-              onChange={e => setAuthForm(f => ({ ...f, email: e.target.value }))}
-              autoComplete="email"
-              required
-            />
-          </label>
-          <label className="auth-field">
-            <span>Password</span>
-            <input
-              type="password"
-              value={authForm.password}
-              onChange={e => setAuthForm(f => ({ ...f, password: e.target.value }))}
-              autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
-              minLength={8}
-              required
-            />
-          </label>
-          {authError && <div className="auth-error" role="alert">{authError}</div>}
-          <button type="submit" className="auth-submit">
-            {authMode === 'register' ? 'Create admin account' : 'Sign in'}
-          </button>
-          {!bootstrapRequired && (
-            <p className="auth-hint">New accounts are created by an admin.</p>
-          )}
-        </form>
+
+            <label className="auth-field">
+              <span>Password</span>
+              <span className="auth-input-wrap has-toggle">
+                <span className="auth-input-icon"><IconLock /></span>
+                <input
+                  type={showAuthPassword ? 'text' : 'password'}
+                  value={authForm.password}
+                  onChange={e => setAuthForm(f => ({ ...f, password: e.target.value }))}
+                  autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
+                  minLength={8}
+                  required
+                />
+                <button
+                  type="button"
+                  className="auth-pass-toggle"
+                  onClick={() => setShowAuthPassword(v => !v)}
+                  aria-label={showAuthPassword ? 'Hide password' : 'Show password'}
+                  aria-pressed={showAuthPassword}
+                >
+                  {showAuthPassword ? <IconEyeOff /> : <IconEye />}
+                </button>
+              </span>
+            </label>
+
+            {authError && <div className="auth-error" role="alert">{authError}</div>}
+
+            <button type="submit" className="auth-submit" disabled={authSubmitting}>
+              {authSubmitting && <span className="auth-btn-spinner" aria-hidden="true" />}
+              {authSubmitting
+                ? (authMode === 'register' ? 'Creating account…' : 'Signing in…')
+                : (authMode === 'register' ? 'Create admin account' : 'Sign in')}
+            </button>
+
+            {!bootstrapRequired && (
+              <p className="auth-hint">New accounts are created by an admin.</p>
+            )}
+          </form>
+          <div className="auth-form-foot">DevicePulse · Endpoint telemetry console</div>
+        </main>
       </div>
     );
   }
