@@ -32,6 +32,10 @@ type focusSession struct {
 	StartTime time.Time `json:"start_time"`
 	EndTime   time.Time `json:"end_time"`
 	DurationS float64   `json:"duration_seconds"`
+	// Continuation marks a fragment of an already-counted focus period so the
+	// per-cycle soft-close in Collect() does not inflate session counts.
+	// Never serialized — it does not leave the agent.
+	Continuation bool `json:"-"`
 }
 
 // AppFocusSummary is the per-app aggregated focus data returned by Collect().
@@ -46,8 +50,9 @@ type ActiveWindowTracker struct {
 	mu sync.Mutex
 
 	// live state
-	currentApp   string
-	sessionStart time.Time
+	currentApp     string
+	sessionStart   time.Time
+	sessionCounted bool // true once the open focus period has been counted as a session
 
 	// accumulated since last Collect() — reset each cycle
 	sessions []focusSession
@@ -83,17 +88,22 @@ func (a *ActiveWindowTracker) Collect() (map[string]interface{}, error) {
 	defer a.mu.Unlock()
 
 	// Soft-close the in-progress session so it appears in this snapshot.
+	// The fragment is flagged as a continuation when this focus period was
+	// already counted by a previous Collect() — only the first fragment of a
+	// contiguous period counts as a session.
 	now := time.Now()
 	if a.currentApp != "" {
 		dur := now.Sub(a.sessionStart).Seconds()
 		if dur > 0 {
 			a.sessions = append(a.sessions, focusSession{
-				AppName:   a.currentApp,
-				StartTime: a.sessionStart,
-				EndTime:   now,
-				DurationS: dur,
+				AppName:      a.currentApp,
+				StartTime:    a.sessionStart,
+				EndTime:      now,
+				DurationS:    dur,
+				Continuation: a.sessionCounted,
 			})
 			a.sessionStart = now
+			a.sessionCounted = true
 		}
 	}
 
@@ -106,7 +116,6 @@ func (a *ActiveWindowTracker) Collect() (map[string]interface{}, error) {
 			cycleTotals[s.AppName] = t
 		}
 		t.TotalFocusS += s.DurationS
-		t.SessionCount++
 
 		c, ok := a.cumulative[s.AppName]
 		if !ok {
@@ -114,7 +123,13 @@ func (a *ActiveWindowTracker) Collect() (map[string]interface{}, error) {
 			a.cumulative[s.AppName] = c
 		}
 		c.TotalFocusS += s.DurationS
-		c.SessionCount++
+
+		// Only the first fragment of a contiguous focus period counts as a
+		// session — soft-closed continuations must not inflate the count.
+		if !s.Continuation {
+			t.SessionCount++
+			c.SessionCount++
+		}
 	}
 
 	cycleSummaries := make([]AppFocusSummary, 0, len(cycleTotals))
@@ -159,14 +174,16 @@ func (a *ActiveWindowTracker) sample() {
 					dur := t.Sub(a.sessionStart).Seconds()
 					if dur > 0 {
 						a.sessions = append(a.sessions, focusSession{
-							AppName:   a.currentApp,
-							StartTime: a.sessionStart,
-							EndTime:   t,
-							DurationS: dur,
+							AppName:      a.currentApp,
+							StartTime:    a.sessionStart,
+							EndTime:      t,
+							DurationS:    dur,
+							Continuation: a.sessionCounted,
 						})
 					}
 					a.currentApp = ""
 					a.sessionStart = time.Time{}
+					a.sessionCounted = false
 				}
 				a.mu.Unlock()
 				continue
@@ -177,15 +194,17 @@ func (a *ActiveWindowTracker) sample() {
 					dur := t.Sub(a.sessionStart).Seconds()
 					if dur > 0 {
 						a.sessions = append(a.sessions, focusSession{
-							AppName:   a.currentApp,
-							StartTime: a.sessionStart,
-							EndTime:   t,
-							DurationS: dur,
+							AppName:      a.currentApp,
+							StartTime:    a.sessionStart,
+							EndTime:      t,
+							DurationS:    dur,
+							Continuation: a.sessionCounted,
 						})
 					}
 				}
 				a.currentApp = app
 				a.sessionStart = t
+				a.sessionCounted = false
 			}
 			a.mu.Unlock()
 		}

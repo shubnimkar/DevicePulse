@@ -28,13 +28,20 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
+
+// procCPUSampleWindow is the interval between the two /proc CPU samples used to
+// compute recent-CPU deltas in the fallback path below.
+const procCPUSampleWindow = 250 * time.Millisecond
 
 // candidate represents a process being evaluated as the active window.
 type candidate struct {
+	pid          string
 	name         string
 	rss          int64 // resident set size in pages (higher = more likely "active")
-	cpuJiffies   int64 // recent-ish process CPU from /proc stat totals
+	cpuTotal     int64 // lifetime utime+stime jiffies captured at pass 1
+	cpuDelta     int64 // CPU jiffies burned during the sample window (recent activity)
 	tty          int   // controlling tty (0 = no tty / daemon)
 	pgid         int   // process group ID
 	tpgid        int   // foreground process group of the tty
@@ -44,9 +51,16 @@ type candidate struct {
 
 // linuxProcFallbackActiveWindow is the entry point called from active_window.go.
 //
-// Key fix: when the agent runs as root (uid=0) it scans ALL real user sessions
-// (UID >= 1000) instead of only root-owned processes.  Root processes like
+// Fix 1: when the agent runs as root (uid=0) it scans ALL real user sessions
+// (UID >= 1000) instead of only root-owned processes. Root processes like
 // xdelta3 or appstreamcli used to "win" the RSS race and pollute app-usage data.
+//
+// Fix 2: desktop candidates are ranked by RECENT CPU usage — the delta between
+// two /proc samples taken procCPUSampleWindow apart — instead of lifetime CPU
+// totals. Lifetime jiffies only ever grow, so one long-running process (e.g.
+// pgadmin4 or a busy Chrome renderer) used to win every single poll and the
+// whole day's app-usage collapsed onto that one app even while the user was
+// working in VS Code or another browser.
 func linuxProcFallbackActiveWindow() string {
 	selfUID := getSelfUID()
 
@@ -68,9 +82,8 @@ func linuxProcFallbackActiveWindow() string {
 		return ""
 	}
 
-	var best candidate
-	var bestDesktop candidate
-
+	// ── Pass 1: collect candidates and their cumulative CPU counters ─────────
+	cands := make([]candidate, 0, 128)
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -134,29 +147,61 @@ func linuxProcFallbackActiveWindow() string {
 			continue
 		}
 
-		isDesktopApp := isLikelyLinuxDesktopApp(comm)
-		next := candidate{
+		cands = append(cands, candidate{
+			pid:          pid,
 			name:         comm,
 			rss:          rss,
-			cpuJiffies:   utime + stime,
+			cpuTotal:     utime + stime,
 			tty:          ttyNr,
 			pgid:         pgid,
 			tpgid:        tpgid,
 			isForeground: isForeground,
-			isDesktopApp: isDesktopApp,
+			isDesktopApp: isLikelyLinuxDesktopApp(comm),
+		})
+	}
+
+	if len(cands) == 0 {
+		return ""
+	}
+
+	// ── Pass 2: re-sample the counters and keep only the recent delta ────────
+	time.Sleep(procCPUSampleWindow)
+	for i := range cands {
+		stat := readProcStat("/proc/" + cands[i].pid + "/stat")
+		if stat == nil || len(stat) < 24 {
+			// Process exited between the samples — cannot be the active app.
+			cands[i].cpuDelta = -1
+			continue
+		}
+		utime, _ := strconv.ParseInt(stat[13], 10, 64)
+		stime, _ := strconv.ParseInt(stat[14], 10, 64)
+		delta := utime + stime - cands[i].cpuTotal
+		if delta < 0 {
+			delta = 0
+		}
+		cands[i].cpuDelta = delta
+	}
+
+	var best candidate
+	var bestDesktop candidate
+
+	for _, c := range cands {
+		if c.cpuDelta < 0 {
+			continue // vanished between the two samples
 		}
 
 		// Desktop apps always beat non-desktop apps regardless of RSS.
-		// Among desktop apps, pick the one with the highest CPU+RSS score.
-		if isDesktopApp && betterLinuxDesktopCandidate(next, bestDesktop) {
-			bestDesktop = next
+		// Among desktop apps, pick the one with the highest recent CPU
+		// (RSS breaks ties between equally idle apps).
+		if c.isDesktopApp && betterLinuxDesktopCandidate(c, bestDesktop) {
+			bestDesktop = c
 		}
 
 		// Among all candidates: prefer foreground > highest RSS.
-		if isForeground && (!best.isForeground || rss > best.rss) {
-			best = next
-		} else if !best.isForeground && rss > best.rss {
-			best = next
+		if c.isForeground && (!best.isForeground || c.rss > best.rss) {
+			best = c
+		} else if !best.isForeground && c.rss > best.rss {
+			best = c
 		}
 	}
 
@@ -648,12 +693,16 @@ func normalizeLinuxDesktopKey(value string) string {
 	return value
 }
 
+// betterLinuxDesktopCandidate reports whether next is a stronger "active app"
+// guess than current. Recent-CPU delta decides first so the guess follows the
+// app that is actually doing work right now; RSS breaks ties between apps that
+// were equally idle during the sample window.
 func betterLinuxDesktopCandidate(next, current candidate) bool {
 	if current.name == "" {
 		return true
 	}
-	if next.cpuJiffies != current.cpuJiffies {
-		return next.cpuJiffies > current.cpuJiffies
+	if next.cpuDelta != current.cpuDelta {
+		return next.cpuDelta > current.cpuDelta
 	}
 	return next.rss > current.rss
 }

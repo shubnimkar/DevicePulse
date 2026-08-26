@@ -547,6 +547,11 @@ func (a *DailyActivityArchive) Archive(ctx context.Context, deviceID string, pay
 	sort.Slice(allSessions, func(i, j int) bool {
 		return activitySessionStart(allSessions[i]).Before(activitySessionStart(allSessions[j]))
 	})
+	// Merge adjacent fragments of the same app so the archive stores real focus
+	// periods instead of one row per sync cycle (the agent soft-closes the
+	// in-progress session on every sync, which used to inflate both the stored
+	// session list and the per-app session counts).
+	allSessions = mergeActivitySessions(allSessions, activitySessionMergeGap)
 	doc["sessions"] = allSessions
 	apps, totalS := summarizeActivitySessions(allSessions)
 	doc["apps"] = apps
@@ -1075,6 +1080,99 @@ func activitySessionStart(raw interface{}) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+// activitySessionMergeGap is the maximum gap between two focus fragments of the
+// same app that are still considered one contiguous session. It covers the
+// agent's per-sync soft-close plus queue-drain/replay jitter.
+const activitySessionMergeGap = 90 * time.Second
+
+// activitySessionEnd parses the end_time of a focus-session entry, falling back
+// to start_time + duration_seconds when end_time is missing or unparsable.
+func activitySessionEnd(raw interface{}) time.Time {
+	m, ok := raw.(map[string]interface{})
+	if !ok {
+		return time.Time{}
+	}
+	if s, ok := m["end_time"].(string); ok {
+		if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+			return t.UTC()
+		}
+	}
+	start := activitySessionStart(raw)
+	if start.IsZero() {
+		return time.Time{}
+	}
+	dur, ok := toFloat(m["duration_seconds"])
+	if !ok {
+		return time.Time{}
+	}
+	return start.Add(time.Duration(dur * float64(time.Second)))
+}
+
+// mergeActivitySessions merges sorted focus-session fragments of the same app
+// whose gap is <= maxGap (or that overlap, e.g. duplicate deliveries) into one
+// session per contiguous focus period. Non-map entries, system apps and rows
+// without parsable timestamps are dropped. Input must be sorted by start_time.
+func mergeActivitySessions(sessions []interface{}, maxGap time.Duration) []interface{} {
+	merged := make([]interface{}, 0, len(sessions))
+	var cur map[string]interface{}
+	var curStart, curEnd time.Time
+
+	flush := func() {
+		if cur != nil {
+			merged = append(merged, cur)
+			cur = nil
+		}
+	}
+
+	for _, raw := range sessions {
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		appName, _ := m["app_name"].(string)
+		appName = strings.TrimSpace(appName)
+		if !isVisibleAppUsageName(appName) {
+			continue
+		}
+		start := activitySessionStart(raw)
+		end := activitySessionEnd(raw)
+		if start.IsZero() || end.IsZero() {
+			continue
+		}
+		if end.Before(start) {
+			end = start
+		}
+
+		// Merge into the current span when it is the same app and this
+		// fragment starts within (or overlaps) the tolerated gap.
+		if cur != nil && cur["app_name"] == appName && !start.After(curEnd.Add(maxGap)) {
+			if end.After(curEnd) {
+				curEnd = end
+				cur["end_time"] = curEnd.Format(time.RFC3339Nano)
+			}
+			cur["duration_seconds"] = curEnd.Sub(curStart).Seconds()
+			continue
+		}
+
+		flush()
+		curStart, curEnd = start, end
+		cur = map[string]interface{}{
+			"app_name":         appName,
+			"start_time":       curStart.Format(time.RFC3339Nano),
+			"end_time":         curEnd.Format(time.RFC3339Nano),
+			"duration_seconds": curEnd.Sub(curStart).Seconds(),
+		}
+		if v, ok := m["device_id"].(string); ok && v != "" {
+			cur["device_id"] = v
+		}
+		if v, ok := m["username"].(string); ok && v != "" {
+			cur["username"] = v
+		}
+	}
+	flush()
+	return merged
 }
 
 func summarizeActivitySessions(sessions []interface{}) ([]interface{}, float64) {

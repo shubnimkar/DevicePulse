@@ -43,17 +43,25 @@ import (
 // ─── GNOME ────────────────────────────────────────────────────────────────────
 
 // linuxWaylandGNOMEActiveWindow queries GNOME Shell via D-Bus.
-// It tries two paths:
-//  1. org.gnome.Shell.Eval() with a JavaScript snippet to read the focused
-//     window's WM_CLASS — works on all GNOME versions 3.x and 40+.
-//  2. Reading the org.gnome.Mutter.DisplayConfig if Eval is disabled.
+// It tries three paths:
+//  1. The DevicePulse GNOME Shell extension (org.devicepulse.Shell.GetFocusedWindow)
+//     — the only path that works on GNOME 41+, where org.gnome.Shell.Eval is
+//     disabled by default (Ubuntu 22.10+/24.04 ship GNOME 43/46).
+//  2. org.gnome.Shell.Eval() with a JavaScript snippet to read the focused
+//     window's WM_CLASS — works on older GNOME (≤ 40) where Eval is allowed.
+//  3. Reading the focused window title via Eval as a last resort.
 func linuxWaylandGNOMEActiveWindow() string {
+	// ── Path 1: DevicePulse Shell extension (GNOME 41+ safe) ─────────────────
+	if name := linuxGNOMEExtensionActiveWindow(); name != "" {
+		return name
+	}
+
 	conn, err := dbus.SessionBus()
 	if err != nil {
 		return ""
 	}
 
-	// ── Path 1: org.gnome.Shell.Eval (JS in GNOME Shell process) ─────────────
+	// ── Path 2: org.gnome.Shell.Eval (JS in GNOME Shell process) ─────────────
 	obj := conn.Object("org.gnome.Shell", "/org/gnome/Shell")
 
 	var success bool
@@ -81,6 +89,43 @@ func linuxWaylandGNOMEActiveWindow() string {
 		}
 	}
 
+	return ""
+}
+
+// linuxGNOMEExtensionActiveWindow queries the DevicePulse GNOME Shell
+// extension over the session bus.
+//
+// Since GNOME 41, org.gnome.Shell.Eval is rejected unless "unsafe mode" is
+// enabled, which made Eval-based focus detection silently fail on every modern
+// distro (Ubuntu 24.04 = GNOME 46). The extension owns the well-known name
+// org.devicepulse.Shell on the user's session bus and answers
+// GetFocusedWindow() with the WM class and title of the focused window — no
+// unsafe mode required. See packaging/gnome-shell/ for installation.
+//
+// Returns "" when the extension is not installed (the caller falls back to the
+// legacy Eval paths).
+func linuxGNOMEExtensionActiveWindow() string {
+	conn, err := dbus.SessionBus()
+	if err != nil {
+		return ""
+	}
+	obj := conn.Object("org.devicepulse.Shell", "/org/devicepulse/Shell")
+
+	var wmClass, title string
+	err = obj.Call("org.devicepulse.Shell.GetFocusedWindow", 0).Store(&wmClass, &title)
+	if err != nil {
+		// Extension not installed / shell restarted — fall back silently.
+		return ""
+	}
+
+	wmClass = strings.TrimSpace(wmClass)
+	if wmClass != "" && wmClass != "null" {
+		return wmClass
+	}
+	title = strings.TrimSpace(title)
+	if title != "" && title != "null" {
+		return extractAppNameFromTitle(title)
+	}
 	return ""
 }
 
