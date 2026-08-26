@@ -135,7 +135,13 @@ export default function HardwareTab({ hw }: Props) {
           <div className="disk-table-wrap">
             <table className="ports-table">
               <thead>
-                <tr><th>Mount</th><th>Total</th><th>Used</th><th>Free</th><th>Usage</th></tr>
+                <tr>
+                  <th scope="col">Mount</th>
+                  <th scope="col">Total</th>
+                  <th scope="col">Used</th>
+                  <th scope="col">Free</th>
+                  <th scope="col">Usage</th>
+                </tr>
               </thead>
               <tbody>
                 {disks.map((d, i) => {
@@ -146,12 +152,12 @@ export default function HardwareTab({ hw }: Props) {
                       <td><span className="mono">{diskSize(d, 'total')}</span></td>
                       <td><span className="mono" style={{ color: metricColor(pct ?? 0) }}>{diskSize(d, 'used')}</span></td>
                       <td><span className="mono">{diskSize(d, 'free')}</span></td>
-                      <td style={{ minWidth: 120 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                          <div style={{ flex: 1 }}>
+                      <td className="disk-usage-cell">
+                        <div className="disk-usage-wrap">
+                          <div className="disk-usage-gauge">
                             <GaugeBar value={pct ?? 0} color={metricColor(pct ?? 0)} height={3} />
                           </div>
-                          <span className="mono" style={{ fontSize: '0.6875rem', color: metricColor(pct ?? 0), minWidth: 32 }}>
+                          <span className="mono disk-usage-pct" style={{ color: metricColor(pct ?? 0) }}>
                             {pct !== null ? `${pct.toFixed(0)}%` : '—'}
                           </span>
                         </div>
@@ -171,7 +177,11 @@ export default function HardwareTab({ hw }: Props) {
           <div className="sub-section-title">Network Interfaces</div>
           <table className="ports-table">
             <thead>
-              <tr><th>Interface</th><th>Sent</th><th>Received</th></tr>
+              <tr>
+                <th scope="col">Interface</th>
+                <th scope="col">Sent</th>
+                <th scope="col">Received</th>
+              </tr>
             </thead>
             <tbody>
               {hw.network.map((n, i) => (

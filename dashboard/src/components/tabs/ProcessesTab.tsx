@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { ProcessData } from '@/types';
 
 interface Props { procs: ProcessData[]; }
@@ -8,25 +8,24 @@ interface Props { procs: ProcessData[]; }
 const PAGE_SIZE = 10;
 
 export default function ProcessesTab({ procs }: Props) {
-  const [page, setPage] = useState(0);
+  const [selectedPage, setSelectedPage] = useState(0);
 
+  // Derive the effective page during render instead of clamping via an effect.
   const pageCount = Math.max(Math.ceil(procs.length / PAGE_SIZE), 1);
-  const safePage = Math.min(page, pageCount - 1);
-  const start = safePage * PAGE_SIZE;
+  const page = Math.min(selectedPage, pageCount - 1);
+  const start = page * PAGE_SIZE;
   const end = Math.min(start + PAGE_SIZE, procs.length);
   const pageItems = useMemo(() => procs.slice(start, end), [procs, start, end]);
 
-  useEffect(() => {
-    if (page !== safePage) setPage(safePage);
-  }, [page, safePage]);
+  const goToPage = (next: number) => setSelectedPage(Math.max(0, Math.min(next, pageCount - 1)));
 
   if (!procs.length) return <div className="no-data">No process data yet.</div>;
 
   return (
     <div>
       <ul className="proc-list">
-        {pageItems.map((p) => (
-          <li key={`${p.pid}-${p.name}`} className="proc-item">
+        {pageItems.map((p, i) => (
+          <li key={`${p.pid}-${p.name}-${i}`} className="proc-item">
             <div className="proc-left">
               <span className="proc-name" title={p.name}>{p.name}</span>
               <span className="proc-pid">PID {p.pid}</span>
@@ -51,18 +50,18 @@ export default function ProcessesTab({ procs }: Props) {
             <button
               className="page-btn"
               type="button"
-              disabled={safePage === 0}
-              onClick={() => setPage(p => Math.max(p - 1, 0))}
+              disabled={page === 0}
+              onClick={() => goToPage(page - 1)}
               aria-label="Previous process page"
             >
               ‹
             </button>
-            <span className="mono">{safePage + 1} / {pageCount}</span>
+            <span className="mono">{page + 1} / {pageCount}</span>
             <button
               className="page-btn"
               type="button"
-              disabled={safePage >= pageCount - 1}
-              onClick={() => setPage(p => Math.min(p + 1, pageCount - 1))}
+              disabled={page >= pageCount - 1}
+              onClick={() => goToPage(page + 1)}
               aria-label="Next process page"
             >
               ›

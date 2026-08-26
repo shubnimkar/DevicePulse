@@ -19,16 +19,16 @@ export default function PortsTab({ data }: Props) {
       <table className="ports-table">
         <thead>
           <tr>
-            <th>Protocol</th>
-            <th>Address</th>
-            <th>State</th>
-            <th>Process</th>
-            <th>PID</th>
+            <th scope="col">Protocol</th>
+            <th scope="col">Address</th>
+            <th scope="col">State</th>
+            <th scope="col">Process</th>
+            <th scope="col">PID</th>
           </tr>
         </thead>
         <tbody>
           {ports.map((p, i) => (
-            <tr key={i}>
+            <tr key={`${p.protocol}:${p.local_addr}:${p.state ?? ''}:${p.process ?? ''}:${i}`}>
               <td>
                 <span className={`proto-badge proto-${p.protocol.replace('4','').replace('6','')}`}>
                   {p.protocol.toUpperCase()}

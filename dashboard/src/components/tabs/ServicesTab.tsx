@@ -22,9 +22,9 @@ export default function ServicesTab({ data }: Props) {
         <span className="pill pill-green">&#9654; {runCount} running</span>
         <span className="pill pill-neutral">&#9632; {stopCount} stopped</span>
         {data?.source && <span className="pill pill-blue mono">{data.source}</span>}
-        <div className="svc-filter">
+        <div className="svc-filter" role="group" aria-label="Filter services by status">
           {(['all', 'running', 'stopped'] as const).map(f => (
-            <button key={f} className={`svc-filter-btn ${filter === f ? 'active' : ''}`} onClick={() => setFilter(f)}>
+            <button key={f} type="button" className={`svc-filter-btn ${filter === f ? 'active' : ''}`} aria-pressed={filter === f} onClick={() => setFilter(f)}>
               {f}
             </button>
           ))}
@@ -32,7 +32,7 @@ export default function ServicesTab({ data }: Props) {
       </div>
       <div className="svc-grid">
         {filtered.map((s, i) => (
-          <div key={i} className="svc-item">
+          <div key={`${s.name}:${s.pid ?? 'x'}:${i}`} className="svc-item">
             <div className={`svc-dot ${s.status}`} />
             <div className="svc-name" title={s.name}>{s.name}</div>
             {s.pid && <div className="svc-pid">{s.pid}</div>}

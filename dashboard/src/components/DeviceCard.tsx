@@ -1,7 +1,7 @@
 'use client';
 
 import { AppFocusSummary, DailyAppUsageData, Device, DeviceTab, HistoryEntry, UserRole } from '@/types';
-import { isOnline, timeAgo, metricColor, primaryDisk } from '@/lib/utils';
+import { isOnline, timeAgo, metricColor, primaryDisk, deviceDisplayName } from '@/lib/utils';
 import OverviewTab from '@/components/tabs/OverviewTab';
 import HardwareTab from '@/components/tabs/HardwareTab';
 import ProcessesTab from '@/components/tabs/ProcessesTab';
@@ -76,7 +76,7 @@ export default function DeviceCard({
   const hw     = device.data?.HardwareStats;
   const online = isOnline(device.last_seen);
 
-  const hostname = device.display_name || sys?.hostname || device.hostname || device.device_id;
+  const hostname = deviceDisplayName(device);
   const cpuPct = hw?.cpu?.usage_percent;
   const ramPct = hw?.ram?.used_percent;
   const diskPct = primaryDisk(hw?.disks)?.used_percent;
@@ -84,6 +84,20 @@ export default function DeviceCard({
   // Derive card state for the left border color
   const risk = Math.max(cpuPct ?? 0, ramPct ?? 0, diskPct ?? 0);
   const state = !online ? 'offline' : risk >= 90 ? 'critical' : risk >= 70 ? 'warning' : 'online';
+
+  // Roving-tabindex arrow-key navigation for the tabs pattern.
+  const handleTabKeyDown = (e: React.KeyboardEvent) => {
+    const idx = TABS.findIndex(t => t.key === tab);
+    let next = -1;
+    if (e.key === 'ArrowRight') next = (idx + 1) % TABS.length;
+    else if (e.key === 'ArrowLeft') next = (idx - 1 + TABS.length) % TABS.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = TABS.length - 1;
+    if (next < 0) return;
+    e.preventDefault();
+    onTabChange(TABS[next].key);
+    document.getElementById(`device-tab-${TABS[next].key}`)?.focus();
+  };
 
   return (
     <div className={`device-card state-${state}`}>
@@ -151,14 +165,19 @@ export default function DeviceCard({
       </div>
 
       {/* Tab bar */}
-      <div className="tab-bar" role="tablist">
+      <div className="tab-bar" role="tablist" aria-label="Device details">
         {TABS.map(t => (
           <button
             key={t.key}
+            type="button"
+            id={`device-tab-${t.key}`}
             role="tab"
             aria-selected={tab === t.key}
+            aria-controls="device-tab-panel"
+            tabIndex={tab === t.key ? 0 : -1}
             className={`tab-btn ${tab === t.key ? 'active' : ''}`}
             onClick={() => onTabChange(t.key)}
+            onKeyDown={handleTabKeyDown}
           >
             {t.icon}
             {t.label}
@@ -167,7 +186,13 @@ export default function DeviceCard({
       </div>
 
       {/* Tab panel */}
-      <div className="tab-panel" role="tabpanel">
+      <div
+        className="tab-panel"
+        id="device-tab-panel"
+        role="tabpanel"
+        aria-labelledby={`device-tab-${tab}`}
+        tabIndex={0}
+      >
         {tab === 'overview'  && <OverviewTab data={device.data} cachedFocus={cachedFocus} />}
         {tab === 'hardware'  && <HardwareTab hw={hw} />}
         {tab === 'processes' && <ProcessesTab procs={procs} />}

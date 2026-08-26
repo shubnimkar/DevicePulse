@@ -1,10 +1,12 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import type { FormEvent } from 'react';
 import { Device, AppFocusSummary, FocusCacheData, DeviceTab, EnterprisePolicy, DashboardUser, UserRole, HistoryEntry, BrowserHistoryArchiveData, DailyAppUsageData, AgentRelease, AgentBuildJob, AgentRolloutResponse } from '@/types';
-import { API, readHeaders, adminHeaders, isOnline, timeAgo, primaryDisk } from '@/lib/utils';
+import { API, readHeaders, adminHeaders, isOnline, timeAgo, primaryDisk, deviceDisplayName } from '@/lib/utils';
 import DeviceCard from '@/components/DeviceCard';
+import HeaderClock from '@/components/HeaderClock';
+import ConfirmDialog from '@/components/ConfirmDialog';
 import type { BrowserHistoryRange } from '@/components/tabs/BrowserTab';
 
 type PageView = 'dashboard' | 'inventory' | 'inspect' | 'settings' | 'access';
@@ -66,21 +68,6 @@ const roleLabel: Record<UserRole, string> = {
   manager: 'Manager',
   viewer: 'Viewer',
 };
-
-function deviceDisplayName(device?: Device | null): string {
-  if (!device) return '';
-  return device.display_name || device.data?.SystemInfo?.hostname || device.hostname || device.device_id;
-}
-
-function formatHeaderTime(date: Date): string {
-  return date.toLocaleString(undefined, {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-}
 
 function localDateKey(daysAgo: number): string {
   const date = new Date();
@@ -219,7 +206,8 @@ export default function Home() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [currentPage, setCurrentPage] = useState<PageView>('dashboard');
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
-  const [currentTime, setCurrentTime] = useState(() => new Date());
+  const [fleetConn, setFleetConn] = useState<'connecting' | 'live' | 'stale'>('connecting');
+  const [confirmTarget, setConfirmTarget] = useState<{ deviceId: string; name: string } | null>(null);
   const [renameTarget, setRenameTarget] = useState<Device | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [renameError, setRenameError] = useState('');
@@ -307,13 +295,9 @@ export default function Home() {
   // ── Data fetching ─────────────────────────────────────────────────────────
 
   useEffect(() => {
-    void loadCurrentUser();
+    const t = window.setTimeout(() => { void loadCurrentUser(); }, 0);
+    return () => window.clearTimeout(t);
   }, [loadCurrentUser]);
-
-  useEffect(() => {
-    const id = window.setInterval(() => setCurrentTime(new Date()), 1000);
-    return () => window.clearInterval(id);
-  }, []);
 
   useEffect(() => {
     const id = window.setTimeout(applyNavigationState, 0);
@@ -324,9 +308,17 @@ export default function Home() {
     };
   }, [applyNavigationState]);
 
+  // Latest-value refs keep the 5s polling interval stable across tab/range/date changes.
+  const activeTabRef = useRef(activeTab);
+  const browserHistoryRangeRef = useRef(browserHistoryRange);
+  const appUsageDateRef = useRef(appUsageDate);
+  useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
+  useEffect(() => { browserHistoryRangeRef.current = browserHistoryRange; }, [browserHistoryRange]);
+  useEffect(() => { appUsageDateRef.current = appUsageDate; }, [appUsageDate]);
+
   const fetchBrowserHistory = useCallback(async (
     deviceId: string,
-    range = browserHistoryRange,
+    range: BrowserHistoryRange,
     options: { showLoader?: boolean } = {}
   ) => {
     const showLoader = options.showLoader ?? true;
@@ -352,11 +344,11 @@ export default function Home() {
     } finally {
       if (showLoader) setBrowserHistoryLoading(state => ({ ...state, [deviceId]: false }));
     }
-  }, [apiFetch, browserHistoryRange]);
+  }, [apiFetch]);
 
   const fetchDailyAppUsage = useCallback(async (
     deviceId: string,
-    date = appUsageDate,
+    date: string,
     options: { showLoader?: boolean } = {}
   ) => {
     const showLoader = options.showLoader ?? true;
@@ -382,45 +374,32 @@ export default function Home() {
     } finally {
       if (showLoader) setDailyAppUsageLoading(state => ({ ...state, [deviceId]: false }));
     }
-  }, [apiFetch, appUsageDate]);
+  }, [apiFetch]);
 
   const fetchAll = useCallback(async () => {
     try {
       const devRes = await apiFetch('/devices', { headers: readHeaders() });
-      if (devRes.ok) {
-        const data: Device[] = await devRes.json();
-        const devList = data ?? [];
-        setDevices(devList);
-        const focusResults = await Promise.allSettled(
-          devList.map(d =>
-            apiFetch(`/focus/${d.device_id}`, { headers: readHeaders() }).then(r =>
-              r.ok ? (r.json() as Promise<FocusCacheData>) : null
-            )
-          )
-        );
-        const cache: Record<string, AppFocusSummary[]> = {};
-        focusResults.forEach((result, i) => {
-          if (result.status === 'fulfilled' && result.value)
-            cache[devList[i].device_id] = result.value.app_summaries ?? [];
-        });
-        setFocusCache(cache);
-        await Promise.allSettled(
-          devList
-            .filter(d => activeTab[d.device_id] === 'browser')
-            .map(d => fetchBrowserHistory(d.device_id, browserHistoryRange, { showLoader: false }))
-        );
-        await Promise.allSettled(
-          devList
-            .filter(d => activeTab[d.device_id] === 'focus')
-            .map(d => fetchDailyAppUsage(d.device_id, appUsageDate, { showLoader: false }))
-        );
-      }
+      if (!devRes.ok) throw new Error(`HTTP ${devRes.status}`);
+      const devList: Device[] = (await devRes.json()) ?? [];
+      setDevices(devList);
+      // Focus summaries are fetched lazily for the inspected device only — no fleet-wide fan-out.
+      // Browser history / daily usage refresh only for devices whose relevant tab is open.
+      await Promise.allSettled([
+        ...devList
+          .filter(d => activeTabRef.current[d.device_id] === 'browser')
+          .map(d => fetchBrowserHistory(d.device_id, browserHistoryRangeRef.current, { showLoader: false })),
+        ...devList
+          .filter(d => activeTabRef.current[d.device_id] === 'focus')
+          .map(d => fetchDailyAppUsage(d.device_id, appUsageDateRef.current, { showLoader: false })),
+      ]);
+      setFleetConn('live');
     } catch (e) {
       console.error('Fetch error:', e);
+      setFleetConn('stale');
     } finally {
       setLoading(false);
     }
-  }, [activeTab, apiFetch, appUsageDate, browserHistoryRange, fetchBrowserHistory, fetchDailyAppUsage]);
+  }, [apiFetch, fetchBrowserHistory, fetchDailyAppUsage]);
 
   const fetchPolicy = useCallback(async () => {
     try {
@@ -472,13 +451,15 @@ export default function Home() {
   }, [authUser, fetchAll, fetchPolicy]);
 
   useEffect(() => {
-    if (currentPage === 'access') void fetchUsers();
+    if (currentPage !== 'access') return;
+    const t = window.setTimeout(() => { void fetchUsers(); }, 0);
+    return () => window.clearTimeout(t);
   }, [currentPage, fetchUsers]);
 
   useEffect(() => {
     if (currentPage !== 'settings') return;
-    void fetchAgentReleases();
-    void fetchAgentBuildJobs();
+    const t = window.setTimeout(() => { void fetchAgentReleases(); void fetchAgentBuildJobs(); }, 0);
+    return () => window.clearTimeout(t);
   }, [currentPage, fetchAgentBuildJobs, fetchAgentReleases]);
 
   useEffect(() => {
@@ -491,6 +472,26 @@ export default function Home() {
     }, 3000);
     return () => clearInterval(id);
   }, [agentBuildJobs, canManageReleases, currentPage, fetchAgentBuildJobs, fetchAgentReleases]);
+
+  // Focus summaries are only rendered on the inspected device's Overview/Focus tabs.
+  // Fetch once per selected device instead of fan-out polling the whole fleet.
+  useEffect(() => {
+    if (!authUser || currentPage !== 'inspect' || !selectedDeviceId) return;
+    let cancelled = false;
+    const t = window.setTimeout(() => {
+      (async () => {
+        try {
+          const res = await apiFetch(`/focus/${encodeURIComponent(selectedDeviceId)}`, { headers: readHeaders() });
+          if (!res.ok || cancelled) return;
+          const data = (await res.json()) as FocusCacheData;
+          if (!cancelled) {
+            setFocusCache(cache => ({ ...cache, [selectedDeviceId]: data.app_summaries ?? [] }));
+          }
+        } catch { /* focus cache is non-critical */ }
+      })();
+    }, 0);
+    return () => { cancelled = true; window.clearTimeout(t); };
+  }, [apiFetch, authUser, currentPage, selectedDeviceId]);
 
   // ── Actions ───────────────────────────────────────────────────────────────
 
@@ -733,9 +734,13 @@ export default function Home() {
     }
   };
 
-  const deleteDevice = async (deviceId: string) => {
+  const openDeleteConfirm = (deviceId: string, name: string) => {
     if (!canDeleteDevices) return;
-    if (!confirm(`Remove device ${deviceId}, delete its stored data, and revoke future agent uploads?`)) return;
+    setConfirmTarget({ deviceId, name });
+  };
+
+  const performDeleteDevice = async (deviceId: string) => {
+    if (!canDeleteDevices) return;
     try {
       const res = await apiFetch(`/devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE', headers: adminHeaders() });
       if (!res.ok) throw new Error(await readApiError(res));
@@ -778,7 +783,9 @@ export default function Home() {
       if (selectedDeviceId === deviceId) {
         goToPage('inventory', { replace: true });
       }
-    } catch {}
+    } catch (e) {
+      console.error('Device deletion failed:', e);
+    }
   };
 
   const openRenameDevice = (device: Device) => {
@@ -788,12 +795,46 @@ export default function Home() {
     setRenameError('');
   };
 
-  const closeRenameDevice = () => {
+  const closeRenameDevice = useCallback(() => {
     if (renameSaving) return;
     setRenameTarget(null);
     setRenameValue('');
     setRenameError('');
-  };
+  }, [renameSaving]);
+
+  // Rename dialog: Escape closes, Tab is trapped inside, background scroll is locked.
+  useEffect(() => {
+    if (!renameTarget) return;
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    document.body.style.overflow = 'hidden';
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeRenameDevice();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+      const panel = document.querySelector<HTMLElement>('.rename-modal');
+      if (!panel) return;
+      const items = Array.from(panel.querySelectorAll<HTMLElement>('button, input, select, textarea, a[href]'))
+        .filter(el => !el.hasAttribute('disabled'));
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      const activeEl = document.activeElement;
+      const inside = panel.contains(activeEl);
+      if (e.shiftKey && (activeEl === first || !inside)) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && (activeEl === last || !inside)) { e.preventDefault(); first.focus(); }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      document.body.style.overflow = '';
+      previouslyFocused?.focus();
+    };
+  }, [renameTarget, closeRenameDevice]);
 
   const saveRenameDevice = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -1010,14 +1051,12 @@ export default function Home() {
               required
             />
           </label>
-          {authError && <div className="auth-error">{authError}</div>}
+          {authError && <div className="auth-error" role="alert">{authError}</div>}
           <button type="submit" className="auth-submit">
             {authMode === 'register' ? 'Create admin account' : 'Sign in'}
           </button>
           {!bootstrapRequired && (
-            <button type="button" className="auth-link" onClick={() => setAuthMode('login')}>
-              Registration is admin-managed
-            </button>
+            <p className="auth-hint">New accounts are created by an admin.</p>
           )}
         </form>
       </div>
@@ -1036,11 +1075,17 @@ export default function Home() {
 
         <div className="header-right">
           <div className="header-status">
-            <span className="header-time">{formatHeaderTime(currentTime)}</span>
-            {!loading && (
+            <HeaderClock />
+            {!loading && fleetConn === 'live' && (
               <span className="live-badge">
                 <span className="dot" />
                 Live
+              </span>
+            )}
+            {fleetConn === 'stale' && (
+              <span className="live-badge is-stale" role="status">
+                <span className="dot" />
+                Reconnecting…
               </span>
             )}
           </div>
@@ -1266,7 +1311,7 @@ export default function Home() {
                     <h2>Create Dashboard User</h2>
                     <p>New users can sign in after an admin creates their account.</p>
                   </div>
-                  {userCreateStatus && <span className="save-state">{userCreateStatus}</span>}
+                  {userCreateStatus && <span className="save-state" role="status">{userCreateStatus}</span>}
                 </div>
                 <form className="user-form" onSubmit={createUser}>
                   <label className="auth-field">
@@ -1319,8 +1364,8 @@ export default function Home() {
                     <h2>Dashboard Users</h2>
                     <p>Accounts with active access to this dashboard.</p>
                   </div>
-                  {passwordResetStatus && <span className="save-state">{passwordResetStatus}</span>}
-                  {roleUpdateStatus && <span className="save-state">{roleUpdateStatus}</span>}
+                  {passwordResetStatus && <span className="save-state" role="status">{passwordResetStatus}</span>}
+                  {roleUpdateStatus && <span className="save-state" role="status">{roleUpdateStatus}</span>}
                 </div>
                 <div className="table-wrap">
                   <table className="data-table">
@@ -1411,7 +1456,9 @@ export default function Home() {
                     <h2>Retention</h2>
                     <p>Controls how long new server telemetry remains queryable.</p>
                   </div>
-                  {policySavedAt && <span className="save-state">Saved {policySavedAt}</span>}
+                  {isUpdating
+                    ? <span className="save-state muted" role="status">Saving…</span>
+                    : policySavedAt && <span className="save-state" role="status">Saved {policySavedAt}</span>}
                   {!canManagePolicy && <span className="save-state muted">Read only</span>}
                 </div>
                 <div className="settings-grid two-col">
@@ -1637,7 +1684,7 @@ export default function Home() {
                     </label>
                     <button type="submit" className="action-btn release-submit">Build New Version</button>
                   </form>
-                  {releaseStatus && <div className="form-status">{releaseStatus}</div>}
+                  {releaseStatus && <div className="form-status" role="status">{releaseStatus}</div>}
 
                   {agentBuildJobs.length > 0 && (
                     <div className="build-history">
@@ -1726,7 +1773,7 @@ export default function Home() {
                   device={selectedDevice}
                   tab={getTab(selectedDevice.device_id)}
                   onTabChange={tab => setTab(selectedDevice.device_id, tab)}
-                  onDelete={canDeleteDevices ? () => deleteDevice(selectedDevice.device_id) : undefined}
+                  onDelete={canDeleteDevices ? () => openDeleteConfirm(selectedDevice.device_id, deviceDisplayName(selectedDevice)) : undefined}
                   onPing={canPingAgents ? () => pingAgent(selectedDevice.device_id) : undefined}
                   pingStatus={agentPingStatus[selectedDevice.device_id]}
                   cachedFocus={focusCache[selectedDevice.device_id] ?? []}
@@ -1872,7 +1919,7 @@ export default function Home() {
                                 <button
                                   type="button"
                                   className="action-btn danger"
-                                  onClick={() => deleteDevice(device.device_id)}
+                                  onClick={() => openDeleteConfirm(device.device_id, name)}
                                   aria-label={`Remove ${name}`}
                                 >
                                   ×
@@ -1889,11 +1936,6 @@ export default function Home() {
                   <span>
                     Showing {filteredDevices.length ? '1' : '0'}–{filteredDevices.length} of {devices.length.toLocaleString()} devices
                   </span>
-                  <div className="table-footer-pages">
-                    <button type="button" className="page-btn" aria-label="Previous page">‹</button>
-                    <span>Page 1 / 1</span>
-                    <button type="button" className="page-btn" aria-label="Next page">›</button>
-                  </div>
                 </div>
               </div>
             </div>
@@ -1931,7 +1973,7 @@ export default function Home() {
                 autoFocus
               />
             </label>
-            {renameError && <div className="auth-error">{renameError}</div>}
+            {renameError && <div className="auth-error" role="alert">{renameError}</div>}
             <div className="modal-actions">
               <button type="button" className="action-btn" onClick={closeRenameDevice} disabled={renameSaving}>
                 Cancel
@@ -1943,6 +1985,21 @@ export default function Home() {
           </form>
         </div>
       )}
+
+      <ConfirmDialog
+        open={!!confirmTarget}
+        title="Remove device"
+        message={`Remove ${confirmTarget?.name || confirmTarget?.deviceId || 'this device'} (${confirmTarget?.deviceId ?? ''})?\n\nIts stored telemetry is deleted and future agent uploads are revoked.`}
+        confirmLabel="Remove device"
+        cancelLabel="Cancel"
+        danger
+        onConfirm={() => {
+          const id = confirmTarget?.deviceId;
+          setConfirmTarget(null);
+          if (id) void performDeleteDevice(id);
+        }}
+        onCancel={() => setConfirmTarget(null)}
+      />
 
     </div>
   );

@@ -1,7 +1,7 @@
 'use client';
 
 import { AppFocusSummary, ActiveWindowData, DailyAppUsageData } from '@/types';
-import { formatDuration } from '@/lib/utils';
+import { formatDuration, isVisibleAppUsageName } from '@/lib/utils';
 import GaugeBar from '@/components/GaugeBar';
 
 interface Props {
@@ -11,23 +11,6 @@ interface Props {
   dailyUsageLoading?: boolean;
   usageDate?: string;
   onUsageDateChange?: (date: string) => void;
-}
-
-const IGNORED_APP_USAGE_NAMES = new Set([
-  'apt-check',
-  'apt.systemd.daily',
-  'packagekitd',
-  'snapd',
-  'fwupd',
-  'devicepulse-age',
-  'devicepulse-agent',
-]);
-
-function isVisibleAppUsageName(name: string): boolean {
-  const key = name.trim().toLowerCase().replace(/\.service$/, '');
-  if (!key) return false;
-  if (IGNORED_APP_USAGE_NAMES.has(key)) return false;
-  return !key.startsWith('devicepulse-');
 }
 
 export default function FocusTab({ data, cachedSummaries, dailyUsage, dailyUsageLoading = false, usageDate, onUsageDateChange }: Props) {
@@ -92,11 +75,11 @@ export default function FocusTab({ data, cachedSummaries, dailyUsage, dailyUsage
         <div className="no-data">No app usage recorded for this day yet.</div>
       ) : (
         <div className="focus-list">
-          {summaries.map((app, i) => {
+          {summaries.map(app => {
             const pct = totalSeconds > 0 ? (app.total_focus_seconds / totalSeconds) * 100 : 0;
             const isActive = app.app_name === currentApp;
             return (
-              <div key={i} className={`focus-item ${isActive ? 'is-active' : ''}`}>
+              <div key={app.app_name} className={`focus-item ${isActive ? 'is-active' : ''}`}>
                 <div className="focus-row">
                   <span className="focus-app-name" title={app.app_name}>
                     {isActive && <span className="live-dot" />}

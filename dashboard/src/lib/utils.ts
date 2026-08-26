@@ -1,6 +1,6 @@
 // ─── Utility helpers ──────────────────────────────────────────────────────────
 
-import type { DiskStat } from '@/types';
+import type { Device, DiskStat } from '@/types';
 
 const rawAPI = process.env.NEXT_PUBLIC_API_URL || '/api';
 export const API = rawAPI.endsWith('/') ? rawAPI.slice(0, -1) : rawAPI;
@@ -63,10 +63,6 @@ export function formatDuration(secs: number): string {
   return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
 }
 
-export function faviconUrl(url: string): string {
-  return `https://www.google.com/s2/favicons?domain=${getDomain(url)}&sz=32`;
-}
-
 export function browserEmoji(browser: string): string {
   const b = (browser || '').toLowerCase();
   if (b.includes('chrome')) return '🟡';
@@ -74,6 +70,30 @@ export function browserEmoji(browser: string): string {
   if (b.includes('safari')) return '🧭';
   if (b.includes('edge')) return '🌊';
   return '🌐';
+}
+
+// ─── Shared app-usage filtering (used by Overview + Focus tabs) ────────────────
+
+export const IGNORED_APP_USAGE_NAMES = new Set([
+  'apt-check',
+  'apt.systemd.daily',
+  'packagekitd',
+  'snapd',
+  'fwupd',
+  'devicepulse-age',
+  'devicepulse-agent',
+]);
+
+export function isVisibleAppUsageName(name: string): boolean {
+  const key = (name || '').trim().toLowerCase().replace(/\.service$/, '');
+  if (!key) return false;
+  if (IGNORED_APP_USAGE_NAMES.has(key)) return false;
+  return !key.startsWith('devicepulse-');
+}
+
+export function deviceDisplayName(device?: Device | null): string {
+  if (!device) return '';
+  return device.display_name || device.data?.SystemInfo?.hostname || device.hostname || device.device_id;
 }
 
 export function browserClass(browser: string): string {

@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { HistoryEntry } from '@/types';
-import { getDomain, formatVisitTime, formatFullDateTime, faviconUrl, browserEmoji, browserClass } from '@/lib/utils';
+import { getDomain, formatVisitTime, formatFullDateTime, browserEmoji, browserClass } from '@/lib/utils';
 
 interface Props {
   history: HistoryEntry[];
@@ -21,6 +21,8 @@ const rangeLabels: Record<BrowserHistoryRange, string> = {
   day_before: 'Day Before',
 };
 
+const EXPAND_STEP = 1000;
+
 export default function BrowserTab({
   history,
   canFilterHistory = false,
@@ -29,7 +31,7 @@ export default function BrowserTab({
   historyLoaded = true,
   onHistoryRangeChange,
 }: Props) {
-  const [expanded, setExpanded] = useState(false);
+  const [expandedCount, setExpandedCount] = useState(0);
 
   const uniqueHistory = dedupeHistory(history);
 
@@ -42,7 +44,7 @@ export default function BrowserTab({
             type="button"
             className={historyRange === range ? 'active' : ''}
             onClick={() => {
-              setExpanded(false);
+              setExpandedCount(0);
               onHistoryRangeChange?.(range);
             }}
           >
@@ -80,36 +82,14 @@ export default function BrowserTab({
   }, {} as Record<string, HistoryEntry[]>);
   const browsers = Object.keys(byBrowser).sort();
 
-  const HistoryRow = ({ h }: { h: HistoryEntry }) => {
-    const domain = getDomain(h.url);
-    return (
-      <li>
-        <a href={h.url} target="_blank" rel="noopener noreferrer" className="history-item">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            className="history-favicon"
-            src={faviconUrl(h.url)}
-            alt=""
-            width={16}
-            height={16}
-            onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }}
-          />
-          <div className="history-content">
-            <div className="history-title" title={h.title || h.url}>{h.title || domain}</div>
-            <div className="history-meta">
-              <span className="history-domain">{domain}</span>
-              {h.last_visit_time > 0 && (
-                <span className="history-time">{formatVisitTime(h.last_visit_time)}</span>
-              )}
-              <span className={`browser-badge ${browserClass(h.browser)}`}>
-                {browserEmoji(h.browser)} {h.browser || 'Unknown'}
-              </span>
-            </div>
-          </div>
-        </a>
-      </li>
-    );
-  };
+  // Reveal the full history in chunks so we never mount thousands of rows at once.
+  const shownGroups = browsers
+    .map(browser => ({ browser, items: byBrowser[browser] }))
+    .reduce<Array<{ browser: string; items: HistoryEntry[] }>>((groups, group) => {
+      const used = groups.reduce((n, g) => n + g.items.length, 0);
+      const items = group.items.slice(0, Math.max(expandedCount - used, 0));
+      return items.length > 0 ? [...groups, { browser: group.browser, items }] : groups;
+    }, []);
 
   return (
     <div>
@@ -119,7 +99,7 @@ export default function BrowserTab({
       <div className="browser-section">
         <div className="browser-section-title">{rangeLabels[historyRange]} ({topRecent.length})</div>
         <ul className="history-list">
-          {topRecent.map((h, i) => <HistoryRow key={i} h={h} />)}
+          {topRecent.map(h => <HistoryRow variant="recent" key={`${h.browser || 'Unknown'}\u0000${historyIdentity(h)}`} h={h} />)}
         </ul>
       </div>
       )}
@@ -129,14 +109,26 @@ export default function BrowserTab({
       )}
 
       {hasMore && (
-        <button className="view-all-btn" onClick={() => setExpanded(!expanded)}>
-          {expanded ? '▲ Hide full history' : `▼ View all ${uniqueHistory.length} entries`}
+        <button
+          className="view-all-btn"
+          onClick={() => setExpandedCount(c => {
+            if (c === 0) return Math.min(uniqueHistory.length, EXPAND_STEP);
+            if (c >= uniqueHistory.length) return 0;
+            return Math.min(uniqueHistory.length, c + EXPAND_STEP);
+          })}
+          aria-expanded={expandedCount > 0}
+        >
+          {expandedCount === 0
+            ? `▼ View all ${uniqueHistory.length} entries`
+            : expandedCount >= uniqueHistory.length
+              ? '▲ Hide full history'
+              : `▼ Show more (${uniqueHistory.length - expandedCount} remaining)`}
         </button>
       )}
 
-      {expanded && (
+      {expandedCount > 0 && (
         <div>
-          {browsers.map(browser => (
+          {shownGroups.map(({ browser, items }) => (
             <div key={browser} className="browser-group">
               <div className="browser-group-title">
                 <span className={`browser-badge ${browserClass(browser)}`}>
@@ -145,33 +137,9 @@ export default function BrowserTab({
                 <span className="browser-group-count">({byBrowser[browser].length})</span>
               </div>
               <ul className="history-list">
-                {byBrowser[browser].map((h, i) => {
-                  const domain = getDomain(h.url);
-                  return (
-                    <li key={i}>
-                      <a href={h.url} target="_blank" rel="noopener noreferrer" className="history-item">
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img
-                          className="history-favicon"
-                          src={faviconUrl(h.url)}
-                          alt=""
-                          width={16}
-                          height={16}
-                          onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                        />
-                        <div className="history-content">
-                          <div className="history-title" title={h.title || h.url}>{h.title || domain}</div>
-                          <div className="history-meta">
-                            <span className="history-domain">{domain}</span>
-                            {h.last_visit_time > 0 && (
-                              <span className="history-time-full">{formatFullDateTime(h.last_visit_time)}</span>
-                            )}
-                          </div>
-                        </div>
-                      </a>
-                    </li>
-                  );
-                })}
+                {items.map(h => (
+                  <HistoryRow key={`${h.browser || 'Unknown'}\u0000${historyIdentity(h)}`} h={h} />
+                ))}
               </ul>
             </div>
           ))}
@@ -202,4 +170,46 @@ function historyIdentity(item: HistoryEntry): string {
   } catch {
     return (item.url || '').trim().toLowerCase();
   }
+}
+
+// Local letter avatar instead of third-party favicon lookups — keeps visited
+// domains inside the deployment instead of leaking them to Google.
+function Favicon({ url }: { url: string }) {
+  const domain = getDomain(url).replace(/^www\./, '');
+  let hash = 0;
+  for (let i = 0; i < domain.length; i++) hash = (hash * 31 + domain.charCodeAt(i)) >>> 0;
+  return (
+    <span
+      className="history-favicon favicon-letter"
+      style={{ background: `hsl(${hash % 360} 45% 32%)` }}
+      aria-hidden="true"
+    >
+      {(domain[0] || '?').toUpperCase()}
+    </span>
+  );
+}
+
+function HistoryRow({ h, variant }: { h: HistoryEntry; variant?: 'recent' | 'full' }) {
+  const domain = getDomain(h.url);
+  return (
+    <li>
+      <a href={h.url} target="_blank" rel="noopener noreferrer" className="history-item">
+        <Favicon url={h.url} />
+        <div className="history-content">
+          <div className="history-title" title={h.title || h.url}>{h.title || domain}</div>
+          <div className="history-meta">
+            <span className="history-domain">{domain}</span>
+            {h.last_visit_time > 0 && (
+              variant === 'recent'
+                ? <span className="history-time">{formatVisitTime(h.last_visit_time)}</span>
+                : <span className="history-time-full">{formatFullDateTime(h.last_visit_time)}</span>
+            )}
+            <span className={`browser-badge ${browserClass(h.browser)}`}>
+              {browserEmoji(h.browser)} {h.browser || 'Unknown'}
+            </span>
+          </div>
+        </div>
+      </a>
+    </li>
+  );
 }

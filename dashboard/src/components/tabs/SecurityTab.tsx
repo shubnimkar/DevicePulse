@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { USBDevice, OSUpdateInfo, UserRole, RemoteActionType, DeviceCommand } from '@/types';
 import { API, timeAgo } from '@/lib/utils';
+import ConfirmDialog from '@/components/ConfirmDialog';
 
 interface Props {
   usb?:   { usb_devices: USBDevice[] | null; count: number; source?: string };
@@ -61,6 +62,7 @@ export default function SecurityTab({ usb, osUpd, deviceId, userRole, deviceOnli
   const [cmdLoading, setCmdLoading] = useState(false);
   const [busyType, setBusyType]     = useState('');
   const [notice, setNotice]         = useState<{ kind: 'ok' | 'err'; msg: string } | null>(null);
+  const [pendingAction, setPendingAction] = useState<ActionDef | null>(null);
 
   const loadCommands = useCallback(async () => {
     if (!deviceId) return;
@@ -79,10 +81,12 @@ export default function SecurityTab({ usb, osUpd, deviceId, userRole, deviceOnli
     }
   }, [deviceId]);
 
-  useEffect(() => { loadCommands(); }, [loadCommands]);
+  useEffect(() => {
+    const t = window.setTimeout(() => { void loadCommands(); }, 0);
+    return () => window.clearTimeout(t);
+  }, [loadCommands]);
 
   const issueCommand = useCallback(async (action: ActionDef) => {
-    if (action.confirm && !window.confirm(action.confirm)) return;
     setBusyType(action.type);
     setNotice(null);
     try {
@@ -135,7 +139,8 @@ export default function SecurityTab({ usb, osUpd, deviceId, userRole, deviceOnli
                 className={`ra-btn${a.danger ? ' ra-btn-danger' : ''}${a.type === 'wipe_agent' ? ' ra-btn-wipe' : ''}${quarantined && a.type === 'quarantine_release' ? ' ra-btn-release' : ''}`}
                 disabled={!allowed || !!busyType}
                 title={allowed ? a.hint : `Requires role: ${a.minRole}`}
-                onClick={() => issueCommand(a)}
+                aria-label={`${a.label}${allowed ? '' : ` (requires role: ${a.minRole})`}`}
+                onClick={() => (a.confirm ? setPendingAction(a) : void issueCommand(a))}
               >
                 <span className="ra-btn-label">{busy ? 'Sending…' : a.label}</span>
                 {!allowed && <span className="ra-btn-role">🔒 {a.minRole}</span>}
@@ -151,12 +156,12 @@ export default function SecurityTab({ usb, osUpd, deviceId, userRole, deviceOnli
         <div className="ra-history">
           <div className="ra-history-title">
             Recent Commands
-            <button className="ra-refresh" onClick={loadCommands} disabled={cmdLoading}>
+            <button className="ra-refresh" onClick={loadCommands} disabled={cmdLoading} aria-label="Refresh command history">
               {cmdLoading ? '…' : '⟳'}
             </button>
           </div>
           {commands.length === 0 && !cmdLoading && (
-            <div className="no-data" style={{ padding: '0.5rem 0' }}>No remote commands issued yet.</div>
+            <div className="no-data no-data-tight">No remote commands issued yet.</div>
           )}
           {commands.slice(0, 8).map(c => (
             <div key={c.id} className="cmd-row">
@@ -208,7 +213,7 @@ export default function SecurityTab({ usb, osUpd, deviceId, userRole, deviceOnli
             )}
           </>
         ) : (
-          <div className="no-data" style={{ padding: '1rem 0' }}>No update data yet.</div>
+          <div className="no-data no-data-roomy">No update data yet.</div>
         )}
       </div>
 
@@ -229,9 +234,23 @@ export default function SecurityTab({ usb, osUpd, deviceId, userRole, deviceOnli
             ))}
           </ul>
         ) : (
-          <div className="no-data" style={{ padding: '1rem 0' }}>No USB devices connected.</div>
+          <div className="no-data no-data-roomy">No USB devices connected.</div>
         )}
       </div>
+
+      <ConfirmDialog
+        open={!!pendingAction}
+        title={pendingAction?.label ?? ''}
+        message={pendingAction?.confirm ?? ''}
+        confirmLabel={pendingAction?.label ?? 'Confirm'}
+        danger={pendingAction?.danger}
+        onConfirm={() => {
+          const action = pendingAction;
+          setPendingAction(null);
+          if (action) void issueCommand(action);
+        }}
+        onCancel={() => setPendingAction(null)}
+      />
     </div>
   );
 }

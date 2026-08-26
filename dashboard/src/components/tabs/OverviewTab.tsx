@@ -1,29 +1,12 @@
 'use client';
 
 import { AppFocusSummary, DeviceData } from '@/types';
-import { formatBytes, formatDuration, metricColor, primaryDisk } from '@/lib/utils';
+import { formatBytes, formatDuration, metricColor, primaryDisk, isVisibleAppUsageName } from '@/lib/utils';
 import GaugeBar from '@/components/GaugeBar';
 
 interface Props {
   data?: DeviceData;
   cachedFocus: AppFocusSummary[];
-}
-
-const IGNORED_APP_USAGE_NAMES = new Set([
-  'apt-check',
-  'apt.systemd.daily',
-  'packagekitd',
-  'snapd',
-  'fwupd',
-  'devicepulse-age',
-  'devicepulse-agent',
-]);
-
-function isVisibleAppUsageName(name: string): boolean {
-  const key = name.trim().toLowerCase().replace(/\.service$/, '');
-  if (!key) return false;
-  if (IGNORED_APP_USAGE_NAMES.has(key)) return false;
-  return !key.startsWith('devicepulse-');
 }
 
 export default function OverviewTab({ data, cachedFocus }: Props) {
@@ -162,7 +145,7 @@ export default function OverviewTab({ data, cachedFocus }: Props) {
           <div className="section-title">Top Processes</div>
           <div className="mini-proc-list">
             {procs.slice(0, 5).map((p, i) => (
-              <div key={i} className="mini-proc-row">
+              <div key={`${p.pid ?? 'x'}-${p.name}-${i}`} className="mini-proc-row">
                 <span className="mini-proc-name">{p.name}</span>
                 <div className="mini-bars">
                   <div className="mini-bar-track">
@@ -193,11 +176,11 @@ export default function OverviewTab({ data, cachedFocus }: Props) {
             )}
           </div>
           <div className="mini-focus-list">
-            {topApps.map((app, i) => {
+            {topApps.map(app => {
               const pct = totalFocus > 0 ? (app.total_focus_seconds / totalFocus) * 100 : 0;
               const isActive = app.app_name === activeWin?.current_app;
               return (
-                <div key={i} className="mini-focus-row">
+                <div key={app.app_name} className="mini-focus-row">
                   <span className={`mini-focus-name ${isActive ? 'is-active' : ''}`}>
                     {isActive && <span className="live-dot" />}
                     {app.app_name}
