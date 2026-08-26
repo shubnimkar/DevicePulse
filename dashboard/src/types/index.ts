@@ -187,7 +187,36 @@ export interface Device {
   agent_update_status?: 'checking' | 'up_to_date' | 'update_available' | string;
   agent_update_requested_at?: string;
   agent_target_version?: string;
+  quarantined?: boolean;
+  quarantined_at?: string;
+  wiped_at?: string;
   data?: DeviceData;
+}
+
+// ─── Remote Actions ────────────────────────────────────────────────────────────
+
+export type RemoteActionType =
+  | 'collect_now'
+  | 'restart_agent'
+  | 'lock_screen'
+  | 'quarantine_enable'
+  | 'quarantine_release'
+  | 'wipe_agent';
+
+export type DeviceCommandStatus = 'pending' | 'delivered' | 'success' | 'failed' | 'unsupported';
+
+export interface DeviceCommand {
+  id: string;
+  device_id: string;
+  type: RemoteActionType;
+  params?: Record<string, unknown>;
+  status: DeviceCommandStatus;
+  created_by: string;
+  created_at: string;
+  delivered_at?: string;
+  completed_at?: string;
+  result?: string;
+  expires_at: string;
 }
 
 export type UserRole = 'admin' | 'manager' | 'viewer';

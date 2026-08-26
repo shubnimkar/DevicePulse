@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // candidate represents a process being evaluated as the active window.
@@ -227,9 +228,13 @@ func isLikelyLinuxDesktopApp(name string) bool {
 	if key == "" {
 		return false
 	}
+	if linuxDesktopAppIndex().has(key) {
+		return true
+	}
 
 	// ── Exact-match allowlist ─────────────────────────────────────────────────
-	// All GUI apps that should be tracked as user-facing applications.
+	// Safety net for portable/AppImage/manual installs that do not register a
+	// desktop launcher.
 	known := map[string]struct{}{
 		// Browsers
 		"chrome":                {},
@@ -261,6 +266,8 @@ func isLikelyLinuxDesktopApp(name string) bool {
 		"vscodium":              {},
 		"cursor":                {},        // Cursor AI editor
 		"windsurf":              {},        // Windsurf AI editor
+		"antigravity":           {},
+		"antigravity-ide":       {},
 		"zed":                   {},        // Zed editor
 		"zed-editor":            {},
 		"sublime_text":          {},
@@ -477,6 +484,7 @@ func isLikelyLinuxDesktopApp(name string) bool {
 		strings.Contains(key, "mongodb") ||
 		strings.Contains(key, "cursor") ||
 		strings.Contains(key, "windsurf") ||
+		strings.Contains(key, "antigravity") ||
 		strings.Contains(key, "copilot") ||
 		strings.Contains(key, "claude") ||
 		strings.Contains(key, "chatgpt") ||
@@ -503,6 +511,141 @@ func isLikelyLinuxDesktopApp(name string) bool {
 		strings.Contains(key, "wezterm") ||
 		strings.Contains(key, "alacritty") ||
 		strings.Contains(key, "ghostty")
+}
+
+type linuxDesktopIndex struct {
+	keys map[string]struct{}
+}
+
+func (idx linuxDesktopIndex) has(name string) bool {
+	key := normalizeLinuxDesktopKey(name)
+	if key == "" {
+		return false
+	}
+	if _, ok := idx.keys[key]; ok {
+		return true
+	}
+	for registered := range idx.keys {
+		if registered != "" && strings.Contains(key, registered) {
+			return true
+		}
+	}
+	return false
+}
+
+var (
+	linuxDesktopIndexOnce sync.Once
+	linuxDesktopIndexData linuxDesktopIndex
+)
+
+func linuxDesktopAppIndex() linuxDesktopIndex {
+	linuxDesktopIndexOnce.Do(func() {
+		linuxDesktopIndexData = buildLinuxDesktopAppIndex()
+	})
+	return linuxDesktopIndexData
+}
+
+func buildLinuxDesktopAppIndex() linuxDesktopIndex {
+	idx := linuxDesktopIndex{keys: map[string]struct{}{}}
+	for _, dir := range linuxDesktopEntryDirs() {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".desktop") {
+				continue
+			}
+			path := filepath.Join(dir, e.Name())
+			entry, ok := parseDesktopEntry(path)
+			if !ok || shouldSkipDesktopEntry(entry) {
+				continue
+			}
+			for _, key := range linuxDesktopEntryKeys(entry, path) {
+				idx.keys[key] = struct{}{}
+			}
+		}
+	}
+	return idx
+}
+
+func linuxDesktopEntryDirs() []string {
+	dirs := []string{
+		"/usr/share/applications",
+		"/usr/local/share/applications",
+		"/var/lib/flatpak/exports/share/applications",
+		"/var/lib/snapd/desktop/applications",
+	}
+	if home := os.Getenv("HOME"); home != "" {
+		dirs = append(dirs,
+			filepath.Join(home, ".local/share/applications"),
+			filepath.Join(home, ".local/share/flatpak/exports/share/applications"),
+		)
+	}
+	for _, base := range []string{"/home", "/Users"} {
+		users, err := os.ReadDir(base)
+		if err != nil {
+			continue
+		}
+		for _, user := range users {
+			if !user.IsDir() {
+				continue
+			}
+			home := filepath.Join(base, user.Name())
+			dirs = append(dirs,
+				filepath.Join(home, ".local/share/applications"),
+				filepath.Join(home, ".local/share/flatpak/exports/share/applications"),
+			)
+		}
+	}
+	return dirs
+}
+
+func linuxDesktopEntryKeys(entry desktopEntry, path string) []string {
+	candidates := []string{
+		entry.name,
+		strings.TrimSuffix(filepath.Base(path), ".desktop"),
+	}
+	for _, token := range strings.Fields(entry.exec) {
+		if strings.HasPrefix(token, "%") || strings.Contains(token, "=") {
+			continue
+		}
+		token = strings.Trim(token, `"'`)
+		if token == "" {
+			continue
+		}
+		candidates = append(candidates, token, filepath.Base(token))
+		break
+	}
+
+	keys := make([]string, 0, len(candidates))
+	seen := map[string]struct{}{}
+	for _, candidate := range candidates {
+		key := normalizeLinuxDesktopKey(candidate)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func normalizeLinuxDesktopKey(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	value = strings.Trim(value, `"'`)
+	value = strings.TrimSuffix(value, ".desktop")
+	if value == "" {
+		return ""
+	}
+	value = filepath.Base(value)
+	for _, suffix := range []string{".bin", ".sh"} {
+		value = strings.TrimSuffix(value, suffix)
+	}
+	return value
 }
 
 func betterLinuxDesktopCandidate(next, current candidate) bool {

@@ -1835,6 +1835,266 @@ func requireAgent(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// ─── Device Commands (Remote Actions) ─────────────────────────────────────────
+
+// targetDeviceKey carries the URL-parsed device id to role-wrapped handlers.
+type targetKeyType string
+
+const targetDeviceKey targetKeyType = "target_device"
+
+// DeviceCommand is one queued remote-action instruction for an agent.
+// Lifecycle: pending → delivered → success | failed | unsupported | expired.
+type DeviceCommand struct {
+	ID          primitive.ObjectID     `bson:"_id,omitempty" json:"id"`
+	DeviceID    string                 `bson:"device_id" json:"device_id"`
+	Type        string                 `bson:"type" json:"type"`
+	Params      map[string]interface{} `bson:"params,omitempty" json:"params,omitempty"`
+	Status      string                 `bson:"status" json:"status"`
+	CreatedBy   string                 `bson:"created_by" json:"created_by"`
+	CreatedAt   time.Time              `bson:"created_at" json:"created_at"`
+	DeliveredAt *time.Time             `bson:"delivered_at,omitempty" json:"delivered_at,omitempty"`
+	CompletedAt *time.Time             `bson:"completed_at,omitempty" json:"completed_at,omitempty"`
+	Result      string                 `bson:"result,omitempty" json:"result,omitempty"`
+	ExpiresAt   time.Time              `bson:"expires_at" json:"expires_at"`
+}
+
+// commandMinRole maps each supported command type to the minimum dashboard
+// role allowed to issue it. Benign actions are manager-level; anything that
+// disrupts the endpoint or its connectivity requires admin.
+var commandMinRole = map[string]UserRole{
+	"collect_now":        RoleManager,
+	"restart_agent":      RoleManager,
+	"lock_screen":        RoleAdmin,
+	"quarantine_enable":  RoleAdmin,
+	"quarantine_release": RoleAdmin,
+	"wipe_agent":         RoleAdmin,
+}
+
+func commandCollection() *mongo.Collection {
+	return mongoClient.Database(dbName).Collection("device_commands")
+}
+
+// deviceCommandsHandler dispatches POST (issue command, role re-checked per
+// type) and GET (command history, viewer+) on /devices/{device_id}/commands.
+func deviceCommandsHandler(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+	if len(parts) != 3 || parts[0] != "devices" || parts[1] == "" || parts[2] != "commands" {
+		http.Error(w, "Invalid URL", http.StatusBadRequest)
+		return
+	}
+	ctx := context.WithValue(r.Context(), targetDeviceKey, parts[1])
+	switch r.Method {
+	case http.MethodPost:
+		requireRole(RoleManager, deviceCommandCreateHandler)(w, r.WithContext(ctx))
+	case http.MethodGet:
+		requireRole(RoleViewer, deviceCommandListHandler)(w, r.WithContext(ctx))
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// POST /devices/{device_id}/commands  body: {"type": "collect_now"}
+func deviceCommandCreateHandler(w http.ResponseWriter, r *http.Request) {
+	deviceID, _ := r.Context().Value(targetDeviceKey).(string)
+	user, _ := currentUser(r)
+
+	var body struct {
+		Type   string                 `json:"type"`
+		Params map[string]interface{} `json:"params"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "Bad JSON", http.StatusBadRequest)
+		return
+	}
+
+	minRole, known := commandMinRole[body.Type]
+	if !known {
+		http.Error(w, "Unknown command type. Valid: collect_now, restart_agent, lock_screen, quarantine_enable, quarantine_release, wipe_agent", http.StatusBadRequest)
+		return
+	}
+	if !canAccessRole(user.Role, minRole) {
+		http.Error(w, fmt.Sprintf("%s requires role %s", body.Type, minRole), http.StatusForbidden)
+		return
+	}
+
+	now := time.Now()
+	cmd := DeviceCommand{
+		DeviceID:  deviceID,
+		Type:      body.Type,
+		Params:    body.Params,
+		Status:    "pending",
+		CreatedBy: user.Email,
+		CreatedAt: now,
+		ExpiresAt: now.Add(24 * time.Hour),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	res, err := commandCollection().InsertOne(ctx, cmd)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	cmd.ID, _ = res.InsertedID.(primitive.ObjectID)
+
+	// Track quarantine state on the device doc so the dashboard can badge it.
+	switch body.Type {
+	case "quarantine_enable":
+		mongoClient.Database(dbName).Collection("devices").UpdateOne(ctx,
+			bson.M{"device_id": deviceID},
+			bson.M{"$set": bson.M{"quarantined": true, "quarantined_at": now}})
+	case "quarantine_release":
+		mongoClient.Database(dbName).Collection("devices").UpdateOne(ctx,
+			bson.M{"device_id": deviceID},
+			bson.M{"$set": bson.M{"quarantined": false}, "$unset": bson.M{"quarantined_at": ""}})
+	}
+
+	log.Printf("RemoteAction: %s issued %s for %s", user.Email, body.Type, deviceID)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(cmd)
+}
+
+// GET /devices/{device_id}/commands — most recent 50 commands with status.
+func deviceCommandListHandler(w http.ResponseWriter, r *http.Request) {
+	deviceID, _ := r.Context().Value(targetDeviceKey).(string)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cursor, err := commandCollection().Find(ctx,
+		bson.M{"device_id": deviceID},
+		options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}).SetLimit(50))
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	defer cursor.Close(ctx)
+
+	var cmds []DeviceCommand
+	if err := cursor.All(ctx, &cmds); err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	if cmds == nil {
+		cmds = []DeviceCommand{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"commands": cmds})
+}
+
+// GET /commands/pending — agent polls this. Each matching command is atomically
+// claimed (pending → delivered) so concurrent root/window services never
+// execute the same command twice.
+func commandsPendingHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	authDeviceID, ok := resolveAPIKey(ctx, r.Header.Get("X-API-Key"))
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	claimed := make([]DeviceCommand, 0, 8)
+	for i := 0; i < 20; i++ {
+		now := time.Now()
+		var cmd DeviceCommand
+		err := commandCollection().FindOneAndUpdate(ctx,
+			bson.M{
+				"device_id":  authDeviceID,
+				"status":     "pending",
+				"expires_at": bson.M{"$gt": now},
+			},
+			bson.M{"$set": bson.M{"status": "delivered", "delivered_at": now}},
+			options.FindOneAndUpdate().SetSort(bson.D{{Key: "created_at", Value: 1}}).SetReturnDocument(options.After),
+		).Decode(&cmd)
+		if err != nil {
+			break // no more pending commands
+		}
+		claimed = append(claimed, cmd)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"commands": claimed})
+}
+
+// POST /commands/result — agent reports execution outcome.
+// body: {"command_id": "...", "status": "success|failed|unsupported", "detail": "..."}
+func commandsResultHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	authDeviceID, ok := resolveAPIKey(ctx, r.Header.Get("X-API-Key"))
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var body struct {
+		CommandID string `json:"command_id"`
+		Status    string `json:"status"`
+		Detail    string `json:"detail"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "Bad JSON", http.StatusBadRequest)
+		return
+	}
+	switch body.Status {
+	case "success", "failed", "unsupported":
+	default:
+		http.Error(w, "status must be success, failed, or unsupported", http.StatusBadRequest)
+		return
+	}
+	cmdID, err := primitive.ObjectIDFromHex(body.CommandID)
+	if err != nil {
+		http.Error(w, "Invalid command_id", http.StatusBadRequest)
+		return
+	}
+	detail := strings.TrimSpace(body.Detail)
+	if len(detail) > 2000 {
+		detail = detail[:2000]
+	}
+	now := time.Now()
+
+	var cmd DeviceCommand
+	err = commandCollection().FindOneAndUpdate(ctx,
+		bson.M{
+			"_id":       cmdID,
+			"device_id": authDeviceID,
+			"status":    bson.M{"$in": bson.A{"pending", "delivered"}},
+		},
+		bson.M{"$set": bson.M{"status": body.Status, "result": detail, "completed_at": now}},
+		options.FindOneAndUpdate().SetReturnDocument(options.After),
+	).Decode(&cmd)
+	if err != nil {
+		http.Error(w, "Command not found or already completed", http.StatusNotFound)
+		return
+	}
+
+	// Side effects driven by execution results.
+	devices := mongoClient.Database(dbName).Collection("devices")
+	switch {
+	case cmd.Type == "wipe_agent" && body.Status == "success":
+		// Corporate wipe completed locally — make sure the credential can no
+		// longer ingest even if the agent binary somehow survives.
+		devices.UpdateOne(ctx, bson.M{"device_id": authDeviceID},
+			bson.M{"$set": bson.M{"status": "revoked", "revoked_at": now, "wiped_at": now}})
+		log.Printf("RemoteAction: device %s wiped, credentials revoked", authDeviceID)
+	case cmd.Type == "quarantine_release" && body.Status == "success":
+		devices.UpdateOne(ctx, bson.M{"device_id": authDeviceID},
+			bson.M{"$set": bson.M{"quarantined": false}, "$unset": bson.M{"quarantined_at": ""}})
+	case cmd.Type == "quarantine_enable" && body.Status == "success":
+		devices.UpdateOne(ctx, bson.M{"device_id": authDeviceID},
+			bson.M{"$set": bson.M{"quarantined": true, "quarantined_confirmed_at": now}})
+	}
+
+	log.Printf("RemoteAction: %s on %s → %s (%s)", cmd.Type, authDeviceID, body.Status, detail)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(cmd)
+}
+
 // ─── Registration Handler ──────────────────────────────────────────────────────
 
 // POST /devices/register
@@ -4250,6 +4510,8 @@ func registerRoutes(mux *http.ServeMux) {
 			requireRole(RoleAdmin, devicePingHandler)(w, r)
 		} else if strings.HasSuffix(r.URL.Path, "/app-usage") {
 			requireRole(RoleViewer, deviceAppUsageHandler)(w, r)
+		} else if strings.HasSuffix(r.URL.Path, "/commands") {
+			deviceCommandsHandler(w, r)
 		} else if r.Method == http.MethodDelete {
 			requireRole(RoleAdmin, deviceDeleteHandler)(w, r)
 		} else {
@@ -4270,6 +4532,9 @@ func registerRoutes(mux *http.ServeMux) {
 		}
 	}))
 	mux.HandleFunc("/focus/", corsMiddleware(requireRole(RoleViewer, focusHandler)))
+
+	mux.HandleFunc("/commands/pending", corsMiddleware(requireAgent(commandsPendingHandler)))
+	mux.HandleFunc("/commands/result", corsMiddleware(requireAgent(commandsResultHandler)))
 
 	mux.HandleFunc("/update/check", corsMiddleware(requireAgent(updateCheckHandler)))
 	mux.HandleFunc("/update/releases", corsMiddleware(requireRole(RoleAdmin, releaseListHandler)))
@@ -4340,4 +4605,15 @@ func ensureIndexes() {
 		{Keys: bson.D{{Key: "role", Value: 1}, {Key: "status", Value: 1}}},
 	}
 	db.Collection("users").Indexes().CreateMany(ctx, userIdx)
+
+	// device_commands: claim + history lookups; TTL on expires_at auto-removes
+	// finished/expired commands so stale instructions never execute late.
+	cmdIdx := []mongo.IndexModel{
+		{Keys: bson.D{{Key: "device_id", Value: 1}, {Key: "status", Value: 1}, {Key: "created_at", Value: 1}}},
+		{
+			Keys:    bson.D{{Key: "expires_at", Value: 1}},
+			Options: options.Index().SetExpireAfterSeconds(0),
+		},
+	}
+	db.Collection("device_commands").Indexes().CreateMany(ctx, cmdIdx)
 }

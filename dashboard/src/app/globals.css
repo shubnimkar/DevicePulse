@@ -2308,3 +2308,108 @@ body {
   .tab-btn { font-size: 0.75rem; padding: 0.5rem 0.5rem; }
   .tab-panel { padding: 0.875rem; }
 }
+
+/* ─── Remote Actions (Security tab) ─────────────────────────────────────────── */
+
+.ra-card { grid-column: 1 / -1; }
+
+.ra-offline-note {
+  font-size: 0.72rem;
+  color: #d97706;
+  background: rgba(217, 119, 6, 0.08);
+  border: 1px solid rgba(217, 119, 6, 0.25);
+  border-radius: 8px;
+  padding: 0.4rem 0.6rem;
+  margin-bottom: 0.65rem;
+}
+
+.ra-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 0.5rem;
+}
+
+.ra-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.55rem 0.5rem;
+  border-radius: 10px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  background: rgba(255, 255, 255, 0.03);
+  color: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+
+.ra-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.07); transform: translateY(-1px); }
+.ra-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.ra-btn-danger { border-color: rgba(239, 68, 68, 0.35); }
+.ra-btn-danger:hover:not(:disabled) { background: rgba(239, 68, 68, 0.12); border-color: rgba(239, 68, 68, 0.6); }
+.ra-btn-wipe { font-weight: 600; }
+.ra-btn-release { border-color: rgba(34, 197, 94, 0.45); }
+.ra-btn-release:hover:not(:disabled) { background: rgba(34, 197, 94, 0.12); border-color: rgba(34, 197, 94, 0.7); }
+
+.ra-btn-role { font-size: 0.62rem; opacity: 0.75; letter-spacing: 0.02em; }
+
+.ra-notice {
+  margin-top: 0.65rem;
+  padding: 0.45rem 0.65rem;
+  border-radius: 8px;
+  font-size: 0.74rem;
+  line-height: 1.35;
+}
+.ra-notice-ok  { background: rgba(34, 197, 94, 0.1);  border: 1px solid rgba(34, 197, 94, 0.3);  color: #4ade80; }
+.ra-notice-err { background: rgba(239, 68, 68, 0.1);  border: 1px solid rgba(239, 68, 68, 0.3);  color: #f87171; }
+
+.ra-history { margin-top: 0.85rem; }
+.ra-history-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.7;
+  margin-bottom: 0.4rem;
+}
+.ra-refresh {
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.85rem;
+  opacity: 0.7;
+}
+.ra-refresh:hover:not(:disabled) { opacity: 1; }
+
+.cmd-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.4rem 0.55rem;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  margin-bottom: 0.35rem;
+  font-size: 0.73rem;
+}
+.cmd-main { display: flex; align-items: center; gap: 0.5rem; }
+.cmd-type { font-weight: 600; }
+.cmd-status {
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+}
+.cmd-st-pending   { color: #eab308; }
+.cmd-st-delivered { color: #60a5fa; }
+.cmd-st-success   { color: #4ade80; }
+.cmd-st-failed    { color: #f87171; }
+.cmd-meta { opacity: 0.6; font-size: 0.68rem; }
+.cmd-result { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60ch; display: inline-block; vertical-align: bottom; }
+

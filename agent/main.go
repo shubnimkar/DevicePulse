@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/devicepulse/agent/collector"
+	"github.com/devicepulse/agent/commander"
 	"github.com/devicepulse/agent/queue"
 	"github.com/devicepulse/agent/updater"
 	"github.com/joho/godotenv"
@@ -144,7 +145,13 @@ func runAgent() {
 	}
 	log.Printf("Registered as device_id=%s", deviceID)
 
-	// 3. Start Update Poller — checks for new binary every few minutes
+	// 3. Start remote-command poller (collect_now / restart / lock /
+	//    quarantine / wipe). Credentials were pushed to the commander during
+	//    registration.
+	commander.SetDataDir(dataDir)
+	go commander.Poller(5 * time.Second)
+
+	// 4. Start Update Poller — checks for new binary every few minutes
 	go updater.Poller(apiURL, apiKey, agentVersion, 5*time.Minute)
 
 	// 4. Start Policy Poller
@@ -344,7 +351,13 @@ func runAgent() {
 		interval := syncInterval
 		policyMu.RUnlock()
 
-		time.Sleep(interval)
+		// Sleep until the next cycle, or wake immediately when a collect_now
+		// command arrives from the commander poller.
+		select {
+		case <-commander.CollectNowChan():
+			log.Printf("Remote command: collect_now — starting next cycle immediately")
+		case <-time.After(interval):
+		}
 	}
 }
 
@@ -417,6 +430,7 @@ func registerDeviceWithCache(useCache bool) error {
 					cachedUUID == fp.HardwareUUID && cachedMAC == fp.MACAddress {
 					deviceID = reg["device_id"]
 					apiKey = reg["api_key"]
+					commander.SetCredentials(apiURL, apiKey)
 					log.Printf("Loaded cached registration: device_id=%s", deviceID)
 					return nil
 				}
@@ -454,6 +468,7 @@ func registerDeviceWithCache(useCache bool) error {
 	if deviceID == "" || apiKey == "" {
 		return fmt.Errorf("registration response missing device_id or api_key")
 	}
+	commander.SetCredentials(apiURL, apiKey)
 
 	// Persist credentials + fingerprint so we can validate on next startup
 	reg := map[string]string{
@@ -715,6 +730,14 @@ func runWindowOnlyMode() {
 		}
 	}
 	log.Printf("window_only: using device_id=%s", deviceID)
+	commander.SetCredentials(apiURL, apiKey)
+	commander.SetDataDir(dataDir)
+
+	// The window service also polls remote commands: session-context actions
+	// (lock_screen) must run here because the root system service cannot reach
+	// the GUI session. Command claiming is atomic server-side, so both this
+	// process and the root service can poll concurrently without conflicts.
+	go commander.Poller(5 * time.Second)
 
 	activeWin := &collector.ActiveWindowTracker{}
 	if err := activeWin.Start(); err != nil {

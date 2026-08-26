@@ -1,6 +1,6 @@
 'use client';
 
-import { AppFocusSummary, DailyAppUsageData, Device, DeviceTab, HistoryEntry } from '@/types';
+import { AppFocusSummary, DailyAppUsageData, Device, DeviceTab, HistoryEntry, UserRole } from '@/types';
 import { isOnline, timeAgo, metricColor, primaryDisk } from '@/lib/utils';
 import OverviewTab from '@/components/tabs/OverviewTab';
 import HardwareTab from '@/components/tabs/HardwareTab';
@@ -32,6 +32,7 @@ interface Props {
   browserHistoryLoaded?: boolean;
   canFilterBrowserHistory?: boolean;
   onBrowserHistoryRangeChange?: (range: BrowserHistoryRange) => void;
+  userRole?: UserRole;
 }
 
 const TABS: { key: DeviceTab; label: string; icon: React.ReactNode }[] = [
@@ -65,6 +66,7 @@ export default function DeviceCard({
   browserHistoryLoaded = true,
   canFilterBrowserHistory = false,
   onBrowserHistoryRangeChange,
+  userRole,
 }: Props) {
   const sys    = device.data?.SystemInfo;
   const procs  = device.data?.ProcessMonitor?.top_processes ?? [];
@@ -182,7 +184,16 @@ export default function DeviceCard({
         {tab === 'services'  && <ServicesTab data={device.data?.Services} />}
         {tab === 'ports'     && <PortsTab data={device.data?.NetworkPorts} />}
         {tab === 'apps'      && <AppsTab data={device.data?.InstalledApps} />}
-        {tab === 'security'  && <SecurityTab usb={device.data?.USBEvents} osUpd={device.data?.OSUpdates} />}
+        {tab === 'security'  && (
+          <SecurityTab
+            usb={device.data?.USBEvents}
+            osUpd={device.data?.OSUpdates}
+            deviceId={device.device_id}
+            userRole={userRole ?? 'viewer'}
+            deviceOnline={isOnline(device.last_seen)}
+            quarantined={!!device.quarantined}
+          />
+        )}
         {tab === 'focus'     && (
           <FocusTab
             data={device.data?.ActiveWindowTracker}

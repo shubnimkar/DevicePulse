@@ -11,7 +11,7 @@ func TestCleanLinuxForegroundAppDropsBackgroundServices(t *testing.T) {
 }
 
 func TestCleanLinuxForegroundAppKeepsDesktopApps(t *testing.T) {
-	for _, name := range []string{"Chrome", "Firefox", "Code"} {
+	for _, name := range []string{"Chrome", "Firefox", "Code", "antigravity-ide"} {
 		if got := cleanLinuxForegroundApp(name); got != name {
 			t.Fatalf("expected %q to be kept, got %q", name, got)
 		}

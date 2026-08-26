@@ -1740,6 +1740,7 @@ export default function Home() {
                   browserHistoryLoaded={selectedBrowserHistoryLoaded}
                   canFilterBrowserHistory={canFilterBrowserHistory}
                   onBrowserHistoryRangeChange={updateBrowserHistoryRange}
+                  userRole={authUser?.role ?? 'viewer'}
                 />
               </div>
             ) : (
