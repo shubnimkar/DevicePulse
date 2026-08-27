@@ -158,6 +158,65 @@ export interface BrowserHistoryArchiveData {
   entries: HistoryEntry[];
 }
 
+export interface WeeklyReportApp {
+  app_name: string;
+  total_seconds: number;
+  session_count: number;
+  device_count: number;
+}
+
+export interface WeeklyReportDevice {
+  device_id: string;
+  name: string;
+  hostname?: string;
+  os?: string;
+  agent_version?: string;
+  online: boolean;
+  state: 'online' | 'warning' | 'critical' | 'offline' | string;
+  last_seen?: string;
+  cpu_percent?: number;
+  ram_percent?: number;
+  disk_percent?: number;
+  pending_updates: number;
+  telemetry_events: number;
+  browser_entries: number;
+  app_usage_days: number;
+  app_usage_seconds: number;
+  app_usage_sessions: number;
+  installed_app_count: number;
+}
+
+export interface WeeklyReport {
+  from: string;
+  to: string;
+  requested_days: number;
+  generated_at: string;
+  coverage: {
+    device_count: number;
+    telemetry_devices: number;
+    telemetry_events: number;
+    app_usage_days: number;
+    browser_entries: number;
+    retention_days: number;
+    complete_app_usage_week: boolean;
+  };
+  fleet: {
+    online: number;
+    offline: number;
+    warning: number;
+    critical: number;
+    avg_cpu: number;
+    avg_ram: number;
+    hardware_count: number;
+  };
+  app_usage: {
+    total_seconds: number;
+    sessions: number;
+    top_apps: WeeklyReportApp[];
+  };
+  devices: WeeklyReportDevice[];
+}
+
 export interface DeviceData {
   SystemInfo?: SystemInfo;
   ProcessMonitor?: { top_processes: ProcessData[] };

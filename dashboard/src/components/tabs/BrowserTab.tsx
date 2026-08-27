@@ -16,7 +16,7 @@ interface Props {
 export type BrowserHistoryRange = 'recent' | 'last_day' | 'day_before';
 
 const rangeLabels: Record<BrowserHistoryRange, string> = {
-  recent: 'Recent',
+  recent: 'Today',
   last_day: 'Last Day',
   day_before: 'Day Before',
 };

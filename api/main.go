@@ -566,7 +566,9 @@ func (a *DailyActivityArchive) Archive(ctx context.Context, deviceID string, pay
 	}
 
 	eventTime := payloadTime(payload["timestamp"])
-	date := eventTime.UTC().Format("2006-01-02")
+	// Bucket by the device's *local* calendar day (the offset the agent sent in
+	// its RFC3339 timestamp), so "today" aligns with midnight on the device.
+	date := eventTime.Format("2006-01-02")
 	key := dailyActivityS3Key(a.prefix, deviceID, username, date)
 
 	buildResult := func(apps []interface{}, totalS float64, sessionCount int) *DailyActivityArchiveResult {
@@ -1088,6 +1090,100 @@ func filterDailyTopApps(raw interface{}) ([]interface{}, float64, int) {
 	return out, totalS, sessionCount
 }
 
+func appUsageSummaryValues(raw interface{}) (string, float64, int) {
+	switch m := raw.(type) {
+	case bson.M:
+		appName, _ := m["app_name"].(string)
+		seconds, _ := toFloat(firstNonNil(m["total_seconds"], m["total_focus_seconds"]))
+		sessions, _ := toFloat(m["session_count"])
+		return strings.TrimSpace(appName), seconds, int(sessions)
+	case map[string]interface{}:
+		appName, _ := m["app_name"].(string)
+		seconds, _ := toFloat(firstNonNil(m["total_seconds"], m["total_focus_seconds"]))
+		sessions, _ := toFloat(m["session_count"])
+		return strings.TrimSpace(appName), seconds, int(sessions)
+	default:
+		return "", 0, 0
+	}
+}
+
+func firstNonNil(values ...interface{}) interface{} {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func reportDeviceName(device bson.M) string {
+	for _, key := range []string{"display_name", "hostname", "device_id"} {
+		if value, _ := device[key].(string); strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	if data, ok := device["data"].(bson.M); ok {
+		if sys, ok := data["SystemInfo"].(bson.M); ok {
+			if hostname, _ := sys["hostname"].(string); strings.TrimSpace(hostname) != "" {
+				return strings.TrimSpace(hostname)
+			}
+		}
+	}
+	return "Unknown device"
+}
+
+func reportPrimaryDiskPercent(raw interface{}) float64 {
+	disks, ok := raw.(bson.A)
+	if !ok {
+		disks, ok = raw.([]interface{})
+	}
+	if !ok || len(disks) == 0 {
+		return 0
+	}
+	firstVisible := 0.0
+	for _, rawDisk := range disks {
+		disk, ok := rawDisk.(bson.M)
+		if !ok {
+			if m, ok := rawDisk.(map[string]interface{}); ok {
+				disk = bson.M(m)
+			} else {
+				continue
+			}
+		}
+		mount, _ := disk["mount"].(string)
+		used, _ := toFloat(disk["used_percent"])
+		if mount == "/" {
+			return used
+		}
+		if firstVisible == 0 && !isSystemDiskMount(mount) {
+			firstVisible = used
+		}
+	}
+	return firstVisible
+}
+
+func isSystemDiskMount(mount string) bool {
+	if mount == "" {
+		return false
+	}
+	for _, prefix := range []string{"/proc", "/sys", "/dev", "/run", "/snap"} {
+		if mount == prefix || strings.HasPrefix(mount, prefix+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func maxFloat(values ...float64) float64 {
+	max := 0.0
+	for _, value := range values {
+		if value > max {
+			max = value
+		}
+	}
+	return max
+}
+
 func activityUsername(payload map[string]interface{}) string {
 	if username, ok := payload["username"].(string); ok && strings.TrimSpace(username) != "" {
 		return strings.TrimSpace(username)
@@ -1584,8 +1680,12 @@ func pruneArchivedBrowserHistory(payload map[string]interface{}, archiveResult *
 
 func payloadTime(v interface{}) time.Time {
 	if s, ok := v.(string); ok {
+		// Preserve the timezone offset the agent reported in its RFC3339
+		// timestamp. This is what makes "today" mean the device's *local* day
+		// (e.g. IST) rather than a UTC day. Callers that need a UTC instant
+		// must call .UTC() explicitly.
 		if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
-			return t.UTC()
+			return t
 		}
 	}
 	return time.Now().UTC()
@@ -3438,6 +3538,310 @@ func deviceAppUsageHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GET /reports/weekly?from=YYYY-MM-DD&to=YYYY-MM-DD
+func weeklyReportHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	now := time.Now().UTC()
+	defaultFrom := startOfDay(now.AddDate(0, 0, -6))
+	defaultTo := startOfDay(now).AddDate(0, 0, 1).Add(-time.Nanosecond)
+	from, err := parseDateQuery(r.URL.Query().Get("from"), defaultFrom, false)
+	if err != nil {
+		http.Error(w, "Invalid from date. Use YYYY-MM-DD.", http.StatusBadRequest)
+		return
+	}
+	to, err := parseDateQuery(r.URL.Query().Get("to"), defaultTo, true)
+	if err != nil {
+		http.Error(w, "Invalid to date. Use YYYY-MM-DD.", http.StatusBadRequest)
+		return
+	}
+	if to.Before(from) {
+		http.Error(w, "to must be on or after from", http.StatusBadRequest)
+		return
+	}
+	if to.Sub(from) > 31*24*time.Hour {
+		http.Error(w, "Date range too large; maximum is 31 days", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	db := mongoClient.Database(dbName)
+
+	deviceCursor, err := db.Collection("devices").Find(ctx, bson.M{}, options.Find().SetProjection(bson.M{"api_key": 0, "api_key_hash": 0}))
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	defer deviceCursor.Close(ctx)
+	var devices []bson.M
+	if err := deviceCursor.All(ctx, &devices); err != nil {
+		http.Error(w, "Parsing error", http.StatusInternalServerError)
+		return
+	}
+
+	type reportDevice struct {
+		DeviceID          string  `json:"device_id"`
+		Name              string  `json:"name"`
+		Hostname          string  `json:"hostname,omitempty"`
+		OS                string  `json:"os,omitempty"`
+		AgentVersion      string  `json:"agent_version,omitempty"`
+		Online            bool    `json:"online"`
+		State             string  `json:"state"`
+		LastSeen          any     `json:"last_seen,omitempty"`
+		CPUPercent        float64 `json:"cpu_percent,omitempty"`
+		RAMPercent        float64 `json:"ram_percent,omitempty"`
+		DiskPercent       float64 `json:"disk_percent,omitempty"`
+		PendingUpdates    int     `json:"pending_updates"`
+		TelemetryEvents   int     `json:"telemetry_events"`
+		BrowserEntries    int     `json:"browser_entries"`
+		AppUsageDays      int     `json:"app_usage_days"`
+		AppUsageSeconds   float64 `json:"app_usage_seconds"`
+		AppUsageSessions  int     `json:"app_usage_sessions"`
+		InstalledAppCount int     `json:"installed_app_count"`
+	}
+
+	reportDevices := make(map[string]*reportDevice, len(devices))
+	onlineCount := 0
+	warningCount := 0
+	criticalCount := 0
+	totalCPU := 0.0
+	totalRAM := 0.0
+	hardwareSamples := 0
+
+	for _, device := range devices {
+		deviceID, _ := device["device_id"].(string)
+		if deviceID == "" {
+			continue
+		}
+		item := &reportDevice{
+			DeviceID: deviceID,
+			Name:     reportDeviceName(device),
+			State:    "offline",
+			LastSeen: device["last_seen"],
+		}
+		item.Hostname, _ = device["hostname"].(string)
+		item.AgentVersion, _ = device["agent_version"].(string)
+		lastSeen, hasLastSeen := bsonTime(device["last_seen"])
+		item.Online = hasLastSeen && now.Sub(lastSeen) < time.Minute
+		if item.Online {
+			onlineCount++
+			item.State = "online"
+		}
+		if data, ok := device["data"].(bson.M); ok {
+			if sys, ok := data["SystemInfo"].(bson.M); ok {
+				if osName, _ := sys["os"].(string); osName != "" {
+					item.OS = osName
+				}
+				if item.Hostname == "" {
+					item.Hostname, _ = sys["hostname"].(string)
+				}
+			}
+			if hw, ok := data["HardwareStats"].(bson.M); ok {
+				if cpu, ok := hw["cpu"].(bson.M); ok {
+					item.CPUPercent, _ = toFloat(cpu["usage_percent"])
+				}
+				if ram, ok := hw["ram"].(bson.M); ok {
+					item.RAMPercent, _ = toFloat(ram["used_percent"])
+				}
+				item.DiskPercent = reportPrimaryDiskPercent(hw["disks"])
+				if item.CPUPercent > 0 || item.RAMPercent > 0 || item.DiskPercent > 0 {
+					totalCPU += item.CPUPercent
+					totalRAM += item.RAMPercent
+					hardwareSamples++
+				}
+			}
+			if apps, ok := data["InstalledApps"].(bson.M); ok {
+				if count, ok := toFloat(apps["count"]); ok {
+					item.InstalledAppCount = int(count)
+				}
+			}
+			if upd, ok := data["OSUpdates"].(bson.M); ok {
+				if info, ok := upd["os_updates"].(bson.M); ok {
+					if count, ok := toFloat(info["pending_count"]); ok {
+						item.PendingUpdates = int(count)
+					}
+				}
+			}
+		}
+		risk := maxFloat(item.CPUPercent, item.RAMPercent, item.DiskPercent)
+		if item.Online && risk >= 90 {
+			item.State = "critical"
+			criticalCount++
+		} else if item.Online && risk >= 70 {
+			item.State = "warning"
+			warningCount++
+		}
+		reportDevices[deviceID] = item
+	}
+
+	telemetryCursor, err := db.Collection("telemetry").Aggregate(ctx, mongo.Pipeline{
+		{{Key: "$match", Value: bson.M{"ingested_at": bson.M{"$gte": from, "$lte": to}}}},
+		{{Key: "$group", Value: bson.M{
+			"_id":             "$device_id",
+			"events":          bson.M{"$sum": 1},
+			"browser_entries": bson.M{"$sum": bson.M{"$ifNull": bson.A{"$browser_history_archive.entry_count", 0}}},
+		}}},
+	})
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	defer telemetryCursor.Close(ctx)
+	var telemetryRows []bson.M
+	if err := telemetryCursor.All(ctx, &telemetryRows); err != nil {
+		http.Error(w, "Parsing error", http.StatusInternalServerError)
+		return
+	}
+	totalTelemetryEvents := 0
+	totalBrowserEntries := 0
+	telemetryDevices := 0
+	for _, row := range telemetryRows {
+		deviceID, _ := row["_id"].(string)
+		events, _ := toFloat(row["events"])
+		browserEntries, _ := toFloat(row["browser_entries"])
+		if events > 0 {
+			telemetryDevices++
+		}
+		totalTelemetryEvents += int(events)
+		totalBrowserEntries += int(browserEntries)
+		if item := reportDevices[deviceID]; item != nil {
+			item.TelemetryEvents = int(events)
+			item.BrowserEntries = int(browserEntries)
+		}
+	}
+
+	fromDate := from.Format("2006-01-02")
+	toDate := to.Format("2006-01-02")
+	activityCursor, err := db.Collection("app_usage_daily").Find(ctx, bson.M{"date": bson.M{"$gte": fromDate, "$lte": toDate}})
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	defer activityCursor.Close(ctx)
+	var activityRows []bson.M
+	if err := activityCursor.All(ctx, &activityRows); err != nil {
+		http.Error(w, "Parsing error", http.StatusInternalServerError)
+		return
+	}
+
+	type appTotal struct {
+		AppName        string  `json:"app_name"`
+		TotalSeconds   float64 `json:"total_seconds"`
+		SessionCount   int     `json:"session_count"`
+		DeviceCount    int     `json:"device_count"`
+		devicePresence map[string]struct{}
+	}
+	appTotals := map[string]*appTotal{}
+	appUsageDates := map[string]struct{}{}
+	appUsageDeviceDates := map[string]map[string]struct{}{}
+	totalAppSeconds := 0.0
+	totalAppSessions := 0
+
+	for _, row := range activityRows {
+		deviceID, _ := row["device_id"].(string)
+		date, _ := row["date"].(string)
+		topApps, seconds, sessions := filterDailyTopApps(row["top_apps"])
+		if len(topApps) == 0 {
+			continue
+		}
+		appUsageDates[date] = struct{}{}
+		totalAppSeconds += seconds
+		totalAppSessions += sessions
+		if item := reportDevices[deviceID]; item != nil {
+			item.AppUsageSeconds += seconds
+			item.AppUsageSessions += sessions
+			if appUsageDeviceDates[deviceID] == nil {
+				appUsageDeviceDates[deviceID] = map[string]struct{}{}
+			}
+			appUsageDeviceDates[deviceID][date] = struct{}{}
+			item.AppUsageDays = len(appUsageDeviceDates[deviceID])
+		}
+		for _, raw := range topApps {
+			appName, appSeconds, appSessions := appUsageSummaryValues(raw)
+			if !isVisibleAppUsageName(appName) || appSeconds <= 0 {
+				continue
+			}
+			total := appTotals[appName]
+			if total == nil {
+				total = &appTotal{AppName: appName, devicePresence: map[string]struct{}{}}
+				appTotals[appName] = total
+			}
+			total.TotalSeconds += appSeconds
+			total.SessionCount += appSessions
+			if deviceID != "" {
+				total.devicePresence[deviceID] = struct{}{}
+				total.DeviceCount = len(total.devicePresence)
+			}
+		}
+	}
+
+	topApps := make([]appTotal, 0, len(appTotals))
+	for _, item := range appTotals {
+		topApps = append(topApps, *item)
+	}
+	sort.Slice(topApps, func(i, j int) bool {
+		return topApps[i].TotalSeconds > topApps[j].TotalSeconds
+	})
+	if len(topApps) > 10 {
+		topApps = topApps[:10]
+	}
+
+	deviceRows := make([]reportDevice, 0, len(reportDevices))
+	for _, item := range reportDevices {
+		deviceRows = append(deviceRows, *item)
+	}
+	sort.Slice(deviceRows, func(i, j int) bool {
+		if deviceRows[i].AppUsageSeconds == deviceRows[j].AppUsageSeconds {
+			return deviceRows[i].Name < deviceRows[j].Name
+		}
+		return deviceRows[i].AppUsageSeconds > deviceRows[j].AppUsageSeconds
+	})
+
+	avgCPU := 0.0
+	avgRAM := 0.0
+	if hardwareSamples > 0 {
+		avgCPU = totalCPU / float64(hardwareSamples)
+		avgRAM = totalRAM / float64(hardwareSamples)
+	}
+	requestedDays := int(startOfDay(to).Sub(startOfDay(from)).Hours()/24) + 1
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"from":           fromDate,
+		"to":             toDate,
+		"requested_days": requestedDays,
+		"generated_at":   now,
+		"coverage": map[string]interface{}{
+			"device_count":            len(reportDevices),
+			"telemetry_devices":       telemetryDevices,
+			"telemetry_events":        totalTelemetryEvents,
+			"app_usage_days":          len(appUsageDates),
+			"browser_entries":         totalBrowserEntries,
+			"retention_days":          currentRetentionDays(),
+			"complete_app_usage_week": len(appUsageDates) >= requestedDays,
+		},
+		"fleet": map[string]interface{}{
+			"online":         onlineCount,
+			"offline":        len(reportDevices) - onlineCount,
+			"warning":        warningCount,
+			"critical":       criticalCount,
+			"avg_cpu":        avgCPU,
+			"avg_ram":        avgRAM,
+			"hardware_count": hardwareSamples,
+		},
+		"app_usage": map[string]interface{}{
+			"total_seconds": totalAppSeconds,
+			"sessions":      totalAppSessions,
+			"top_apps":      topApps,
+		},
+		"devices": deviceRows,
+	})
+}
+
 // DELETE /devices/{device_id}
 func deviceDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
@@ -3768,6 +4172,11 @@ func browserHistoryHandler(w http.ResponseWriter, r *http.Request) {
 func parseDateQuery(raw string, fallback time.Time, endOfDay bool) (time.Time, error) {
 	if raw == "" {
 		return fallback, nil
+	}
+	// Accept an absolute RFC3339 instant (timezone-aware boundary) or a bare
+	// YYYY-MM-DD date (treated as UTC, matching the legacy ingest buckets).
+	if t, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return t, nil
 	}
 	t, err := time.ParseInLocation("2006-01-02", raw, time.UTC)
 	if err != nil {
@@ -5077,6 +5486,7 @@ func registerRoutes(mux *http.ServeMux) {
 		}
 	}))
 	mux.HandleFunc("/devices", corsMiddleware(requireRole(RoleViewer, devicesHandler)))
+	mux.HandleFunc("/reports/weekly", corsMiddleware(requireRole(RoleViewer, weeklyReportHandler)))
 	mux.HandleFunc("/ingest", corsMiddleware(ingestHandler))
 	// Dashboard policy access is role-protected. Agents receive policy through
 	// authenticated device flows, not these browser endpoints.

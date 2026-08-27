@@ -2,14 +2,14 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import type { FormEvent } from 'react';
-import { Device, AppFocusSummary, FocusCacheData, DeviceTab, EnterprisePolicy, DashboardUser, UserRole, HistoryEntry, BrowserHistoryArchiveData, DailyAppUsageData, AgentRelease, AgentBuildJob, AgentRolloutResponse } from '@/types';
-import { API, readHeaders, adminHeaders, isOnline, timeAgo, primaryDisk, deviceDisplayName } from '@/lib/utils';
+import { Device, AppFocusSummary, FocusCacheData, DeviceTab, EnterprisePolicy, DashboardUser, UserRole, HistoryEntry, BrowserHistoryArchiveData, DailyAppUsageData, AgentRelease, AgentBuildJob, AgentRolloutResponse, WeeklyReport } from '@/types';
+import { API, readHeaders, adminHeaders, isOnline, timeAgo, primaryDisk, deviceDisplayName, formatDuration } from '@/lib/utils';
 import DeviceCard from '@/components/DeviceCard';
 import HeaderClock from '@/components/HeaderClock';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import type { BrowserHistoryRange } from '@/components/tabs/BrowserTab';
 
-type PageView = 'dashboard' | 'inventory' | 'inspect' | 'settings' | 'access';
+type PageView = 'dashboard' | 'inventory' | 'reports' | 'inspect' | 'settings' | 'access';
 type StatusFilter = 'all' | 'online' | 'critical' | 'warning' | 'offline';
 type AuthMode = 'login' | 'register';
 type BrowserHistoryCache = Record<string, Partial<Record<BrowserHistoryRange, HistoryEntry[]>>>;
@@ -60,7 +60,7 @@ const RELEASE_TARGETS: Array<{ os: AgentRelease['os']; label: string }> = [
   { os: 'darwin', label: 'macOS' },
 ];
 
-const PAGE_VIEWS: PageView[] = ['dashboard', 'inventory', 'inspect', 'settings', 'access'];
+const PAGE_VIEWS: PageView[] = ['dashboard', 'inventory', 'reports', 'inspect', 'settings', 'access'];
 const DEVICE_TABS: DeviceTab[] = ['overview', 'hardware', 'processes', 'browser', 'services', 'ports', 'apps', 'security', 'focus', 'sysinfo'];
 
 const roleLabel: Record<UserRole, string> = {
@@ -78,18 +78,31 @@ function localDateKey(daysAgo: number): string {
   return `${year}-${month}-${day}`;
 }
 
+// Absolute UTC instants (RFC3339, "Z") for the viewer's *local* calendar day,
+// from 00:00:00.000 to 23:59:59.999. The browser's own timezone offset is baked
+// in by new Date() so "today" always spans local midnight → midnight regardless
+// of where the viewer (or dashboard) is located.
+function localDayBounds(daysAgo: number): { from: string; to: string } {
+  const start = new Date();
+  start.setDate(start.getDate() - daysAgo);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(start);
+  end.setHours(23, 59, 59, 999);
+  return { from: start.toISOString(), to: end.toISOString() };
+}
+
 function browserHistoryQuery(range: BrowserHistoryRange): string {
   const params = new URLSearchParams({ limit: '500' });
   if (range === 'recent') {
-    // Span today + yesterday so admins always see entries regardless of
-    // whether today's S3 archive has been written yet (early in the day).
-    params.set('from', localDateKey(1)); // yesterday
-    params.set('to', localDateKey(0));   // today
+    // "Today" only: the current day, 00:00:00 → 23:59:59.999 (viewer-local).
+    const { from, to } = localDayBounds(0);
+    params.set('from', from);
+    params.set('to', to);
   } else {
     const offset = range === 'last_day' ? 1 : 2;
-    const date = localDateKey(offset);
-    params.set('from', date);
-    params.set('to', date);
+    const { from, to } = localDayBounds(offset);
+    params.set('from', from);
+    params.set('to', to);
   }
   return params.toString();
 }
@@ -205,6 +218,13 @@ const IconSettings = () => (
     <path d="M13 8a5.3 5.3 0 00-.07-.86l1.42-1.08-1.35-2.33-1.66.68a5.1 5.1 0 00-1.48-.86L9.62 1.8H6.38l-.24 1.75a5.1 5.1 0 00-1.48.86L3 3.73 1.65 6.06l1.42 1.08A5.3 5.3 0 003 8c0 .3.02.58.07.86L1.65 9.94 3 12.27l1.66-.68c.44.37.94.66 1.48.86l.24 1.75h3.24l.24-1.75c.54-.2 1.04-.49 1.48-.86l1.66.68 1.35-2.33-1.42-1.08c.05-.28.07-.57.07-.86z"/>
   </svg>
 );
+const IconReport = () => (
+  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 2.5h10v11H3z"/>
+    <path d="M5.5 6.5h5M5.5 9h5M5.5 11.5h2.5"/>
+    <path d="M11 2.5v3h2"/>
+  </svg>
+);
 
 export default function Home() {
   const [authUser, setAuthUser]       = useState<DashboardUser | null>(null);
@@ -247,6 +267,11 @@ export default function Home() {
   const [appUsageDate, setAppUsageDate] = useState(() => localDateKey(0));
   const [dailyAppUsageCache, setDailyAppUsageCache] = useState<DailyAppUsageCache>({});
   const [dailyAppUsageLoading, setDailyAppUsageLoading] = useState<Record<string, boolean>>({});
+  const [weeklyReport, setWeeklyReport] = useState<WeeklyReport | null>(null);
+  const [weeklyReportLoading, setWeeklyReportLoading] = useState(false);
+  const [weeklyReportError, setWeeklyReportError] = useState('');
+  const [weeklyReportFrom, setWeeklyReportFrom] = useState(() => localDateKey(6));
+  const [weeklyReportTo, setWeeklyReportTo] = useState(() => localDateKey(0));
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [currentPage, setCurrentPage] = useState<PageView>('dashboard');
@@ -421,6 +446,24 @@ export default function Home() {
     }
   }, [apiFetch]);
 
+  const fetchWeeklyReport = useCallback(async () => {
+    setWeeklyReportLoading(true);
+    setWeeklyReportError('');
+    try {
+      const params = new URLSearchParams({ from: weeklyReportFrom, to: weeklyReportTo });
+      const res = await apiFetch(`/reports/weekly?${params.toString()}`, { headers: readHeaders() });
+      if (!res.ok) {
+        setWeeklyReportError(await readApiError(res));
+        return;
+      }
+      setWeeklyReport(await res.json());
+    } catch {
+      setWeeklyReportError('Could not load weekly report. Check the API connection and try again.');
+    } finally {
+      setWeeklyReportLoading(false);
+    }
+  }, [apiFetch, weeklyReportFrom, weeklyReportTo]);
+
   const fetchAll = useCallback(async () => {
     try {
       const devRes = await apiFetch('/devices', { headers: readHeaders() });
@@ -506,6 +549,12 @@ export default function Home() {
     const t = window.setTimeout(() => { void fetchAgentReleases(); void fetchAgentBuildJobs(); }, 0);
     return () => window.clearTimeout(t);
   }, [currentPage, fetchAgentBuildJobs, fetchAgentReleases]);
+
+  useEffect(() => {
+    if (!authUser || currentPage !== 'reports') return;
+    const t = window.setTimeout(() => { void fetchWeeklyReport(); }, 0);
+    return () => window.clearTimeout(t);
+  }, [authUser, currentPage, fetchWeeklyReport]);
 
   useEffect(() => {
     if (currentPage !== 'settings' || !canManageReleases) return;
@@ -1028,6 +1077,12 @@ export default function Home() {
   };
   const visibleBuildJobs = showAllBuildHistory ? agentBuildJobs : agentBuildJobs.slice(0, 2);
   const hiddenBuildJobCount = Math.max(0, agentBuildJobs.length - visibleBuildJobs.length);
+  const weeklyCoverageLabel = weeklyReport
+    ? weeklyReport.coverage.complete_app_usage_week
+      ? `${weeklyReport.coverage.app_usage_days}/${weeklyReport.requested_days} app-usage days`
+      : `Partial app-usage data: ${weeklyReport.coverage.app_usage_days}/${weeklyReport.requested_days} days`
+    : '';
+  const weeklyDevices = weeklyReport?.devices ?? [];
 
   const toggleBuildPlatform = (os: AgentRelease['os'], checked: boolean) => {
     setBuildForm(form => ({
@@ -1250,6 +1305,15 @@ export default function Home() {
             </button>
             <button
               type="button"
+              className={`nav-item ${currentPage === 'reports' ? 'active' : ''}`}
+              onClick={() => goToPage('reports')}
+              aria-current={currentPage === 'reports' ? 'page' : undefined}
+            >
+              <IconReport />
+              Reports
+            </button>
+            <button
+              type="button"
               className={`nav-item ${currentPage === 'settings' ? 'active' : ''}`}
               onClick={() => goToPage('settings')}
               aria-current={currentPage === 'settings' ? 'page' : undefined}
@@ -1319,6 +1383,8 @@ export default function Home() {
                     ? 'Access Control'
                   : currentPage === 'inspect'
                     ? selectedDeviceName || 'Inspect Device'
+                  : currentPage === 'reports'
+                    ? 'Weekly Report'
                   : currentPage === 'inventory'
                     ? 'Device Inventory'
                     : 'Telemetry Dashboard'}
@@ -1330,6 +1396,8 @@ export default function Home() {
                   ? 'Create dashboard users and assign roles'
                   : currentPage === 'inspect'
                   ? selectedDevice?.device_id || 'Device telemetry details'
+                  : currentPage === 'reports'
+                  ? 'Seven-day fleet activity and coverage'
                   : currentPage === 'inventory'
                   ? `${devices.length.toLocaleString()} device${devices.length !== 1 ? 's' : ''} registered`
                   : 'Fleet status summary'}
@@ -1352,6 +1420,29 @@ export default function Home() {
                     aria-label="Search devices"
                   />
                 </div>
+              </div>
+            )}
+            {currentPage === 'reports' && (
+              <div className="toolbar report-toolbar">
+                <label>
+                  <span>From</span>
+                  <input
+                    type="date"
+                    value={weeklyReportFrom}
+                    onChange={e => setWeeklyReportFrom(e.target.value)}
+                  />
+                </label>
+                <label>
+                  <span>To</span>
+                  <input
+                    type="date"
+                    value={weeklyReportTo}
+                    onChange={e => setWeeklyReportTo(e.target.value)}
+                  />
+                </label>
+                <button type="button" className="btn" onClick={() => void fetchWeeklyReport()} disabled={weeklyReportLoading}>
+                  {weeklyReportLoading ? 'Loading...' : 'Refresh'}
+                </button>
               </div>
             )}
           </div>
@@ -1881,6 +1972,145 @@ export default function Home() {
                   ))}
                 </div>
               </section>
+            </div>
+          ) : currentPage === 'reports' ? (
+            <div className="reports-layout">
+              {weeklyReportError && <div className="auth-error" role="alert">{weeklyReportError}</div>}
+              {weeklyReportLoading && !weeklyReport ? (
+                <div className="loading" role="status">Building weekly report...</div>
+              ) : weeklyReport ? (
+                <>
+                  <section className="report-strip">
+                    <div>
+                      <span className="kicker">Window</span>
+                      <strong>{weeklyReport.from} to {weeklyReport.to}</strong>
+                    </div>
+                    <div>
+                      <span className="kicker">Coverage</span>
+                      <strong>{weeklyCoverageLabel}</strong>
+                    </div>
+                    <div>
+                      <span className="kicker">Telemetry</span>
+                      <strong>{weeklyReport.coverage.telemetry_events.toLocaleString()} events</strong>
+                    </div>
+                    <div>
+                      <span className="kicker">Browser</span>
+                      <strong>{weeklyReport.coverage.browser_entries.toLocaleString()} entries</strong>
+                    </div>
+                  </section>
+
+                  <section className="dashboard-tiles report-tiles" aria-label="Weekly report summary">
+                    <div className="dashboard-tile">
+                      <span>Devices</span>
+                      <strong>{weeklyReport.coverage.device_count.toLocaleString()}</strong>
+                    </div>
+                    <div className="dashboard-tile tile-online">
+                      <span>Online</span>
+                      <strong>{weeklyReport.fleet.online.toLocaleString()}</strong>
+                    </div>
+                    <div className="dashboard-tile tile-offline">
+                      <span>Offline</span>
+                      <strong>{weeklyReport.fleet.offline.toLocaleString()}</strong>
+                    </div>
+                    <div className="dashboard-tile tile-uptime">
+                      <span>App Usage</span>
+                      <strong>{formatDuration(weeklyReport.app_usage.total_seconds)}</strong>
+                    </div>
+                  </section>
+
+                  <div className="reports-grid">
+                    <section className="settings-panel">
+                      <div className="settings-panel-header">
+                        <div>
+                          <h2>Top Apps</h2>
+                          <p>Aggregated from daily app-usage summaries in the selected window.</p>
+                        </div>
+                      </div>
+                      <div className="report-list">
+                        {weeklyReport.app_usage.top_apps.length ? weeklyReport.app_usage.top_apps.map(app => (
+                          <div key={app.app_name} className="report-list-row">
+                            <div>
+                              <strong>{app.app_name}</strong>
+                              <span>{app.device_count} device{app.device_count === 1 ? '' : 's'} · {app.session_count.toLocaleString()} sessions</span>
+                            </div>
+                            <span className="mono">{formatDuration(app.total_seconds)}</span>
+                          </div>
+                        )) : (
+                          <div className="no-data">No app usage available for this window.</div>
+                        )}
+                      </div>
+                    </section>
+
+                    <section className="settings-panel">
+                      <div className="settings-panel-header">
+                        <div>
+                          <h2>Fleet Snapshot</h2>
+                          <p>Current endpoint posture paired with weekly activity volume.</p>
+                        </div>
+                      </div>
+                      <div className="report-metrics">
+                        <div><span>Average CPU</span><strong>{weeklyReport.fleet.avg_cpu.toFixed(1)}%</strong></div>
+                        <div><span>Average Memory</span><strong>{weeklyReport.fleet.avg_ram.toFixed(1)}%</strong></div>
+                        <div><span>Warning</span><strong>{weeklyReport.fleet.warning}</strong></div>
+                        <div><span>Critical</span><strong>{weeklyReport.fleet.critical}</strong></div>
+                      </div>
+                    </section>
+                  </div>
+
+                  <section className="settings-panel">
+                    <div className="settings-panel-header">
+                      <div>
+                        <h2>Device Breakdown</h2>
+                        <p>Sorted by app usage in the selected report window.</p>
+                      </div>
+                    </div>
+                    <div className="table-wrap">
+                      <table className="data-table report-table">
+                        <thead>
+                          <tr>
+                            <th>Device</th>
+                            <th>Status</th>
+                            <th>Usage Days</th>
+                            <th>App Usage</th>
+                            <th>Browser Entries</th>
+                            <th>Telemetry</th>
+                            <th>Updates</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {weeklyDevices.map(device => (
+                            <tr key={device.device_id} className={`row-${device.state}`}>
+                              <td>
+                                <div className="device-cell-text">
+                                  <strong>{device.name}</strong>
+                                  <span>{device.hostname || device.device_id}</span>
+                                </div>
+                              </td>
+                              <td>
+                                <span className={`status-badge badge-${device.state}`}>
+                                  <span className="dot" />
+                                  {device.state === 'online' ? 'Online' : device.state}
+                                </span>
+                              </td>
+                              <td>{device.app_usage_days}/{weeklyReport.requested_days}</td>
+                              <td>{formatDuration(device.app_usage_seconds)}</td>
+                              <td>{device.browser_entries.toLocaleString()}</td>
+                              <td>{device.telemetry_events.toLocaleString()}</td>
+                              <td>{device.pending_updates.toLocaleString()}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
+                </>
+              ) : (
+                <div className="empty-state">
+                  <span className="empty-icon">📄</span>
+                  <div className="empty-title">No report loaded</div>
+                  <div className="empty-sub">Choose a date window and refresh.</div>
+                </div>
+              )}
             </div>
           ) : loading ? (
             <div className="loading" role="status" aria-label="Loading">
