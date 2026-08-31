@@ -733,24 +733,33 @@ func dailyActivityS3Key(prefix, deviceID, username, date string) string {
 
 func telemetryMetadata(payload map[string]interface{}, archiveResult *TelemetryArchiveResult) bson.M {
 	doc := bson.M{
-		"device_id":             payload["device_id"],
-		"timestamp":             payload["timestamp"],
-		"ingested_at":           payload["ingested_at"],
-		"telemetry_expires_at":  payload["telemetry_expires_at"],
-		"telemetry_archive":     archiveResult,
-		"telemetry_archive_key": archiveResult.Key,
-		"agent_version":         payload["agent_version"],
-		"agent_os":              payload["agent_os"],
-		"agent_arch":            payload["agent_arch"],
-		"username":              payload["username"],
-		"app_usage_archive":     payload["app_usage_archive"],
+		"device_id":               payload["device_id"],
+		"timestamp":               payload["timestamp"],
+		"ingested_at":             payload["ingested_at"],
+		"telemetry_expires_at":    payload["telemetry_expires_at"],
+		"telemetry_archive":       archiveResult,
+		"telemetry_archive_key":   archiveResult.Key,
+		"agent_version":           payload["agent_version"],
+		"agent_os":                payload["agent_os"],
+		"agent_arch":              payload["agent_arch"],
+		"username":                payload["username"],
+		"app_usage_archive":       payload["app_usage_archive"],
+		"browser_history_archive": payload["browser_history_archive"],
 	}
+	var data bson.M
 	if summaries := focusSummariesFromPayload(payload); len(summaries) > 0 {
-		doc["data"] = bson.M{
-			"ActiveWindowTracker": bson.M{
-				"app_summaries": summaries,
-			},
+		data = bson.M{
+			"ActiveWindowTracker": bson.M{"app_summaries": summaries},
 		}
+	}
+	if browserArchive, ok := payload["browser_history_archive"]; ok && browserArchive != nil {
+		if data == nil {
+			data = bson.M{}
+		}
+		data["BrowserHistory"] = bson.M{"archive": browserArchive}
+	}
+	if data != nil {
+		doc["data"] = data
 	}
 	return doc
 }
@@ -1105,6 +1114,10 @@ func appUsageSummaryValues(raw interface{}) (string, float64, int) {
 	default:
 		return "", 0, 0
 	}
+}
+
+func weeklyActivityApps(row bson.M) ([]interface{}, float64, int) {
+	return filterDailyTopApps(row["top_apps"])
 }
 
 func firstNonNil(values ...interface{}) interface{} {
@@ -1589,6 +1602,101 @@ func (a *BrowserHistoryArchive) ReadEntries(ctx context.Context, deviceID string
 		entries = entries[:limit]
 	}
 	return entries, nil
+}
+
+func (a *BrowserHistoryArchive) CountEntries(ctx context.Context, deviceID string, from, to time.Time) (int, error) {
+	if a == nil {
+		return 0, fmt.Errorf("browser history S3 archive is not configured")
+	}
+
+	keys := []string{}
+	for day := startOfDay(from); !day.After(startOfDay(to)); day = day.AddDate(0, 0, 1) {
+		prefix := fmt.Sprintf("%s/device_id=%s/date=%s/", a.prefix, safeS3PathSegment(deviceID), day.Format("2006-01-02"))
+		paginator := s3.NewListObjectsV2Paginator(a.client, &s3.ListObjectsV2Input{
+			Bucket: aws.String(a.bucket),
+			Prefix: aws.String(prefix),
+		})
+		for paginator.HasMorePages() {
+			page, err := paginator.NextPage(ctx)
+			if err != nil {
+				return 0, err
+			}
+			for _, obj := range page.Contents {
+				if obj.Key != nil {
+					keys = append(keys, *obj.Key)
+				}
+			}
+		}
+	}
+	if len(keys) == 0 {
+		return 0, nil
+	}
+
+	jobs := make(chan string)
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		total    int
+		firstErr error
+	)
+	workerCount := telemetryHydrationWorkers
+	if len(keys) < workerCount {
+		workerCount = len(keys)
+	}
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for key := range jobs {
+				raw, err := a.client.GetObject(ctx, &s3.GetObjectInput{
+					Bucket: aws.String(a.bucket),
+					Key:    aws.String(key),
+				})
+				if err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					mu.Unlock()
+					continue
+				}
+				var archive BrowserHistoryArchiveObject
+				decodeErr := json.NewDecoder(raw.Body).Decode(&archive)
+				closeErr := raw.Body.Close()
+				if decodeErr != nil || closeErr != nil {
+					mu.Lock()
+					if firstErr == nil {
+						if decodeErr != nil {
+							firstErr = decodeErr
+						} else {
+							firstErr = closeErr
+						}
+					}
+					mu.Unlock()
+					continue
+				}
+				count := archive.EntryCount
+				if count == 0 && len(archive.Entries) > 0 {
+					count = len(archive.Entries)
+				}
+				mu.Lock()
+				total += count
+				mu.Unlock()
+			}
+		}()
+	}
+	for _, key := range keys {
+		if firstErr != nil {
+			break
+		}
+		jobs <- key
+	}
+	close(jobs)
+	wg.Wait()
+	if firstErr != nil {
+		return total, firstErr
+	}
+	return total, nil
 }
 
 func (a *BrowserHistoryArchive) DeleteDevice(ctx context.Context, deviceID string) (int, error) {
@@ -3681,9 +3789,12 @@ func weeklyReportHandler(w http.ResponseWriter, r *http.Request) {
 	telemetryCursor, err := db.Collection("telemetry").Aggregate(ctx, mongo.Pipeline{
 		{{Key: "$match", Value: bson.M{"ingested_at": bson.M{"$gte": from, "$lte": to}}}},
 		{{Key: "$group", Value: bson.M{
-			"_id":             "$device_id",
-			"events":          bson.M{"$sum": 1},
-			"browser_entries": bson.M{"$sum": bson.M{"$ifNull": bson.A{"$browser_history_archive.entry_count", 0}}},
+			"_id":    "$device_id",
+			"events": bson.M{"$sum": 1},
+			"browser_entries": bson.M{"$sum": bson.M{"$ifNull": bson.A{
+				"$browser_history_archive.entry_count",
+				bson.M{"$ifNull": bson.A{"$data.BrowserHistory.archive.entry_count", 0}},
+			}}},
 		}}},
 	})
 	if err != nil {
@@ -3744,8 +3855,8 @@ func weeklyReportHandler(w http.ResponseWriter, r *http.Request) {
 	for _, row := range activityRows {
 		deviceID, _ := row["device_id"].(string)
 		date, _ := row["date"].(string)
-		topApps, seconds, sessions := filterDailyTopApps(row["top_apps"])
-		if len(topApps) == 0 {
+		apps, seconds, sessions := weeklyActivityApps(row)
+		if len(apps) == 0 {
 			continue
 		}
 		appUsageDates[date] = struct{}{}
@@ -3760,7 +3871,7 @@ func weeklyReportHandler(w http.ResponseWriter, r *http.Request) {
 			appUsageDeviceDates[deviceID][date] = struct{}{}
 			item.AppUsageDays = len(appUsageDeviceDates[deviceID])
 		}
-		for _, raw := range topApps {
+		for _, raw := range apps {
 			appName, appSeconds, appSessions := appUsageSummaryValues(raw)
 			if !isVisibleAppUsageName(appName) || appSeconds <= 0 {
 				continue
@@ -3786,8 +3897,21 @@ func weeklyReportHandler(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(topApps, func(i, j int) bool {
 		return topApps[i].TotalSeconds > topApps[j].TotalSeconds
 	})
-	if len(topApps) > 10 {
-		topApps = topApps[:10]
+
+	if browserArchive != nil {
+		for deviceID, item := range reportDevices {
+			if item.BrowserEntries > 0 {
+				continue
+			}
+			archiveCtx, archiveCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			count, err := browserArchive.CountEntries(archiveCtx, deviceID, from, to)
+			archiveCancel()
+			if err != nil {
+				log.Printf("Weekly report: browser archive read failed for %s: %v", deviceID, err)
+			}
+			item.BrowserEntries = count
+			totalBrowserEntries += item.BrowserEntries
+		}
 	}
 
 	deviceRows := make([]reportDevice, 0, len(reportDevices))

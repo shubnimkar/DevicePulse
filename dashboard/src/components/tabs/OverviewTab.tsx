@@ -144,14 +144,21 @@ export default function OverviewTab({ data, cachedFocus }: Props) {
         <div>
           <div className="section-title">Top Processes</div>
           <div className="mini-proc-list">
+            <div className="mini-proc-header">
+              <span>Process</span>
+              <span>CPU</span>
+              <span>Memory</span>
+            </div>
             {procs.slice(0, 5).map((p, i) => (
               <div key={`${p.pid ?? 'x'}-${p.name}-${i}`} className="mini-proc-row">
-                <span className="mini-proc-name">{p.name}</span>
-                <div className="mini-bars">
+                <span className="mini-proc-name" title={p.name}>{p.name}</span>
+                <div className="mini-metric mini-metric-cpu" aria-label={`CPU ${p.cpu.toFixed(1)}%`}>
                   <div className="mini-bar-track">
                     <div className="mini-bar-fill" style={{ width: `${Math.min(p.cpu, 100)}%`, background: 'var(--yellow)' }} />
                   </div>
                   <span className="mini-pct pct-cpu">{p.cpu.toFixed(1)}%</span>
+                </div>
+                <div className="mini-metric mini-metric-mem" aria-label={`Memory ${p.memory.toFixed(1)}%`}>
                   <div className="mini-bar-track">
                     <div className="mini-bar-fill" style={{ width: `${Math.min(p.memory, 100)}%`, background: 'var(--cyan)' }} />
                   </div>

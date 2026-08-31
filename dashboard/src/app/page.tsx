@@ -12,6 +12,7 @@ import type { BrowserHistoryRange } from '@/components/tabs/BrowserTab';
 type PageView = 'dashboard' | 'inventory' | 'reports' | 'inspect' | 'settings' | 'access';
 type StatusFilter = 'all' | 'online' | 'critical' | 'warning' | 'offline';
 type AuthMode = 'login' | 'register';
+type OnDemandReportType = 'executive' | 'app_usage' | 'device_health';
 type BrowserHistoryCache = Record<string, Partial<Record<BrowserHistoryRange, HistoryEntry[]>>>;
 type DailyAppUsageCache = Record<string, Record<string, DailyAppUsageData>>;
 type AgentPingState = 'idle' | 'checking' | 'online' | 'offline' | 'error';
@@ -272,6 +273,9 @@ export default function Home() {
   const [weeklyReportError, setWeeklyReportError] = useState('');
   const [weeklyReportFrom, setWeeklyReportFrom] = useState(() => localDateKey(6));
   const [weeklyReportTo, setWeeklyReportTo] = useState(() => localDateKey(0));
+  const [onDemandReportType, setOnDemandReportType] = useState<OnDemandReportType>('executive');
+  const [onDemandReportText, setOnDemandReportText] = useState('');
+  const [onDemandReportName, setOnDemandReportName] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [currentPage, setCurrentPage] = useState<PageView>('dashboard');
@@ -454,11 +458,14 @@ export default function Home() {
       const res = await apiFetch(`/reports/weekly?${params.toString()}`, { headers: readHeaders() });
       if (!res.ok) {
         setWeeklyReportError(await readApiError(res));
-        return;
+        return null;
       }
-      setWeeklyReport(await res.json());
+      const data: WeeklyReport = await res.json();
+      setWeeklyReport(data);
+      return data;
     } catch {
       setWeeklyReportError('Could not load weekly report. Check the API connection and try again.');
+      return null;
     } finally {
       setWeeklyReportLoading(false);
     }
@@ -989,6 +996,87 @@ export default function Home() {
     }
   };
 
+  const buildOnDemandReport = (report: WeeklyReport, type: OnDemandReportType): string => {
+    const lines: string[] = [];
+    const title = type === 'app_usage'
+      ? 'Weekly App Usage Report'
+      : type === 'device_health'
+        ? 'Weekly Device Health Report'
+        : 'Weekly Executive Report';
+    lines.push(title);
+    lines.push(`Window: ${report.from} to ${report.to}`);
+    lines.push(`Generated: ${new Date().toLocaleString()}`);
+    lines.push('');
+    lines.push('Coverage');
+    lines.push(`Devices: ${report.coverage.device_count}`);
+    lines.push(`Telemetry devices: ${report.coverage.telemetry_devices}`);
+    lines.push(`Telemetry events: ${report.coverage.telemetry_events}`);
+    lines.push(`App usage days: ${report.coverage.app_usage_days}/${report.requested_days}`);
+    lines.push(`Browser entries: ${report.coverage.browser_entries}`);
+    lines.push('');
+
+    if (type === 'executive') {
+      lines.push('Fleet Summary');
+      lines.push(`Online: ${report.fleet.online}`);
+      lines.push(`Offline: ${report.fleet.offline}`);
+      lines.push(`Warning: ${report.fleet.warning}`);
+      lines.push(`Critical: ${report.fleet.critical}`);
+      lines.push(`Total app usage: ${formatDuration(report.app_usage.total_seconds)}`);
+      lines.push(`Sessions: ${report.app_usage.sessions}`);
+      lines.push('');
+      lines.push('Highest Usage Devices');
+      report.devices.forEach((device, index) => {
+        lines.push(`${index + 1}. ${device.name}: ${formatDuration(device.app_usage_seconds)}, ${device.browser_entries} browser entries, ${device.state}`);
+      });
+    }
+
+    if (type === 'app_usage') {
+      lines.push('Apps Used');
+      report.app_usage.top_apps.forEach((app, index) => {
+        lines.push(`${index + 1}. ${app.app_name}: ${formatDuration(app.total_seconds)}, ${app.session_count} sessions, ${app.device_count} devices`);
+      });
+      lines.push('');
+      lines.push('Device Usage');
+      report.devices.forEach(device => {
+        lines.push(`${device.name}: ${formatDuration(device.app_usage_seconds)}, ${device.app_usage_sessions} sessions, ${device.app_usage_days}/${report.requested_days} days`);
+      });
+    }
+
+    if (type === 'device_health') {
+      lines.push('Fleet Health');
+      lines.push(`Average CPU: ${report.fleet.avg_cpu.toFixed(1)}%`);
+      lines.push(`Average memory: ${report.fleet.avg_ram.toFixed(1)}%`);
+      lines.push('');
+      lines.push('Devices');
+      report.devices.forEach(device => {
+        lines.push(`${device.name}: ${device.state}, CPU ${(device.cpu_percent ?? 0).toFixed(1)}%, RAM ${(device.ram_percent ?? 0).toFixed(1)}%, disk ${(device.disk_percent ?? 0).toFixed(1)}%, pending updates ${device.pending_updates}`);
+      });
+    }
+
+    return lines.join('\n');
+  };
+
+  const generateOnDemandReport = async () => {
+    const needsFreshReport = !weeklyReport || weeklyReport.from !== weeklyReportFrom || weeklyReport.to !== weeklyReportTo;
+    const report = needsFreshReport ? await fetchWeeklyReport() : weeklyReport;
+    if (!report) return;
+    const text = buildOnDemandReport(report, onDemandReportType);
+    const name = `devicepulse-${onDemandReportType}-${report.from}-to-${report.to}.txt`;
+    setOnDemandReportText(text);
+    setOnDemandReportName(name);
+  };
+
+  const downloadOnDemandReport = () => {
+    if (!onDemandReportText || !onDemandReportName) return;
+    const blob = new Blob([onDemandReportText], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = onDemandReportName;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
   // ── Computed stats ────────────────────────────────────────────────────────
 
   const onlineCount  = devices.filter(d => isOnline(d.last_seen)).length;
@@ -1429,7 +1517,11 @@ export default function Home() {
                   <input
                     type="date"
                     value={weeklyReportFrom}
-                    onChange={e => setWeeklyReportFrom(e.target.value)}
+                    onChange={e => {
+                      setWeeklyReportFrom(e.target.value);
+                      setOnDemandReportText('');
+                      setOnDemandReportName('');
+                    }}
                   />
                 </label>
                 <label>
@@ -1437,7 +1529,11 @@ export default function Home() {
                   <input
                     type="date"
                     value={weeklyReportTo}
-                    onChange={e => setWeeklyReportTo(e.target.value)}
+                    onChange={e => {
+                      setWeeklyReportTo(e.target.value);
+                      setOnDemandReportText('');
+                      setOnDemandReportName('');
+                    }}
                   />
                 </label>
                 <button type="button" className="btn" onClick={() => void fetchWeeklyReport()} disabled={weeklyReportLoading}>
@@ -2018,91 +2114,262 @@ export default function Home() {
                     </div>
                   </section>
 
-                  <div className="reports-grid">
-                    <section className="settings-panel">
-                      <div className="settings-panel-header">
-                        <div>
-                          <h2>Top Apps</h2>
-                          <p>Aggregated from daily app-usage summaries in the selected window.</p>
-                        </div>
-                      </div>
-                      <div className="report-list">
-                        {weeklyReport.app_usage.top_apps.length ? weeklyReport.app_usage.top_apps.map(app => (
-                          <div key={app.app_name} className="report-list-row">
-                            <div>
-                              <strong>{app.app_name}</strong>
-                              <span>{app.device_count} device{app.device_count === 1 ? '' : 's'} · {app.session_count.toLocaleString()} sessions</span>
-                            </div>
-                            <span className="mono">{formatDuration(app.total_seconds)}</span>
-                          </div>
-                        )) : (
-                          <div className="no-data">No app usage available for this window.</div>
-                        )}
-                      </div>
-                    </section>
-
-                    <section className="settings-panel">
-                      <div className="settings-panel-header">
-                        <div>
-                          <h2>Fleet Snapshot</h2>
-                          <p>Current endpoint posture paired with weekly activity volume.</p>
-                        </div>
-                      </div>
-                      <div className="report-metrics">
-                        <div><span>Average CPU</span><strong>{weeklyReport.fleet.avg_cpu.toFixed(1)}%</strong></div>
-                        <div><span>Average Memory</span><strong>{weeklyReport.fleet.avg_ram.toFixed(1)}%</strong></div>
-                        <div><span>Warning</span><strong>{weeklyReport.fleet.warning}</strong></div>
-                        <div><span>Critical</span><strong>{weeklyReport.fleet.critical}</strong></div>
-                      </div>
-                    </section>
-                  </div>
-
-                  <section className="settings-panel">
+                  <section className="settings-panel on-demand-panel">
                     <div className="settings-panel-header">
                       <div>
-                        <h2>Device Breakdown</h2>
-                        <p>Sorted by app usage in the selected report window.</p>
+                        <h2>On-Demand Reports</h2>
+                        <p>Generate a focused report from the selected date window.</p>
+                      </div>
+                      {onDemandReportName && <span className="save-state" role="status">Generated</span>}
+                    </div>
+                    <div className="on-demand-controls">
+                      <div className="segmented-control compact" role="group" aria-label="On-demand report type">
+                        {([
+                          ['executive', 'Executive'],
+                          ['app_usage', 'App Usage'],
+                          ['device_health', 'Device Health'],
+                        ] as const).map(([value, label]) => (
+                          <button
+                            key={value}
+                            type="button"
+                            className={onDemandReportType === value ? 'active' : ''}
+                            onClick={() => {
+                              setOnDemandReportType(value);
+                              setOnDemandReportText('');
+                              setOnDemandReportName('');
+                            }}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="on-demand-actions">
+                        <button type="button" className="action-btn primary" onClick={() => void generateOnDemandReport()} disabled={weeklyReportLoading}>
+                          Generate Report
+                        </button>
+                        <button type="button" className="action-btn" onClick={downloadOnDemandReport} disabled={!onDemandReportText}>
+                          Download
+                        </button>
                       </div>
                     </div>
-                    <div className="table-wrap">
-                      <table className="data-table report-table">
-                        <thead>
-                          <tr>
-                            <th>Device</th>
-                            <th>Status</th>
-                            <th>Usage Days</th>
-                            <th>App Usage</th>
-                            <th>Browser Entries</th>
-                            <th>Telemetry</th>
-                            <th>Updates</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {weeklyDevices.map(device => (
-                            <tr key={device.device_id} className={`row-${device.state}`}>
-                              <td>
-                                <div className="device-cell-text">
-                                  <strong>{device.name}</strong>
-                                  <span>{device.hostname || device.device_id}</span>
-                                </div>
-                              </td>
-                              <td>
-                                <span className={`status-badge badge-${device.state}`}>
-                                  <span className="dot" />
-                                  {device.state === 'online' ? 'Online' : device.state}
-                                </span>
-                              </td>
-                              <td>{device.app_usage_days}/{weeklyReport.requested_days}</td>
-                              <td>{formatDuration(device.app_usage_seconds)}</td>
-                              <td>{device.browser_entries.toLocaleString()}</td>
-                              <td>{device.telemetry_events.toLocaleString()}</td>
-                              <td>{device.pending_updates.toLocaleString()}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
+                    {onDemandReportText && (
+                      <pre className="on-demand-preview">{onDemandReportText}</pre>
+                    )}
                   </section>
+
+                  {onDemandReportType === 'executive' && (
+                    <>
+                      <div className="reports-grid">
+                        <section className="settings-panel">
+                          <div className="settings-panel-header">
+                            <div>
+                              <h2>Executive Summary</h2>
+                              <p>High-level fleet activity, coverage and device posture.</p>
+                            </div>
+                          </div>
+                          <div className="report-list">
+                            {weeklyDevices.map(device => (
+                              <div key={device.device_id} className="report-list-row">
+                                <div>
+                                  <strong>{device.name}</strong>
+                                  <span>{device.state} · {device.browser_entries.toLocaleString()} browser entries</span>
+                                </div>
+                                <span className="mono">{formatDuration(device.app_usage_seconds)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </section>
+
+                        <section className="settings-panel">
+                          <div className="settings-panel-header">
+                            <div>
+                              <h2>Fleet Snapshot</h2>
+                              <p>Current endpoint posture paired with weekly activity volume.</p>
+                            </div>
+                          </div>
+                          <div className="report-metrics">
+                            <div><span>Average CPU</span><strong>{weeklyReport.fleet.avg_cpu.toFixed(1)}%</strong></div>
+                            <div><span>Average Memory</span><strong>{weeklyReport.fleet.avg_ram.toFixed(1)}%</strong></div>
+                            <div><span>Warning</span><strong>{weeklyReport.fleet.warning}</strong></div>
+                            <div><span>Critical</span><strong>{weeklyReport.fleet.critical}</strong></div>
+                          </div>
+                        </section>
+                      </div>
+
+                      <section className="settings-panel">
+                        <div className="settings-panel-header">
+                          <div>
+                            <h2>Highest Usage Devices</h2>
+                            <p>Devices sorted by total app usage in this report window.</p>
+                          </div>
+                        </div>
+                        <div className="table-wrap">
+                          <table className="data-table report-table">
+                            <thead>
+                              <tr>
+                                <th>Device</th>
+                                <th>Status</th>
+                                <th>Usage Days</th>
+                                <th>App Usage</th>
+                                <th>Browser Entries</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {weeklyDevices.map(device => (
+                                <tr key={device.device_id} className={`row-${device.state}`}>
+                                  <td>
+                                    <div className="device-cell-text">
+                                      <strong>{device.name}</strong>
+                                      <span>{device.hostname || device.device_id}</span>
+                                    </div>
+                                  </td>
+                                  <td>
+                                    <span className={`status-badge badge-${device.state}`}>
+                                      <span className="dot" />
+                                      {device.state === 'online' ? 'Online' : device.state}
+                                    </span>
+                                  </td>
+                                  <td>{device.app_usage_days}/{weeklyReport.requested_days}</td>
+                                  <td>{formatDuration(device.app_usage_seconds)}</td>
+                                  <td>{device.browser_entries.toLocaleString()}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </section>
+                    </>
+                  )}
+
+                  {onDemandReportType === 'app_usage' && (
+                    <>
+                      <section className="settings-panel">
+                        <div className="settings-panel-header">
+                          <div>
+                            <h2>Apps Used</h2>
+                            <p>Aggregated from indexed daily app-usage summaries in the selected window.</p>
+                          </div>
+                        </div>
+                        <div className="report-list">
+                          {weeklyReport.app_usage.top_apps.length ? weeklyReport.app_usage.top_apps.map(app => (
+                            <div key={app.app_name} className="report-list-row">
+                              <div>
+                                <strong>{app.app_name}</strong>
+                                <span>{app.device_count} device{app.device_count === 1 ? '' : 's'} · {app.session_count.toLocaleString()} sessions</span>
+                              </div>
+                              <span className="mono">{formatDuration(app.total_seconds)}</span>
+                            </div>
+                          )) : (
+                            <div className="no-data">No app usage available for this window.</div>
+                          )}
+                        </div>
+                      </section>
+
+                      <section className="settings-panel">
+                        <div className="settings-panel-header">
+                          <div>
+                            <h2>Device Usage</h2>
+                            <p>Per-device app usage coverage and session volume.</p>
+                          </div>
+                        </div>
+                        <div className="table-wrap">
+                          <table className="data-table report-table">
+                            <thead>
+                              <tr>
+                                <th>Device</th>
+                                <th>Usage Days</th>
+                                <th>App Usage</th>
+                                <th>Sessions</th>
+                                <th>Browser Entries</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {weeklyDevices.map(device => (
+                                <tr key={device.device_id} className={`row-${device.state}`}>
+                                  <td>
+                                    <div className="device-cell-text">
+                                      <strong>{device.name}</strong>
+                                      <span>{device.hostname || device.device_id}</span>
+                                    </div>
+                                  </td>
+                                  <td>{device.app_usage_days}/{weeklyReport.requested_days}</td>
+                                  <td>{formatDuration(device.app_usage_seconds)}</td>
+                                  <td>{device.app_usage_sessions.toLocaleString()}</td>
+                                  <td>{device.browser_entries.toLocaleString()}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </section>
+                    </>
+                  )}
+
+                  {onDemandReportType === 'device_health' && (
+                    <>
+                      <section className="settings-panel">
+                        <div className="settings-panel-header">
+                          <div>
+                            <h2>Device Health</h2>
+                            <p>Current hardware posture and update exposure for reporting devices.</p>
+                          </div>
+                        </div>
+                        <div className="report-metrics health-metrics">
+                          <div><span>Average CPU</span><strong>{weeklyReport.fleet.avg_cpu.toFixed(1)}%</strong></div>
+                          <div><span>Average Memory</span><strong>{weeklyReport.fleet.avg_ram.toFixed(1)}%</strong></div>
+                          <div><span>Warning Devices</span><strong>{weeklyReport.fleet.warning}</strong></div>
+                          <div><span>Critical Devices</span><strong>{weeklyReport.fleet.critical}</strong></div>
+                        </div>
+                      </section>
+
+                      <section className="settings-panel">
+                        <div className="settings-panel-header">
+                          <div>
+                            <h2>Health Breakdown</h2>
+                            <p>Sorted by usage, with current CPU, memory, disk and pending updates.</p>
+                          </div>
+                        </div>
+                        <div className="table-wrap">
+                          <table className="data-table report-table">
+                            <thead>
+                              <tr>
+                                <th>Device</th>
+                                <th>Status</th>
+                                <th>CPU</th>
+                                <th>Memory</th>
+                                <th>Disk</th>
+                                <th>Updates</th>
+                                <th>Telemetry</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {weeklyDevices.map(device => (
+                                <tr key={device.device_id} className={`row-${device.state}`}>
+                                  <td>
+                                    <div className="device-cell-text">
+                                      <strong>{device.name}</strong>
+                                      <span>{device.hostname || device.device_id}</span>
+                                    </div>
+                                  </td>
+                                  <td>
+                                    <span className={`status-badge badge-${device.state}`}>
+                                      <span className="dot" />
+                                      {device.state === 'online' ? 'Online' : device.state}
+                                    </span>
+                                  </td>
+                                  <td>{(device.cpu_percent ?? 0).toFixed(1)}%</td>
+                                  <td>{(device.ram_percent ?? 0).toFixed(1)}%</td>
+                                  <td>{(device.disk_percent ?? 0).toFixed(1)}%</td>
+                                  <td>{device.pending_updates.toLocaleString()}</td>
+                                  <td>{device.telemetry_events.toLocaleString()}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </section>
+                    </>
+                  )}
                 </>
               ) : (
                 <div className="empty-state">
