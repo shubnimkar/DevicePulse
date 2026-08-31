@@ -1,50 +1,26 @@
 'use client';
 
-import { AppFocusSummary, ActiveWindowData, DailyAppUsageData } from '@/types';
-import { formatDuration, isVisibleAppUsageName } from '@/lib/utils';
+import { AppFocusSummary, ActiveWindowData, DailyAppUsageData, DailyPresenceData } from '@/types';
+import { buildAppUsageSummaries, formatDuration } from '@/lib/utils';
 import GaugeBar from '@/components/GaugeBar';
 
 interface Props {
   data?: ActiveWindowData;
   cachedSummaries: AppFocusSummary[];
   dailyUsage?: DailyAppUsageData;
+  dailyPresence?: DailyPresenceData;
   dailyUsageLoading?: boolean;
   usageDate?: string;
   onUsageDateChange?: (date: string) => void;
 }
 
-export default function FocusTab({ data, cachedSummaries, dailyUsage, dailyUsageLoading = false, usageDate, onUsageDateChange }: Props) {
+export default function FocusTab({ data, cachedSummaries, dailyUsage, dailyPresence, dailyUsageLoading = false, usageDate, onUsageDateChange }: Props) {
   if (!data && cachedSummaries.length === 0 && !dailyUsage) {
     return <div className="no-data">No active window data yet.</div>;
   }
 
   const dailyUsers = dailyUsage?.users ?? [];
-  const dailyApps = dailyUsers.flatMap(user => (user.top_apps ?? []).map(app => ({
-    ...app,
-    app_name: app.app_name,
-    total_focus_seconds: app.total_focus_seconds ?? app.total_seconds ?? 0,
-  }))).filter(app => isVisibleAppUsageName(app.app_name));
-  const liveSummaries = (dailyApps.length > 0 ? dailyApps : data?.cumulative_summaries ?? data?.app_summaries ?? [])
-    .filter(app => isVisibleAppUsageName(app.app_name));
-  const merged = new Map<string, AppFocusSummary>();
-  for (const e of liveSummaries) {
-    const seconds = e.total_focus_seconds ?? e.total_seconds ?? 0;
-    const ex = merged.get(e.app_name);
-    if (ex) {
-      ex.total_focus_seconds += seconds;
-      ex.session_count += e.session_count ?? 0;
-    } else {
-      merged.set(e.app_name, { ...e, total_focus_seconds: seconds });
-    }
-  }
-  if (dailyApps.length === 0) {
-    for (const e of cachedSummaries) {
-      const ex = merged.get(e.app_name);
-      if (!ex || e.total_focus_seconds > ex.total_focus_seconds) merged.set(e.app_name, { ...e });
-    }
-  }
-
-  const summaries = Array.from(merged.values()).sort((a, b) => b.total_focus_seconds - a.total_focus_seconds);
+  const { summaries } = buildAppUsageSummaries(data, cachedSummaries, dailyUsage);
   const totalSeconds = summaries.reduce((s, a) => s + a.total_focus_seconds, 0);
   const currentApp = data?.current_app ?? '';
 
@@ -61,6 +37,7 @@ export default function FocusTab({ data, cachedSummaries, dailyUsage, dailyUsage
           <span className="focus-archive-note">Daily archive saved in S3</span>
         )}
         {dailyUsageLoading && <span className="focus-archive-note">Loading daily usage...</span>}
+        {dailyPresence?.first_seen && <span className="focus-archive-note">Connected {new Date(dailyPresence.first_seen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · online {formatDuration(dailyPresence.online_seconds)}</span>}
       </div>
 
       {currentApp && (

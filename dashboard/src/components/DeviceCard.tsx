@@ -1,6 +1,6 @@
 'use client';
 
-import { AppFocusSummary, DailyAppUsageData, Device, DeviceTab, HistoryEntry, UserRole } from '@/types';
+import { AppFocusSummary, DailyAppUsageData, DailyPresenceData, Device, DeviceTab, HistoryEntry, UserRole } from '@/types';
 import { isOnline, timeAgo, metricColor, primaryDisk, deviceDisplayName } from '@/lib/utils';
 import OverviewTab from '@/components/tabs/OverviewTab';
 import HardwareTab from '@/components/tabs/HardwareTab';
@@ -23,6 +23,7 @@ interface Props {
   pingStatus?: { state: 'idle' | 'checking' | 'online' | 'offline' | 'error'; message?: string };
   cachedFocus: AppFocusSummary[];
   dailyAppUsage?: DailyAppUsageData;
+  dailyPresence?: DailyPresenceData;
   dailyAppUsageLoading?: boolean;
   appUsageDate?: string;
   onAppUsageDateChange?: (date: string) => void;
@@ -57,6 +58,7 @@ export default function DeviceCard({
   pingStatus,
   cachedFocus,
   dailyAppUsage,
+  dailyPresence,
   dailyAppUsageLoading = false,
   appUsageDate,
   onAppUsageDateChange,
@@ -193,7 +195,7 @@ export default function DeviceCard({
         aria-labelledby={`device-tab-${tab}`}
         tabIndex={0}
       >
-        {tab === 'overview'  && <OverviewTab data={device.data} cachedFocus={cachedFocus} />}
+        {tab === 'overview'  && <OverviewTab data={device.data} cachedFocus={cachedFocus} dailyAppUsage={dailyAppUsage} />}
         {tab === 'hardware'  && <HardwareTab hw={hw} />}
         {tab === 'processes' && <ProcessesTab procs={procs} />}
         {tab === 'browser'   && (
@@ -224,6 +226,7 @@ export default function DeviceCard({
             data={device.data?.ActiveWindowTracker}
             cachedSummaries={cachedFocus}
             dailyUsage={dailyAppUsage}
+            dailyPresence={dailyPresence}
             dailyUsageLoading={dailyAppUsageLoading}
             usageDate={appUsageDate}
             onUsageDateChange={onAppUsageDateChange}

@@ -1,15 +1,16 @@
 'use client';
 
-import { AppFocusSummary, DeviceData } from '@/types';
-import { formatBytes, formatDuration, metricColor, primaryDisk, isVisibleAppUsageName } from '@/lib/utils';
+import { AppFocusSummary, DailyAppUsageData, DeviceData } from '@/types';
+import { buildAppUsageSummaries, formatBytes, formatDuration, metricColor, primaryDisk, isVisibleAppUsageName } from '@/lib/utils';
 import GaugeBar from '@/components/GaugeBar';
 
 interface Props {
   data?: DeviceData;
   cachedFocus: AppFocusSummary[];
+  dailyAppUsage?: DailyAppUsageData;
 }
 
-export default function OverviewTab({ data, cachedFocus }: Props) {
+export default function OverviewTab({ data, cachedFocus, dailyAppUsage }: Props) {
   const hw      = data?.HardwareStats;
   const cpu     = hw?.cpu;
   const ram     = hw?.ram;
@@ -22,19 +23,8 @@ export default function OverviewTab({ data, cachedFocus }: Props) {
   const osUpd    = data?.OSUpdates?.os_updates;
   const activeWin = data?.ActiveWindowTracker;
 
-  // Merge focus summaries
-  const liveSummaries = (activeWin?.cumulative_summaries ?? activeWin?.app_summaries ?? [])
-    .filter(e => isVisibleAppUsageName(e.app_name));
-  const merged = new Map<string, AppFocusSummary>();
-  for (const e of liveSummaries) merged.set(e.app_name, { ...e });
-  for (const e of cachedFocus) {
-    if (!isVisibleAppUsageName(e.app_name)) continue;
-    const ex = merged.get(e.app_name);
-    if (!ex || e.total_focus_seconds > ex.total_focus_seconds) merged.set(e.app_name, { ...e });
-  }
-  const topApps = Array.from(merged.values())
-    .sort((a, b) => b.total_focus_seconds - a.total_focus_seconds)
-    .slice(0, 4);
+  const { summaries: appSummaries, source: appUsageSource } = buildAppUsageSummaries(activeWin, cachedFocus, dailyAppUsage);
+  const topApps = appSummaries.slice(0, 4);
   const totalFocus = topApps.reduce((s, a) => s + a.total_focus_seconds, 0);
   const runningServices = services.filter(s => s.status === 'running').length;
 
@@ -175,6 +165,9 @@ export default function OverviewTab({ data, cachedFocus }: Props) {
         <div>
           <div className="section-title">
             App Usage
+            {appUsageSource === 'daily' && (
+              <span className="focus-live-tag">Daily archive</span>
+            )}
             {activeWin?.current_app && isVisibleAppUsageName(activeWin.current_app) && (
               <span className="focus-live-tag">
                 <span className="live-dot" />

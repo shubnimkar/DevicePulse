@@ -614,14 +614,10 @@ func (a *DailyActivityArchive) Archive(ctx context.Context, deviceID string, pay
 		doc["updated_at"] = time.Now().UTC()
 
 		allSessions := appendInterfaceSlice(doc["sessions"], sessions)
-		sort.Slice(allSessions, func(i, j int) bool {
-			return activitySessionStart(allSessions[i]).Before(activitySessionStart(allSessions[j]))
-		})
-		// Merge adjacent fragments of the same app so the archive stores real focus
-		// periods instead of one row per sync cycle (the agent soft-closes the
-		// in-progress session on every sync, which used to inflate both the stored
-		// session list and the per-app session counts).
-		allSessions = mergeActivitySessions(allSessions, activitySessionMergeGap)
+		// Normalize before summarizing: queue replay and the Linux root/user
+		// services can produce duplicate or overlapping intervals. Summing those
+		// intervals directly can make one calendar day exceed 24 hours.
+		allSessions = normalizeActivitySessions(allSessions, date, eventTime.Location())
 		doc["sessions"] = allSessions
 		apps, totalS := summarizeActivitySessions(allSessions)
 		doc["apps"] = apps
@@ -734,6 +730,11 @@ func dailyActivityS3Key(prefix, deviceID, username, date string) string {
 func telemetryMetadata(payload map[string]interface{}, archiveResult *TelemetryArchiveResult) bson.M {
 	doc := bson.M{
 		"device_id":               payload["device_id"],
+		"event_id":                payload["event_id"],
+		"agent_session_id":        payload["agent_session_id"],
+		"boot_id":                 payload["boot_id"],
+		"sequence":                payload["sequence"],
+		"collector_role":          payload["collector_role"],
 		"timestamp":               payload["timestamp"],
 		"ingested_at":             payload["ingested_at"],
 		"telemetry_expires_at":    payload["telemetry_expires_at"],
@@ -1253,6 +1254,97 @@ func appendInterfaceSlice(existing interface{}, next []interface{}) []interface{
 	}
 	out = append(out, next...)
 	return out
+}
+
+// normalizeActivitySessions makes archived focus intervals safe to aggregate.
+// Sessions are clipped to the device's local calendar day, exact replays are
+// removed, and overlaps are trimmed so the total cannot exceed wall-clock time.
+func normalizeActivitySessions(sessions []interface{}, date string, loc *time.Location) []interface{} {
+	if loc == nil {
+		loc = time.UTC
+	}
+	dayStart, err := time.ParseInLocation("2006-01-02", date, loc)
+	if err != nil {
+		return mergeActivitySessions(sessions, activitySessionMergeGap)
+	}
+	dayEnd := dayStart.Add(24 * time.Hour)
+
+	type interval struct {
+		app      string
+		start    time.Time
+		end      time.Time
+		deviceID string
+		username string
+	}
+	intervals := make([]interval, 0, len(sessions))
+	seen := make(map[string]struct{}, len(sessions))
+	for _, raw := range sessions {
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		appName, _ := m["app_name"].(string)
+		appName = strings.TrimSpace(appName)
+		if !isVisibleAppUsageName(appName) {
+			continue
+		}
+		start := activitySessionStart(raw)
+		end := activitySessionEnd(raw)
+		if start.IsZero() || end.IsZero() || !end.After(start) {
+			continue
+		}
+		if start.Before(dayStart) {
+			start = dayStart
+		}
+		if end.After(dayEnd) {
+			end = dayEnd
+		}
+		if !end.After(start) {
+			continue
+		}
+		key := fmt.Sprintf("%s|%d|%d", appName, start.UnixNano(), end.UnixNano())
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		item := interval{app: appName, start: start, end: end}
+		item.deviceID, _ = m["device_id"].(string)
+		item.username, _ = m["username"].(string)
+		intervals = append(intervals, item)
+	}
+
+	sort.SliceStable(intervals, func(i, j int) bool {
+		if intervals[i].start.Equal(intervals[j].start) {
+			return intervals[i].end.Before(intervals[j].end)
+		}
+		return intervals[i].start.Before(intervals[j].start)
+	})
+	normalized := make([]interface{}, 0, len(intervals))
+	var occupiedUntil time.Time
+	for _, item := range intervals {
+		if item.start.Before(occupiedUntil) {
+			item.start = occupiedUntil
+		}
+		if !item.end.After(item.start) {
+			continue
+		}
+		entry := map[string]interface{}{
+			"app_name":         item.app,
+			"start_time":       item.start.UTC().Format(time.RFC3339Nano),
+			"end_time":         item.end.UTC().Format(time.RFC3339Nano),
+			"duration_seconds": item.end.Sub(item.start).Seconds(),
+		}
+		if item.deviceID != "" {
+			entry["device_id"] = item.deviceID
+		}
+		if item.username != "" {
+			entry["username"] = item.username
+		}
+		normalized = append(normalized, entry)
+		occupiedUntil = item.end
+	}
+
+	return mergeActivitySessions(normalized, activitySessionMergeGap)
 }
 
 func activitySessionStart(raw interface{}) time.Time {
@@ -3290,6 +3382,26 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 	payload["ingested_at"] = now
 	payload["telemetry_expires_at"] = now.AddDate(0, 0, retentionDays)
 	sanitizeActiveWindowPayload(payload)
+	if eventID, ok := payload["event_id"].(string); ok && strings.TrimSpace(eventID) != "" {
+		var existing bson.M
+		err := mongoClient.Database(dbName).Collection("telemetry").FindOne(ctx, bson.M{"device_id": authDeviceID, "event_id": eventID}, options.FindOne().SetProjection(bson.M{"_id": 1})).Decode(&existing)
+		if err == nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"accepted": true, "duplicate": true, "event_id": eventID})
+			return
+		}
+		if err != mongo.ErrNoDocuments {
+			http.Error(w, "Database error", http.StatusInternalServerError)
+			return
+		}
+	}
+	if role, _ := payload["collector_role"].(string); role == "active_window" {
+		if isLiveCollectorPayload(payload, now) && !claimActiveWindowLease(ctx, authDeviceID, payload) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"accepted": true, "collector_rejected": true, "reason": "another active-window collector is live"})
+			return
+		}
+	}
 
 	if browserArchive != nil {
 		archiveResult, err := browserArchive.Archive(ctx, authDeviceID, payload)
@@ -3338,6 +3450,14 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 		telemetryDoc = telemetryMetadata(payload, telemetryArchiveResult)
 	}
 	if _, err = collTelemetry.InsertOne(ctx, telemetryDoc); err != nil {
+		// A concurrent retry can pass the preflight lookup before the first
+		// request commits. The unique event_id index is the final arbiter; treat
+		// that race as an idempotent success so the agent does not retry forever.
+		if mongo.IsDuplicateKeyError(err) && strings.TrimSpace(fmt.Sprint(payload["event_id"])) != "" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"accepted": true, "duplicate": true, "event_id": payload["event_id"]})
+			return
+		}
 		log.Printf("Error inserting telemetry: %v", err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
@@ -3644,6 +3764,122 @@ func deviceAppUsageHandler(w http.ResponseWriter, r *http.Request) {
 		"date":      date,
 		"users":     rows,
 	})
+}
+
+// GET /devices/{device_id}/presence?date=YYYY-MM-DD
+// Presence is reconstructed from event timestamps, not ingestion time, so
+// queued telemetry does not make an offline interval appear online.
+func devicePresenceHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+	if len(parts) != 3 || parts[0] != "devices" || parts[1] == "" || parts[2] != "presence" {
+		http.Error(w, "Invalid URL", http.StatusBadRequest)
+		return
+	}
+	deviceID, date := parts[1], strings.TrimSpace(r.URL.Query().Get("date"))
+	if _, err := time.Parse("2006-01-02", date); err != nil {
+		http.Error(w, "Invalid date; use YYYY-MM-DD", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cursor, err := mongoClient.Database(dbName).Collection("telemetry").Find(ctx, bson.M{"device_id": deviceID, "timestamp": bson.M{"$regex": "^" + regexp.QuoteMeta(date)}}, options.Find().SetProjection(bson.M{"timestamp": 1}))
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	defer cursor.Close(ctx)
+	seen := map[int64]bool{}
+	points := []time.Time{}
+	var row bson.M
+	for cursor.Next(ctx) {
+		if err := cursor.Decode(&row); err != nil {
+			continue
+		}
+		t, ok := bsonTime(row["timestamp"])
+		if !ok {
+			continue
+		}
+		if t.Format("2006-01-02") != date || seen[t.UnixNano()] {
+			continue
+		}
+		seen[t.UnixNano()] = true
+		points = append(points, t)
+	}
+	if err := cursor.Err(); err != nil {
+		http.Error(w, "Parsing error", http.StatusInternalServerError)
+		return
+	}
+	sort.Slice(points, func(i, j int) bool { return points[i].Before(points[j]) })
+	var onlineSeconds float64
+	for i := 1; i < len(points); i++ {
+		gap := points[i].Sub(points[i-1])
+		if gap > 2*time.Minute {
+			gap = 2 * time.Minute
+		}
+		if gap > 0 {
+			onlineSeconds += gap.Seconds()
+		}
+	}
+	var first, last interface{}
+	if len(points) > 0 {
+		first, last = points[0], points[len(points)-1]
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"device_id": deviceID, "date": date, "first_seen": first, "last_seen": last, "online_seconds": onlineSeconds, "heartbeat_count": len(points), "connection_count": presenceConnections(points)})
+}
+
+// Queued telemetry may arrive long after it was collected. Do not reject that
+// historical data because a newer collector currently owns the live lease.
+func isLiveCollectorPayload(payload map[string]interface{}, now time.Time) bool {
+	stamp, ok := payload["timestamp"].(string)
+	if !ok {
+		return true
+	}
+	eventTime, err := time.Parse(time.RFC3339Nano, stamp)
+	if err != nil {
+		return true
+	}
+	age := now.Sub(eventTime)
+	return age >= -2*time.Minute && age <= 2*time.Minute
+}
+
+// claimActiveWindowLease permits one active-window collector per device. The
+// lease expires quickly so a crashed user-session service can be replaced.
+func claimActiveWindowLease(ctx context.Context, deviceID string, payload map[string]interface{}) bool {
+	collectorID, _ := payload["agent_session_id"].(string)
+	if strings.TrimSpace(collectorID) == "" {
+		return true
+	}
+	now := time.Now()
+	res, err := mongoClient.Database(dbName).Collection("devices").UpdateOne(ctx,
+		bson.M{"device_id": deviceID, "$or": []bson.M{
+			{"active_window_lease_until": bson.M{"$lte": now}},
+			{"active_window_lease_until": bson.M{"$exists": false}},
+			{"active_window_lease_id": collectorID},
+		}},
+		bson.M{"$set": bson.M{
+			"active_window_lease_id":    collectorID,
+			"active_window_lease_until": now.Add(2 * time.Minute),
+		}},
+	)
+	return err == nil && res.MatchedCount == 1
+}
+
+func presenceConnections(points []time.Time) int {
+	if len(points) == 0 {
+		return 0
+	}
+	connections := 1
+	for i := 1; i < len(points); i++ {
+		if points[i].Sub(points[i-1]) > 2*time.Minute {
+			connections++
+		}
+	}
+	return connections
 }
 
 // GET /reports/weekly?from=YYYY-MM-DD&to=YYYY-MM-DD
@@ -5601,6 +5837,8 @@ func registerRoutes(mux *http.ServeMux) {
 			requireRole(RoleAdmin, devicePingHandler)(w, r)
 		} else if strings.HasSuffix(r.URL.Path, "/app-usage") {
 			requireRole(RoleViewer, deviceAppUsageHandler)(w, r)
+		} else if strings.HasSuffix(r.URL.Path, "/presence") {
+			requireRole(RoleViewer, devicePresenceHandler)(w, r)
 		} else if strings.HasSuffix(r.URL.Path, "/commands") {
 			deviceCommandsHandler(w, r)
 		} else if r.Method == http.MethodDelete {
@@ -5679,6 +5917,11 @@ func ensureIndexes() error {
 			Options: options.Index().SetExpireAfterSeconds(0).SetSparse(true),
 		}); err != nil {
 		errs = append(errs, fmt.Errorf("telemetry TTL index: %w", err))
+	}
+	if _, err := db.Collection("telemetry").Indexes().CreateOne(ctx,
+		mongo.IndexModel{Keys: bson.D{{Key: "device_id", Value: 1}, {Key: "event_id", Value: 1}}, Options: options.Index().SetUnique(true).SetSparse(true)},
+	); err != nil {
+		errs = append(errs, fmt.Errorf("telemetry event id index: %w", err))
 	}
 
 	activityIdx := []mongo.IndexModel{

@@ -150,6 +150,16 @@ export interface DailyAppUsageData {
   users: DailyAppUsageUser[];
 }
 
+export interface DailyPresenceData {
+  device_id: string;
+  date: string;
+  first_seen?: string;
+  last_seen?: string;
+  online_seconds: number;
+  heartbeat_count: number;
+  connection_count: number;
+}
+
 export interface BrowserHistoryArchiveData {
   device_id: string;
   from: string;

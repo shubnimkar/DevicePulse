@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import type { FormEvent } from 'react';
-import { Device, AppFocusSummary, FocusCacheData, DeviceTab, EnterprisePolicy, DashboardUser, UserRole, HistoryEntry, BrowserHistoryArchiveData, DailyAppUsageData, AgentRelease, AgentBuildJob, AgentRolloutResponse, WeeklyReport } from '@/types';
+import { Device, AppFocusSummary, FocusCacheData, DeviceTab, EnterprisePolicy, DashboardUser, UserRole, HistoryEntry, BrowserHistoryArchiveData, DailyAppUsageData, DailyPresenceData, AgentRelease, AgentBuildJob, AgentRolloutResponse, WeeklyReport } from '@/types';
 import { API, readHeaders, adminHeaders, isOnline, timeAgo, primaryDisk, deviceDisplayName, formatDuration } from '@/lib/utils';
 import DeviceCard from '@/components/DeviceCard';
 import HeaderClock from '@/components/HeaderClock';
@@ -15,6 +15,7 @@ type AuthMode = 'login' | 'register';
 type OnDemandReportType = 'executive' | 'app_usage' | 'device_health';
 type BrowserHistoryCache = Record<string, Partial<Record<BrowserHistoryRange, HistoryEntry[]>>>;
 type DailyAppUsageCache = Record<string, Record<string, DailyAppUsageData>>;
+type DailyPresenceCache = Record<string, Record<string, DailyPresenceData>>;
 type AgentPingState = 'idle' | 'checking' | 'online' | 'offline' | 'error';
 type AgentPingStatus = Record<string, { state: AgentPingState; message?: string }>;
 type AgentBuildForm = { version: string; api_url: string; platforms: AgentRelease['os'][]; archs: string[] };
@@ -268,6 +269,7 @@ export default function Home() {
   const [appUsageDate, setAppUsageDate] = useState(() => localDateKey(0));
   const [dailyAppUsageCache, setDailyAppUsageCache] = useState<DailyAppUsageCache>({});
   const [dailyAppUsageLoading, setDailyAppUsageLoading] = useState<Record<string, boolean>>({});
+  const [dailyPresenceCache, setDailyPresenceCache] = useState<DailyPresenceCache>({});
   const [weeklyReport, setWeeklyReport] = useState<WeeklyReport | null>(null);
   const [weeklyReportLoading, setWeeklyReportLoading] = useState(false);
   const [weeklyReportError, setWeeklyReportError] = useState('');
@@ -448,6 +450,14 @@ export default function Home() {
     } finally {
       if (showLoader) setDailyAppUsageLoading(state => ({ ...state, [deviceId]: false }));
     }
+  }, [apiFetch]);
+
+  const fetchDailyPresence = useCallback(async (deviceId: string, date: string) => {
+    try {
+      const res = await apiFetch(`/devices/${encodeURIComponent(deviceId)}/presence?date=${encodeURIComponent(date)}`, { headers: readHeaders() });
+      const data: DailyPresenceData = res.ok ? await res.json() : { device_id: deviceId, date, online_seconds: 0, heartbeat_count: 0, connection_count: 0 };
+      setDailyPresenceCache(cache => ({ ...cache, [deviceId]: { ...(cache[deviceId] ?? {}), [date]: data } }));
+    } catch {}
   }, [apiFetch]);
 
   const fetchWeeklyReport = useCallback(async () => {
@@ -979,7 +989,6 @@ export default function Home() {
       writeNavigationState('inspect', { deviceId: id, tab, replace: true });
     }
     if (tab === 'browser') void fetchBrowserHistory(id, browserHistoryRange);
-    if (tab === 'focus') void fetchDailyAppUsage(id, appUsageDate);
   };
 
   const updateBrowserHistoryRange = (range: BrowserHistoryRange) => {
@@ -991,10 +1000,15 @@ export default function Home() {
 
   const updateAppUsageDate = (date: string) => {
     setAppUsageDate(date);
-    if (selectedDeviceId && getTab(selectedDeviceId) === 'focus') {
-      void fetchDailyAppUsage(selectedDeviceId, date);
-    }
   };
+
+  useEffect(() => {
+    if (!authUser || currentPage !== 'inspect' || !selectedDeviceId) return;
+    const tab = activeTab[selectedDeviceId] ?? 'overview';
+    if (tab !== 'overview' && tab !== 'focus') return;
+    void fetchDailyAppUsage(selectedDeviceId, appUsageDate, { showLoader: false });
+    void fetchDailyPresence(selectedDeviceId, appUsageDate);
+  }, [activeTab, appUsageDate, authUser, currentPage, fetchDailyAppUsage, fetchDailyPresence, selectedDeviceId]);
 
   const buildOnDemandReport = (report: WeeklyReport, type: OnDemandReportType): string => {
     const lines: string[] = [];
@@ -1092,6 +1106,9 @@ export default function Home() {
     : false;
   const selectedDailyAppUsage = selectedDevice
     ? dailyAppUsageCache[selectedDevice.device_id]?.[appUsageDate]
+    : undefined;
+  const selectedDailyPresence = selectedDevice
+    ? dailyPresenceCache[selectedDevice.device_id]?.[appUsageDate]
     : undefined;
 
   const deviceRisk = (device: Device) => {
@@ -2395,6 +2412,7 @@ export default function Home() {
                   pingStatus={agentPingStatus[selectedDevice.device_id]}
                   cachedFocus={focusCache[selectedDevice.device_id] ?? []}
                   dailyAppUsage={selectedDailyAppUsage}
+                  dailyPresence={selectedDailyPresence}
                   dailyAppUsageLoading={Boolean(dailyAppUsageLoading[selectedDevice.device_id])}
                   appUsageDate={appUsageDate}
                   onAppUsageDateChange={updateAppUsageDate}

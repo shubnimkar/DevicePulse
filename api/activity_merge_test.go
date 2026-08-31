@@ -90,3 +90,37 @@ func TestMergeActivitySessionsDropsSystemAppsAndJunk(t *testing.T) {
 		t.Fatalf("expected the code session, got %+v", m)
 	}
 }
+
+func TestNormalizeActivitySessionsClipsDeduplicatesAndRemovesOverlap(t *testing.T) {
+	day := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+	session := func(app string, start, end time.Time) map[string]interface{} {
+		return map[string]interface{}{
+			"app_name":   app,
+			"start_time": start.Format(time.RFC3339Nano),
+			"end_time":   end.Format(time.RFC3339Nano),
+		}
+	}
+	input := []interface{}{
+		session("chrome", day.Add(-time.Hour), day.Add(2*time.Hour)),
+		session("chrome", day.Add(-time.Hour), day.Add(2*time.Hour)),
+		session("code", day.Add(time.Hour), day.Add(3*time.Hour)),
+	}
+	got := normalizeActivitySessions(input, "2026-08-31", time.UTC)
+	_, total := summarizeActivitySessions(got)
+	if total != 3*3600 {
+		t.Fatalf("expected 3h non-overlapping total, got %v seconds (%#v)", total, got)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected duplicate removal and overlap trimming to leave 2 sessions, got %d", len(got))
+	}
+}
+
+func TestIsLiveCollectorPayloadPreservesQueuedTelemetry(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	if !isLiveCollectorPayload(map[string]interface{}{"timestamp": now.Add(-10 * time.Second).Format(time.RFC3339Nano)}, now) {
+		t.Fatal("recent payload should be treated as live")
+	}
+	if isLiveCollectorPayload(map[string]interface{}{"timestamp": now.Add(-10 * time.Minute).Format(time.RFC3339Nano)}, now) {
+		t.Fatal("queued payload should bypass the live collector lease")
+	}
+}

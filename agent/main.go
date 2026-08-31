@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -165,9 +167,15 @@ func runAgent() {
 	procMon := &collector.ProcessMonitor{}
 	browserHist := collector.NewBrowserHistory(filepath.Join(dataDir, "browser_history_state.json"))
 	hwStats := &collector.HardwareStats{}
-	activeWin := &collector.ActiveWindowTracker{}
-	if err := activeWin.Start(); err != nil {
-		log.Printf("ActiveWindowTracker failed to start: %v", err)
+	// Linux uses a separate user-session service for active-window data. The
+	// root service cannot reliably see the user's GUI session and running both
+	// collectors would submit duplicate focus intervals.
+	var activeWin *collector.ActiveWindowTracker
+	if runtime.GOOS != "linux" {
+		activeWin = &collector.ActiveWindowTracker{}
+		if err := activeWin.Start(); err != nil {
+			log.Printf("ActiveWindowTracker failed to start: %v", err)
+		}
 	}
 
 	// Fast collectors — run every sync cycle.
@@ -230,6 +238,9 @@ func runAgent() {
 	}()
 
 	// 5. Main Collection Loop
+	agentSessionID := newAgentSessionID()
+	bootID := readBootID()
+	var sequence uint64
 	for {
 		policyMu.RLock()
 		shouldCollectSystem := collectSystemInfo
@@ -306,7 +317,7 @@ func runAgent() {
 			}
 		}
 
-		if shouldCollectActiveWindow {
+		if shouldCollectActiveWindow && activeWin != nil {
 			if activeWinPayload, err := activeWin.Collect(); err != nil {
 				log.Printf("Error collecting active window: %v", err)
 			} else {
@@ -329,14 +340,20 @@ func runAgent() {
 		}
 
 		finalPayload := map[string]interface{}{
-			"device_id":     deviceID,
-			"timestamp":     time.Now().Format(time.RFC3339),
-			"username":      currentUsername(),
-			"agent_version": agentVersion,
-			"agent_os":      runtime.GOOS,
-			"agent_arch":    runtime.GOARCH,
-			"data":          dataMap,
+			"device_id":        deviceID,
+			"event_id":         fmt.Sprintf("%s-%d", agentSessionID, sequence),
+			"agent_session_id": agentSessionID,
+			"boot_id":          bootID,
+			"sequence":         sequence,
+			"timestamp":        time.Now().Format(time.RFC3339),
+			"username":         currentUsername(),
+			"agent_version":    agentVersion,
+			"agent_os":         runtime.GOOS,
+			"agent_arch":       runtime.GOARCH,
+			"collector_role":   map[bool]string{true: "active_window", false: "system"}[activeWin != nil],
+			"data":             dataMap,
 		}
+		sequence++
 
 		if err := q.Push(finalPayload); err != nil {
 			log.Printf("Failed to push to local queue: %v", err)
@@ -376,6 +393,23 @@ func currentUsername() string {
 	for _, key := range []string{"USER", "USERNAME", "LOGNAME"} {
 		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 			return v
+		}
+	}
+	return "unknown"
+}
+
+func newAgentSessionID() string {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("session-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(buf)
+}
+
+func readBootID() string {
+	if data, err := os.ReadFile("/proc/sys/kernel/random/boot_id"); err == nil {
+		if value := strings.TrimSpace(string(data)); value != "" {
+			return value
 		}
 	}
 	return "unknown"
@@ -748,6 +782,9 @@ func runWindowOnlyMode() {
 	// Use the same sync interval as the main service (default 10s).
 	// Policy poller is not started here — the root service handles that.
 	interval := 10 * time.Second
+	agentSessionID := newAgentSessionID()
+	bootID := readBootID()
+	var sequence uint64
 
 	for {
 		payload, err := activeWin.Collect()
@@ -757,16 +794,22 @@ func runWindowOnlyMode() {
 			continue
 		}
 		finalPayload := map[string]interface{}{
-			"device_id":     deviceID,
-			"timestamp":     time.Now().Format(time.RFC3339),
-			"username":      currentUsername(),
-			"agent_version": agentVersion,
-			"agent_os":      runtime.GOOS,
-			"agent_arch":    runtime.GOARCH,
+			"device_id":        deviceID,
+			"event_id":         fmt.Sprintf("%s-%d", agentSessionID, sequence),
+			"agent_session_id": agentSessionID,
+			"boot_id":          bootID,
+			"sequence":         sequence,
+			"timestamp":        time.Now().Format(time.RFC3339),
+			"username":         currentUsername(),
+			"agent_version":    agentVersion,
+			"agent_os":         runtime.GOOS,
+			"agent_arch":       runtime.GOARCH,
+			"collector_role":   "active_window",
 			"data": map[string]interface{}{
 				activeWin.Name(): payload,
 			},
 		}
+		sequence++
 
 		if err := q.Push(finalPayload); err != nil {
 			log.Printf("window_only: queue push error: %v", err)

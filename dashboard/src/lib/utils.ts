@@ -1,6 +1,6 @@
 // ─── Utility helpers ──────────────────────────────────────────────────────────
 
-import type { Device, DiskStat } from '@/types';
+import type { ActiveWindowData, AppFocusSummary, DailyAppUsageData, Device, DiskStat } from '@/types';
 
 const rawAPI = process.env.NEXT_PUBLIC_API_URL || '/api';
 export const API = rawAPI.endsWith('/') ? rawAPI.slice(0, -1) : rawAPI;
@@ -89,6 +89,54 @@ export function isVisibleAppUsageName(name: string): boolean {
   if (!key) return false;
   if (IGNORED_APP_USAGE_NAMES.has(key)) return false;
   return !key.startsWith('devicepulse-');
+}
+
+export function buildAppUsageSummaries(
+  activeWindow?: ActiveWindowData,
+  cachedSummaries: AppFocusSummary[] = [],
+  dailyUsage?: DailyAppUsageData,
+): { summaries: AppFocusSummary[]; source: 'daily' | 'live' | 'empty' } {
+  const dailyApps = dailyUsage?.users.flatMap(user => (user.top_apps ?? []).map(app => ({
+    ...app,
+    app_name: app.app_name,
+    total_focus_seconds: app.total_focus_seconds ?? app.total_seconds ?? 0,
+    session_count: app.session_count ?? 0,
+  }))).filter(app => isVisibleAppUsageName(app.app_name)) ?? [];
+
+  const sourceApps = dailyApps.length > 0
+    ? dailyApps
+    : (activeWindow?.cumulative_summaries ?? activeWindow?.app_summaries ?? [])
+      .filter(app => isVisibleAppUsageName(app.app_name));
+
+  const merged = new Map<string, AppFocusSummary>();
+  for (const app of sourceApps) {
+    const seconds = app.total_focus_seconds ?? app.total_seconds ?? 0;
+    const existing = merged.get(app.app_name);
+    if (existing) {
+      existing.total_focus_seconds += seconds;
+      existing.session_count += app.session_count ?? 0;
+    } else {
+      merged.set(app.app_name, {
+        ...app,
+        total_focus_seconds: seconds,
+        session_count: app.session_count ?? 0,
+      });
+    }
+  }
+
+  if (dailyApps.length === 0) {
+    for (const app of cachedSummaries.filter(app => isVisibleAppUsageName(app.app_name))) {
+      const existing = merged.get(app.app_name);
+      if (!existing || app.total_focus_seconds > existing.total_focus_seconds) {
+        merged.set(app.app_name, { ...app });
+      }
+    }
+  }
+
+  return {
+    summaries: Array.from(merged.values()).sort((a, b) => b.total_focus_seconds - a.total_focus_seconds),
+    source: dailyApps.length > 0 ? 'daily' : merged.size > 0 ? 'live' : 'empty',
+  };
 }
 
 export function deviceDisplayName(device?: Device | null): string {
