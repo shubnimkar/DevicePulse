@@ -81,6 +81,16 @@ body {
 @keyframes spin  { to { transform: rotate(360deg); } }
 @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
 @keyframes fadeUp { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+@keyframes radarSweep { to { transform: rotate(360deg); } }
+@keyframes radarPing {
+  0% { box-shadow: 0 0 0 0 currentColor; }
+  70% { box-shadow: 0 0 0 12px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+@keyframes signalFlow {
+  from { background-position: 0 0; }
+  to { background-position: 32px 0; }
+}
 
 /* ── App Shell ───────────────────────────────────────────────────────────────── */
 .app-shell {
@@ -829,6 +839,303 @@ body {
 .dashboard-tile.tile-offline strong { color: var(--red); }
 .dashboard-tile.tile-uptime { border-color: var(--blue-border); }
 .dashboard-tile.tile-uptime strong { color: var(--blue); }
+
+.command-panel {
+  display: grid;
+  grid-template-columns: minmax(360px, 1.15fr) minmax(320px, 0.85fr);
+  gap: 0.875rem;
+  margin-bottom: 1.25rem;
+}
+
+.command-radar,
+.command-side {
+  position: relative;
+  overflow: hidden;
+  min-height: 336px;
+  border: 1px solid rgba(34, 211, 238, 0.2);
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(135deg, rgba(34, 211, 238, 0.08), transparent 36%),
+    radial-gradient(circle at 72% 24%, rgba(16, 185, 129, 0.14), transparent 32%),
+    linear-gradient(180deg, rgba(17, 24, 39, 0.96), rgba(10, 14, 23, 0.98));
+  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.command-radar::before,
+.command-side::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(148, 163, 184, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.045) 1px, transparent 1px);
+  background-size: 28px 28px;
+  mask-image: linear-gradient(to bottom, black, transparent 92%);
+}
+
+.radar-header {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1rem 0;
+}
+
+.radar-header div {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.radar-header span,
+.hot-list-title span {
+  color: var(--text-3);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.radar-header strong {
+  color: var(--text-1);
+  font-size: 1.05rem;
+  line-height: 1.1;
+}
+
+.command-state {
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--green);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  padding: 0.4rem 0.7rem;
+  text-transform: uppercase;
+}
+
+.command-state.state-watch { color: var(--yellow); }
+.command-state.state-critical { color: var(--red); }
+
+.radar-stage {
+  position: absolute;
+  inset: 3.6rem 1rem 1rem;
+  display: grid;
+  place-items: center;
+  min-height: 230px;
+}
+
+.radar-stage::before {
+  content: '';
+  position: absolute;
+  width: min(78%, 430px);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle, rgba(34, 211, 238, 0.16) 0 2px, transparent 3px 100%),
+    radial-gradient(circle, rgba(34, 211, 238, 0.08), rgba(16, 185, 129, 0.03) 48%, transparent 70%);
+  border: 1px solid rgba(34, 211, 238, 0.14);
+  box-shadow: inset 0 0 48px rgba(34, 211, 238, 0.08), 0 0 42px rgba(34, 211, 238, 0.08);
+}
+
+.radar-ring {
+  position: absolute;
+  width: min(78%, 430px);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  border: 1px solid rgba(34, 211, 238, 0.17);
+}
+
+.ring-one { scale: 0.36; }
+.ring-two { scale: 0.64; }
+.ring-three { scale: 0.9; }
+
+.radar-sweep {
+  position: absolute;
+  z-index: 1;
+  width: min(78%, 430px);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: conic-gradient(from 0deg, rgba(34, 211, 238, 0.36), rgba(16, 185, 129, 0.08) 42deg, transparent 76deg);
+  animation: radarSweep 4.5s linear infinite;
+  mask-image: radial-gradient(circle, black 0 70%, transparent 71%);
+}
+
+.radar-core {
+  position: relative;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 86px;
+  height: 86px;
+  border: 1px solid rgba(59, 130, 246, 0.42);
+  border-radius: 50%;
+  background: rgba(10, 14, 23, 0.72);
+  box-shadow: 0 0 36px rgba(59, 130, 246, 0.2), inset 0 0 26px rgba(34, 211, 238, 0.1);
+}
+
+.radar-core strong {
+  color: var(--blue);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 1.35rem;
+  line-height: 1;
+}
+
+.radar-core span {
+  color: var(--text-3);
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.radar-blip {
+  position: absolute;
+  z-index: 4;
+  width: 15px;
+  height: 15px;
+  translate: -50% -50%;
+  border: 2px solid rgba(10, 14, 23, 0.92);
+  border-radius: 50%;
+  background: currentColor;
+  color: var(--green);
+  cursor: pointer;
+  animation: radarPing 2.4s ease-out infinite;
+}
+
+.radar-blip:hover,
+.radar-blip:focus-visible {
+  scale: 1.35;
+}
+
+.blip-warning { color: var(--yellow); }
+.blip-critical,
+.blip-offline { color: var(--red); }
+
+.command-side {
+  display: grid;
+  align-content: start;
+  gap: 0.875rem;
+  padding: 1rem;
+}
+
+.signal-stack,
+.hot-list {
+  position: relative;
+  z-index: 2;
+}
+
+.signal-stack {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.signal-row {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 44px;
+  align-items: center;
+  gap: 0.625rem;
+}
+
+.signal-row span,
+.signal-row strong {
+  color: var(--text-2);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.signal-row strong {
+  color: var(--text-1);
+  text-align: right;
+}
+
+.signal-track {
+  overflow: hidden;
+  height: 9px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 999px;
+  background: rgba(10, 14, 23, 0.72);
+}
+
+.signal-track i {
+  display: block;
+  height: 100%;
+  min-width: 7px;
+  border-radius: inherit;
+  background-size: 32px 100%;
+  animation: signalFlow 1.25s linear infinite;
+}
+
+.signal-cpu { background-image: repeating-linear-gradient(90deg, var(--cyan) 0 12px, #67e8f9 12px 16px); }
+.signal-ram { background-image: repeating-linear-gradient(90deg, var(--blue) 0 12px, #93c5fd 12px 16px); }
+.signal-disk { background-image: repeating-linear-gradient(90deg, var(--yellow) 0 12px, #fcd34d 12px 16px); }
+.signal-link { background-image: repeating-linear-gradient(90deg, var(--green) 0 12px, #6ee7b7 12px 16px); }
+
+.hot-list {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.hot-list-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.125rem;
+}
+
+.hot-list-title strong {
+  color: var(--cyan);
+  font-size: 0.78rem;
+}
+
+.hot-device {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 40px;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid rgba(148, 163, 184, 0.11);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.035);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.hot-device:hover {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(34, 211, 238, 0.24);
+}
+
+.hot-device span {
+  overflow: hidden;
+  color: var(--text-1);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hot-device strong {
+  color: var(--green);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.78rem;
+}
+
+.hot-warning strong { color: var(--yellow); }
+.hot-critical strong,
+.hot-offline strong { color: var(--red); }
+.hot-empty {
+  cursor: default;
+  opacity: 0.72;
+}
 
 .toolbar {
   display: flex;
@@ -2763,6 +3070,10 @@ body {
   .release-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .release-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dashboard-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .command-panel { grid-template-columns: 1fr; }
+  .command-radar,
+  .command-side { min-height: 300px; }
+  .command-side { min-height: auto; }
   .report-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .reports-grid { grid-template-columns: 1fr; }
   .health-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -2792,6 +3103,17 @@ body {
   .resource-row { grid-template-columns: repeat(2, 1fr); }
   .sysinfo-grid { grid-template-columns: repeat(2, 1fr); }
   .dashboard-tiles { grid-template-columns: 1fr; }
+  .command-panel { gap: 0.75rem; }
+  .command-radar { min-height: 292px; }
+  .radar-header { flex-direction: column; }
+  .command-state { width: fit-content; }
+  .radar-stage { inset: 5.7rem 0.75rem 0.75rem; }
+  .radar-core {
+    width: 74px;
+    height: 74px;
+  }
+  .radar-core strong { font-size: 1.15rem; }
+  .signal-row { grid-template-columns: 38px minmax(0, 1fr) 40px; }
   .report-strip { grid-template-columns: 1fr; }
   .report-toolbar label { width: 100%; justify-content: space-between; }
   .report-toolbar input { flex: 1; min-width: 0; }

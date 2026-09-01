@@ -115,6 +115,54 @@ func TestNormalizeActivitySessionsClipsDeduplicatesAndRemovesOverlap(t *testing.
 	}
 }
 
+func TestClippedActivitySessionsForPresenceLimitsUsageToOnlineWindows(t *testing.T) {
+	base := time.Date(2026, 9, 1, 10, 42, 0, 0, time.UTC)
+	sessions := []interface{}{
+		map[string]interface{}{
+			"app_name":   "chrome",
+			"start_time": base.Add(-30 * time.Minute).Format(time.RFC3339Nano),
+			"end_time":   base.Add(3 * time.Hour).Format(time.RFC3339Nano),
+		},
+		map[string]interface{}{
+			"app_name":   "pgadmin4",
+			"start_time": base.Add(10 * time.Minute).Format(time.RFC3339Nano),
+			"end_time":   base.Add(20 * time.Minute).Format(time.RFC3339Nano),
+		},
+	}
+	windows := []activityPresenceWindow{
+		{start: base, end: base.Add(23*time.Minute + 11*time.Second)},
+	}
+
+	clipped := clippedActivitySessionsForPresence(sessions, windows)
+	apps, total := summarizeActivitySessions(clipped)
+	if total != 23*60+11 {
+		t.Fatalf("expected total clipped to 23m11s, got %v seconds (%#v)", total, clipped)
+	}
+	if len(clipped) != 1 {
+		t.Fatalf("expected overlap trimming to keep one timeline segment, got %d: %#v", len(clipped), clipped)
+	}
+	if len(apps) != 1 {
+		t.Fatalf("expected one summarized app, got %#v", apps)
+	}
+	app := apps[0].(map[string]interface{})
+	if app["app_name"] != "chrome" {
+		t.Fatalf("expected chrome to own the clipped timeline, got %#v", app)
+	}
+}
+
+func TestPresenceOnlineSecondsUsesSameCappedWindows(t *testing.T) {
+	base := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	points := []time.Time{
+		base,
+		base.Add(30 * time.Second),
+		base.Add(10 * time.Minute),
+	}
+
+	if got := presenceOnlineSeconds(points); got != 150 {
+		t.Fatalf("expected 30s plus capped 120s gap, got %v", got)
+	}
+}
+
 func TestIsLiveCollectorPayloadPreservesQueuedTelemetry(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	if !isLiveCollectorPayload(map[string]interface{}{"timestamp": now.Add(-10 * time.Second).Format(time.RFC3339Nano)}, now) {

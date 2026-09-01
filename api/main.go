@@ -1499,6 +1499,210 @@ func summarizeActivitySessions(sessions []interface{}) ([]interface{}, float64) 
 	return apps, totalS
 }
 
+type activityPresenceWindow struct {
+	start time.Time
+	end   time.Time
+}
+
+func archiveKeyFromDailyUsageRow(row bson.M) string {
+	if key, _ := row["archive_key"].(string); strings.TrimSpace(key) != "" {
+		return strings.TrimSpace(key)
+	}
+	switch archive := row["archive"].(type) {
+	case bson.M:
+		key, _ := archive["key"].(string)
+		return strings.TrimSpace(key)
+	case map[string]interface{}:
+		key, _ := archive["key"].(string)
+		return strings.TrimSpace(key)
+	default:
+		return ""
+	}
+}
+
+func clippedActivitySessionsForPresence(sessions []interface{}, windows []activityPresenceWindow) []interface{} {
+	if len(sessions) == 0 || len(windows) == 0 {
+		return nil
+	}
+	type interval struct {
+		app      string
+		start    time.Time
+		end      time.Time
+		deviceID string
+		username string
+	}
+	intervals := make([]interval, 0, len(sessions))
+	for _, raw := range sessions {
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			if bm, ok := raw.(bson.M); ok {
+				m = map[string]interface{}(bm)
+			} else {
+				continue
+			}
+		}
+		appName, _ := m["app_name"].(string)
+		appName = strings.TrimSpace(appName)
+		if !isVisibleAppUsageName(appName) {
+			continue
+		}
+		start := activitySessionStart(m)
+		end := activitySessionEnd(m)
+		if start.IsZero() || end.IsZero() || !end.After(start) {
+			continue
+		}
+		for _, window := range windows {
+			if !window.end.After(start) || !end.After(window.start) {
+				continue
+			}
+			clipStart, clipEnd := start, end
+			if clipStart.Before(window.start) {
+				clipStart = window.start
+			}
+			if clipEnd.After(window.end) {
+				clipEnd = window.end
+			}
+			if !clipEnd.After(clipStart) {
+				continue
+			}
+			item := interval{app: appName, start: clipStart, end: clipEnd}
+			item.deviceID, _ = m["device_id"].(string)
+			item.username, _ = m["username"].(string)
+			intervals = append(intervals, item)
+		}
+	}
+	sort.SliceStable(intervals, func(i, j int) bool {
+		if intervals[i].start.Equal(intervals[j].start) {
+			return intervals[i].end.Before(intervals[j].end)
+		}
+		return intervals[i].start.Before(intervals[j].start)
+	})
+	clipped := make([]interface{}, 0, len(intervals))
+	var occupiedUntil time.Time
+	for _, item := range intervals {
+		if item.start.Before(occupiedUntil) {
+			item.start = occupiedUntil
+		}
+		if !item.end.After(item.start) {
+			continue
+		}
+		entry := map[string]interface{}{
+			"app_name":         item.app,
+			"start_time":       item.start.UTC().Format(time.RFC3339Nano),
+			"end_time":         item.end.UTC().Format(time.RFC3339Nano),
+			"duration_seconds": item.end.Sub(item.start).Seconds(),
+		}
+		if item.deviceID != "" {
+			entry["device_id"] = item.deviceID
+		}
+		if item.username != "" {
+			entry["username"] = item.username
+		}
+		clipped = append(clipped, entry)
+		occupiedUntil = item.end
+	}
+	return mergeActivitySessions(clipped, activitySessionMergeGap)
+}
+
+func dailyPresencePoints(ctx context.Context, deviceID, date string) ([]time.Time, error) {
+	cursor, err := mongoClient.Database(dbName).Collection("telemetry").Find(
+		ctx,
+		bson.M{"device_id": deviceID, "timestamp": bson.M{"$regex": "^" + regexp.QuoteMeta(date)}},
+		options.Find().SetProjection(bson.M{"timestamp": 1}),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	seen := map[int64]bool{}
+	points := []time.Time{}
+	var row bson.M
+	for cursor.Next(ctx) {
+		if err := cursor.Decode(&row); err != nil {
+			continue
+		}
+		t, ok := bsonTime(row["timestamp"])
+		if !ok {
+			continue
+		}
+		if t.Format("2006-01-02") != date || seen[t.UnixNano()] {
+			continue
+		}
+		seen[t.UnixNano()] = true
+		points = append(points, t.UTC())
+	}
+	if err := cursor.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(points, func(i, j int) bool { return points[i].Before(points[j]) })
+	return points, nil
+}
+
+func presenceWindows(points []time.Time) []activityPresenceWindow {
+	if len(points) < 2 {
+		return nil
+	}
+	windows := make([]activityPresenceWindow, 0, len(points)-1)
+	for i := 1; i < len(points); i++ {
+		gap := points[i].Sub(points[i-1])
+		if gap <= 0 {
+			continue
+		}
+		if gap > 2*time.Minute {
+			gap = 2 * time.Minute
+		}
+		windows = append(windows, activityPresenceWindow{
+			start: points[i-1],
+			end:   points[i-1].Add(gap),
+		})
+	}
+	return windows
+}
+
+func presenceOnlineSeconds(points []time.Time) float64 {
+	total := 0.0
+	for _, window := range presenceWindows(points) {
+		total += window.end.Sub(window.start).Seconds()
+	}
+	return total
+}
+
+func recomputeDailyAppUsageRowsFromArchives(ctx context.Context, rows []bson.M, windows []activityPresenceWindow) []bson.M {
+	if activityStore == nil || len(rows) == 0 || len(windows) == 0 {
+		return rows
+	}
+	out := make([]bson.M, 0, len(rows))
+	for _, row := range rows {
+		key := archiveKeyFromDailyUsageRow(row)
+		if key == "" {
+			out = append(out, row)
+			continue
+		}
+		doc, _, err := activityStore.readObject(ctx, key)
+		if err != nil {
+			log.Printf("Daily app usage archive read failed for %s: %v", key, err)
+			out = append(out, row)
+			continue
+		}
+		rawSessions, ok := doc["sessions"].([]interface{})
+		if doc == nil || !ok {
+			out = append(out, row)
+			continue
+		}
+		sessions := clippedActivitySessionsForPresence(rawSessions, windows)
+		apps, totalS := summarizeActivitySessions(sessions)
+		if len(apps) == 0 {
+			continue
+		}
+		row["top_apps"] = apps
+		row["total_seconds"] = totalS
+		row["session_count"] = len(sessions)
+		out = append(out, row)
+	}
+	return out
+}
+
 // ─── Browser History S3 Archive ────────────────────────────────────────────────
 
 type BrowserHistoryArchive struct {
@@ -3756,6 +3960,12 @@ func deviceAppUsageHandler(w http.ResponseWriter, r *http.Request) {
 	if rows == nil {
 		rows = []bson.M{}
 	}
+	points, err := dailyPresencePoints(ctx, deviceID, date)
+	if err != nil {
+		http.Error(w, "Presence lookup error", http.StatusInternalServerError)
+		return
+	}
+	rows = recomputeDailyAppUsageRowsFromArchives(ctx, rows, presenceWindows(points))
 	rows = filterDailyAppUsageRows(rows)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -3786,50 +3996,17 @@ func devicePresenceHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cursor, err := mongoClient.Database(dbName).Collection("telemetry").Find(ctx, bson.M{"device_id": deviceID, "timestamp": bson.M{"$regex": "^" + regexp.QuoteMeta(date)}}, options.Find().SetProjection(bson.M{"timestamp": 1}))
+	points, err := dailyPresencePoints(ctx, deviceID, date)
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
-	}
-	defer cursor.Close(ctx)
-	seen := map[int64]bool{}
-	points := []time.Time{}
-	var row bson.M
-	for cursor.Next(ctx) {
-		if err := cursor.Decode(&row); err != nil {
-			continue
-		}
-		t, ok := bsonTime(row["timestamp"])
-		if !ok {
-			continue
-		}
-		if t.Format("2006-01-02") != date || seen[t.UnixNano()] {
-			continue
-		}
-		seen[t.UnixNano()] = true
-		points = append(points, t)
-	}
-	if err := cursor.Err(); err != nil {
-		http.Error(w, "Parsing error", http.StatusInternalServerError)
-		return
-	}
-	sort.Slice(points, func(i, j int) bool { return points[i].Before(points[j]) })
-	var onlineSeconds float64
-	for i := 1; i < len(points); i++ {
-		gap := points[i].Sub(points[i-1])
-		if gap > 2*time.Minute {
-			gap = 2 * time.Minute
-		}
-		if gap > 0 {
-			onlineSeconds += gap.Seconds()
-		}
 	}
 	var first, last interface{}
 	if len(points) > 0 {
 		first, last = points[0], points[len(points)-1]
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"device_id": deviceID, "date": date, "first_seen": first, "last_seen": last, "online_seconds": onlineSeconds, "heartbeat_count": len(points), "connection_count": presenceConnections(points)})
+	json.NewEncoder(w).Encode(map[string]interface{}{"device_id": deviceID, "date": date, "first_seen": first, "last_seen": last, "online_seconds": presenceOnlineSeconds(points), "heartbeat_count": len(points), "connection_count": presenceConnections(points)})
 }
 
 // Queued telemetry may arrive long after it was collected. Do not reject that

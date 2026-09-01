@@ -1128,6 +1128,39 @@ export default function Home() {
   const attentionDevice = [...devices]
     .sort((a, b) => deviceRisk(b) - deviceRisk(a))
     .find(d => deviceRisk(d) > 0);
+  const hotDevices = [...devices]
+    .sort((a, b) => {
+      const stateWeight = (device: Device) => {
+        const state = getDeviceState(device);
+        if (state === 'critical') return 400;
+        if (state === 'offline') return 300;
+        if (state === 'warning') return 200;
+        return 0;
+      };
+      return stateWeight(b) + deviceRisk(b) - (stateWeight(a) + deviceRisk(a));
+    })
+    .slice(0, 5);
+  const radarDevices = hotDevices.length ? hotDevices : devices.slice(0, 5);
+  const avgCpu = devices.length > 0
+    ? devices.reduce((sum, d) => sum + (d.data?.HardwareStats?.cpu?.usage_percent ?? 0), 0) / devices.length
+    : 0;
+  const avgRam = devices.length > 0
+    ? devices.reduce((sum, d) => sum + (d.data?.HardwareStats?.ram?.used_percent ?? 0), 0) / devices.length
+    : 0;
+  const avgDisk = devices.length > 0
+    ? devices.reduce((sum, d) => sum + (primaryDisk(d.data?.HardwareStats?.disks)?.used_percent ?? 0), 0) / devices.length
+    : 0;
+  const commandStatus = criticalCount > 0
+    ? 'Critical'
+    : offlineCount > 0 || warningCount > 0
+      ? 'Watch'
+      : 'Stable';
+  const signalBars = [
+    { label: 'CPU', value: avgCpu, className: 'signal-cpu' },
+    { label: 'RAM', value: avgRam, className: 'signal-ram' },
+    { label: 'Disk', value: avgDisk, className: 'signal-disk' },
+    { label: 'Link', value: fleetUptimePercent, className: 'signal-link' },
+  ];
 
   const normalizedQuery = searchQuery.trim().toLowerCase();
   const filteredDevices = devices.filter(device => {
@@ -1561,52 +1594,146 @@ export default function Home() {
           </div>
 
           {currentPage === 'dashboard' && (
-            <section className="dashboard-tiles" aria-label="Fleet summary">
-              <button
-                type="button"
-                className="dashboard-tile"
-                onClick={() => {
-                  setStatusFilter('all');
-                  goToPage('inventory');
-                }}
-              >
-                <span>Total Devices</span>
-                <strong>{devices.length.toLocaleString()}</strong>
-              </button>
-              <button
-                type="button"
-                className="dashboard-tile tile-online"
-                onClick={() => {
-                  setStatusFilter('online');
-                  goToPage('inventory');
-                }}
-              >
-                <span>Online</span>
-                <strong>{onlineCount.toLocaleString()}</strong>
-              </button>
-              <button
-                type="button"
-                className="dashboard-tile tile-offline"
-                onClick={() => {
-                  setStatusFilter('offline');
-                  goToPage('inventory');
-                }}
-              >
-                <span>Offline</span>
-                <strong>{offlineCount.toLocaleString()}</strong>
-              </button>
-              <button
-                type="button"
-                className="dashboard-tile tile-uptime"
-                onClick={() => {
-                  setStatusFilter('all');
-                  goToPage('inventory');
-                }}
-              >
-                <span>Total Uptime</span>
-                <strong>{fleetUptimePercent.toFixed(1)}%</strong>
-              </button>
-            </section>
+            <>
+              <section className="dashboard-tiles" aria-label="Fleet summary">
+                <button
+                  type="button"
+                  className="dashboard-tile"
+                  onClick={() => {
+                    setStatusFilter('all');
+                    goToPage('inventory');
+                  }}
+                >
+                  <span>Total Devices</span>
+                  <strong>{devices.length.toLocaleString()}</strong>
+                </button>
+                <button
+                  type="button"
+                  className="dashboard-tile tile-online"
+                  onClick={() => {
+                    setStatusFilter('online');
+                    goToPage('inventory');
+                  }}
+                >
+                  <span>Online</span>
+                  <strong>{onlineCount.toLocaleString()}</strong>
+                </button>
+                <button
+                  type="button"
+                  className="dashboard-tile tile-offline"
+                  onClick={() => {
+                    setStatusFilter('offline');
+                    goToPage('inventory');
+                  }}
+                >
+                  <span>Offline</span>
+                  <strong>{offlineCount.toLocaleString()}</strong>
+                </button>
+                <button
+                  type="button"
+                  className="dashboard-tile tile-uptime"
+                  onClick={() => {
+                    setStatusFilter('all');
+                    goToPage('inventory');
+                  }}
+                >
+                  <span>Total Uptime</span>
+                  <strong>{fleetUptimePercent.toFixed(1)}%</strong>
+                </button>
+              </section>
+
+              <section className="command-panel" aria-label="Fleet command radar">
+                <div className="command-radar">
+                  <div className="radar-header">
+                    <div>
+                      <span>Fleet Command</span>
+                      <strong>{commandStatus}</strong>
+                    </div>
+                    <button
+                      type="button"
+                      className={`command-state state-${commandStatus.toLowerCase()}`}
+                      onClick={() => {
+                        setStatusFilter(commandStatus === 'Stable' ? 'online' : criticalCount > 0 ? 'critical' : 'offline');
+                        goToPage('inventory');
+                      }}
+                    >
+                      {criticalCount + warningCount + offlineCount} Signals
+                    </button>
+                  </div>
+
+                  <div className="radar-stage">
+                    <div className="radar-sweep" />
+                    <div className="radar-ring ring-one" />
+                    <div className="radar-ring ring-two" />
+                    <div className="radar-ring ring-three" />
+                    {radarDevices.map((device, index) => {
+                      const state = getDeviceState(device);
+                      const positions = [
+                        { left: '68%', top: '28%' },
+                        { left: '34%', top: '34%' },
+                        { left: '54%', top: '62%' },
+                        { left: '77%', top: '68%' },
+                        { left: '24%', top: '70%' },
+                      ];
+                      return (
+                        <button
+                          key={device.device_id}
+                          type="button"
+                          className={`radar-blip blip-${state}`}
+                          style={positions[index % positions.length]}
+                          onClick={() => goToPage('inspect', { deviceId: device.device_id, tab: 'overview' })}
+                          aria-label={`Inspect ${deviceDisplayName(device)}`}
+                        />
+                      );
+                    })}
+                    <div className="radar-core">
+                      <strong>{fleetUptimePercent.toFixed(0)}%</strong>
+                      <span>link</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="command-side">
+                  <div className="signal-stack">
+                    {signalBars.map(signal => (
+                      <div key={signal.label} className="signal-row">
+                        <span>{signal.label}</span>
+                        <div className="signal-track">
+                          <i className={signal.className} style={{ width: `${Math.min(100, Math.max(0, signal.value))}%` }} />
+                        </div>
+                        <strong>{signal.value.toFixed(0)}%</strong>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="hot-list">
+                    <div className="hot-list-title">
+                      <span>Heat Map</span>
+                      <strong>{hotDevices.length ? 'Top Signals' : 'No Devices'}</strong>
+                    </div>
+                    {hotDevices.length ? hotDevices.map(device => {
+                      const state = getDeviceState(device);
+                      return (
+                        <button
+                          key={device.device_id}
+                          type="button"
+                          className={`hot-device hot-${state}`}
+                          onClick={() => goToPage('inspect', { deviceId: device.device_id, tab: 'overview' })}
+                        >
+                          <span>{deviceDisplayName(device)}</span>
+                          <strong>{state === 'offline' ? 'Offline' : `${deviceRisk(device).toFixed(0)}%`}</strong>
+                        </button>
+                      );
+                    }) : (
+                      <div className="hot-device hot-empty">
+                        <span>Waiting for telemetry</span>
+                        <strong>Idle</strong>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </section>
+            </>
           )}
 
           {/* Status filter tabs */}
