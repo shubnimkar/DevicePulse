@@ -63,3 +63,35 @@ func TestFilterDailyAppUsageRowsRecomputesVisibleTotals(t *testing.T) {
 		t.Fatalf("expected only Chrome app, got %#v", apps)
 	}
 }
+
+func TestCapDailyAppUsageRowsToOnlineSecondsScalesFallbackSummary(t *testing.T) {
+	rows := []bson.M{{
+		"username":      "ashish",
+		"total_seconds": 6 * 3600.0,
+		"session_count": 300,
+		"top_apps": []interface{}{
+			bson.M{"app_name": "chrome", "total_seconds": 3 * 3600.0, "session_count": 150},
+			bson.M{"app_name": "pgadmin4", "total_seconds": 2 * 3600.0, "session_count": 100},
+			bson.M{"app_name": "code", "total_seconds": 1 * 3600.0, "session_count": 50},
+		},
+	}}
+
+	capped := capDailyAppUsageRowsToOnlineSeconds(rows, 90*60)
+	if len(capped) != 1 {
+		t.Fatalf("expected one capped row, got %#v", capped)
+	}
+	if got := capped[0]["total_seconds"]; got != 90*60.0 {
+		t.Fatalf("expected total capped to online seconds, got %#v", got)
+	}
+	if got := capped[0]["session_count"]; got != 76 {
+		t.Fatalf("expected sessions scaled down, got %#v", got)
+	}
+	apps := capped[0]["top_apps"].([]interface{})
+	chrome := apps[0].(map[string]interface{})
+	if chrome["total_seconds"] != 45*60.0 {
+		t.Fatalf("expected chrome scaled to 45m, got %#v", chrome)
+	}
+	if chrome["session_count"] != 38 {
+		t.Fatalf("expected chrome sessions scaled with ceil, got %#v", chrome)
+	}
+}

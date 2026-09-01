@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -1098,6 +1099,69 @@ func filterDailyTopApps(raw interface{}) ([]interface{}, float64, int) {
 		}
 	}
 	return out, totalS, sessionCount
+}
+
+func capDailyAppUsageRowsToOnlineSeconds(rows []bson.M, maxTotalS float64) []bson.M {
+	if len(rows) == 0 {
+		return rows
+	}
+	if maxTotalS <= 0 {
+		return nil
+	}
+	currentTotal := 0.0
+	for _, row := range rows {
+		seconds, _ := toFloat(row["total_seconds"])
+		currentTotal += seconds
+	}
+	if currentTotal <= maxTotalS || currentTotal <= 0 {
+		return rows
+	}
+
+	scale := maxTotalS / currentTotal
+	cappedRows := make([]bson.M, 0, len(rows))
+	for _, row := range rows {
+		apps, ok := row["top_apps"].([]interface{})
+		if !ok {
+			if bsonApps, ok := row["top_apps"].(bson.A); ok {
+				apps = []interface{}(bsonApps)
+			}
+		}
+		cappedApps := make([]interface{}, 0, len(apps))
+		rowTotal := 0.0
+		rowSessions := 0
+		for _, rawApp := range apps {
+			appName, seconds, sessions := appUsageSummaryValues(rawApp)
+			if !isVisibleAppUsageName(appName) || seconds <= 0 {
+				continue
+			}
+			cappedSeconds := seconds * scale
+			if cappedSeconds <= 0 {
+				continue
+			}
+			cappedSessions := 0
+			if sessions > 0 {
+				cappedSessions = int(math.Ceil(float64(sessions) * scale))
+				if cappedSessions < 1 {
+					cappedSessions = 1
+				}
+			}
+			cappedApps = append(cappedApps, map[string]interface{}{
+				"app_name":      appName,
+				"total_seconds": cappedSeconds,
+				"session_count": cappedSessions,
+			})
+			rowTotal += cappedSeconds
+			rowSessions += cappedSessions
+		}
+		if len(cappedApps) == 0 {
+			continue
+		}
+		row["top_apps"] = cappedApps
+		row["total_seconds"] = rowTotal
+		row["session_count"] = rowSessions
+		cappedRows = append(cappedRows, row)
+	}
+	return cappedRows
 }
 
 func appUsageSummaryValues(raw interface{}) (string, float64, int) {
@@ -3965,8 +4029,10 @@ func deviceAppUsageHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Presence lookup error", http.StatusInternalServerError)
 		return
 	}
+	onlineSeconds := presenceOnlineSeconds(points)
 	rows = recomputeDailyAppUsageRowsFromArchives(ctx, rows, presenceWindows(points))
 	rows = filterDailyAppUsageRows(rows)
+	rows = capDailyAppUsageRowsToOnlineSeconds(rows, onlineSeconds)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
