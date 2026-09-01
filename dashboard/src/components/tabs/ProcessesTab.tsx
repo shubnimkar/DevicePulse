@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import { motion } from 'motion/react';
 import { ProcessData } from '@/types';
 
 interface Props { procs: ProcessData[]; }
@@ -25,7 +26,14 @@ export default function ProcessesTab({ procs }: Props) {
     <div>
       <ul className="proc-list">
         {pageItems.map((p, i) => (
-          <li key={`${p.pid}-${p.name}-${i}`} className="proc-item">
+          <motion.li
+            key={`${p.pid}-${p.name}-${i}`}
+            className="proc-item"
+            initial={{ opacity: 0, x: -8 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ delay: i * 0.02 }}
+            layout
+          >
             <div className="proc-left">
               <span className="proc-name" title={p.name}>{p.name}</span>
               <span className="proc-pid">PID {p.pid}</span>
@@ -37,7 +45,7 @@ export default function ProcessesTab({ procs }: Props) {
               <span className="proc-cpu">{p.cpu.toFixed(1)}% CPU</span>
               <span className="proc-mem">{p.memory.toFixed(1)}% Mem</span>
             </div>
-          </li>
+          </motion.li>
         ))}
       </ul>
 

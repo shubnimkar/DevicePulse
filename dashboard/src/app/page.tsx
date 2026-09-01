@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback, useRef } from 'react';
+import { AnimatePresence, MotionConfig, motion } from 'motion/react';
 import type { FormEvent } from 'react';
 import { Device, AppFocusSummary, FocusCacheData, DeviceTab, EnterprisePolicy, DashboardUser, UserRole, HistoryEntry, BrowserHistoryArchiveData, DailyAppUsageData, DailyPresenceData, AgentRelease, AgentBuildJob, AgentRolloutResponse, WeeklyReport } from '@/types';
 import { API, readHeaders, adminHeaders, isOnline, timeAgo, primaryDisk, deviceDisplayName, formatDuration } from '@/lib/utils';
@@ -1400,7 +1401,12 @@ export default function Home() {
   }
 
   return (
-    <div className="app-shell">
+    <MotionConfig reducedMotion="user" transition={{ duration: 0.18, ease: 'easeOut' }}>
+    <motion.div
+      className="app-shell"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+    >
 
       {/* ── Top header bar ── */}
       <header className="app-header">
@@ -1532,7 +1538,14 @@ export default function Home() {
 
       {/* ── Main content ── */}
       <main className="app-main">
-        <div className="main-inner">
+        <AnimatePresence mode="wait">
+        <motion.div
+          key={`${currentPage}:${selectedDeviceId || 'fleet'}`}
+          className="main-inner"
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -8 }}
+        >
 
           {/* Page header */}
           <div className="page-header">
@@ -2734,16 +2747,29 @@ export default function Home() {
             </div>
           ) : null}
 
-        </div>
+        </motion.div>
+        </AnimatePresence>
       </main>
 
+      <AnimatePresence>
       {renameTarget && (
-        <div className="modal-backdrop" role="presentation" onMouseDown={closeRenameDevice}>
-          <form
+        <motion.div
+          className="modal-backdrop"
+          role="presentation"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          onMouseDown={closeRenameDevice}
+        >
+          <motion.form
             className="modal-panel rename-modal"
             role="dialog"
             aria-modal="true"
             aria-labelledby="rename-device-title"
+            initial={{ opacity: 0, y: 14, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 10, scale: 0.98 }}
+            transition={{ type: 'spring', stiffness: 360, damping: 32 }}
             onSubmit={saveRenameDevice}
             onMouseDown={e => e.stopPropagation()}
           >
@@ -2775,9 +2801,10 @@ export default function Home() {
                 {renameSaving ? 'Saving...' : 'Save Name'}
               </button>
             </div>
-          </form>
-        </div>
+          </motion.form>
+        </motion.div>
       )}
+      </AnimatePresence>
 
       <ConfirmDialog
         open={!!confirmTarget}
@@ -2794,6 +2821,7 @@ export default function Home() {
         onCancel={() => setConfirmTarget(null)}
       />
 
-    </div>
+    </motion.div>
+    </MotionConfig>
   );
 }

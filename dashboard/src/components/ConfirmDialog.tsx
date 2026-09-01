@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
 
 interface Props {
   open: boolean;
@@ -76,42 +77,51 @@ export default function ConfirmDialog({
     };
   }, [open, busy, onCancel]);
 
-  if (!open) return null;
-
   return (
-    <div
-      className="modal-backdrop"
-      role="presentation"
-      onMouseDown={e => {
-        if (e.target === e.currentTarget && !busy) onCancel();
-      }}
-    >
-      <div
-        ref={panelRef}
-        className="modal-panel confirm-panel"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="confirm-dialog-title"
-        aria-describedby="confirm-dialog-message"
-      >
-        <div className="modal-header">
-          <h2 id="confirm-dialog-title">{title}</h2>
-        </div>
-        <p id="confirm-dialog-message" className="confirm-message">{message}</p>
-        <div className="modal-actions">
-          <button type="button" className="modal-btn" onClick={onCancel} disabled={busy}>
-            {cancelLabel}
-          </button>
-          <button
-            type="button"
-            className={`modal-btn ${danger ? 'danger' : ''}`}
-            onClick={onConfirm}
-            disabled={busy}
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          className="modal-backdrop"
+          role="presentation"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          onMouseDown={e => {
+            if (e.target === e.currentTarget && !busy) onCancel();
+          }}
+        >
+          <motion.div
+            ref={panelRef}
+            className="modal-panel confirm-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="confirm-dialog-title"
+            aria-describedby="confirm-dialog-message"
+            initial={{ opacity: 0, y: 14, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 10, scale: 0.98 }}
+            transition={{ type: 'spring', stiffness: 360, damping: 32 }}
           >
-            {confirmLabel}
-          </button>
-        </div>
-      </div>
-    </div>
+            <div className="modal-header">
+              <h2 id="confirm-dialog-title">{title}</h2>
+            </div>
+            <p id="confirm-dialog-message" className="confirm-message">{message}</p>
+            <div className="modal-actions">
+              <button type="button" className="modal-btn" onClick={onCancel} disabled={busy}>
+                {cancelLabel}
+              </button>
+              <button
+                type="button"
+                className={`modal-btn ${danger ? 'danger' : ''}`}
+                onClick={onConfirm}
+                disabled={busy}
+              >
+                {confirmLabel}
+              </button>
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 }

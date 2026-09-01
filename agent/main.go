@@ -735,8 +735,10 @@ func runWindowOnlyMode() {
 		log.Fatalf("window_only: failed to open queue: %v", err)
 	}
 
-	// Registration credentials are written by the root service on first boot.
-	// We load them here so we can tag payloads with the correct device_id.
+	// Registration credentials are written by the root service on first boot
+	// with owner-only permissions. If this low-privilege user service cannot
+	// read them, it can still queue active-window payloads; the root service
+	// drains the shared queue and authenticates the upload.
 	regFile := filepath.Join(dataDir, "registration.json")
 	if data, err := os.ReadFile(regFile); err == nil {
 		var reg map[string]string
@@ -744,10 +746,14 @@ func runWindowOnlyMode() {
 			deviceID = reg["device_id"]
 			apiKey = reg["api_key"]
 		}
+	} else {
+		log.Printf("window_only: registration cache not readable (%v); queueing without local credentials", err)
 	}
 	if deviceID == "" {
-		// Root service hasn't registered yet — wait and retry.
-		log.Printf("window_only: waiting for root service to complete registration...")
+		// Root service may not have registered yet, or registration.json may be
+		// intentionally private. Retry briefly for installs that have not
+		// finished bootstrapping, then keep running without local credentials.
+		log.Printf("window_only: waiting briefly for root service registration...")
 		for i := 0; i < 30; i++ {
 			time.Sleep(2 * time.Second)
 			if data, err := os.ReadFile(regFile); err == nil {
@@ -760,18 +766,22 @@ func runWindowOnlyMode() {
 			}
 		}
 		if deviceID == "" {
-			log.Fatalf("window_only: device not registered after 60s, exiting")
+			log.Printf("window_only: continuing without registration cache; root sync will attach device identity")
 		}
 	}
-	log.Printf("window_only: using device_id=%s", deviceID)
-	commander.SetCredentials(apiURL, apiKey)
-	commander.SetDataDir(dataDir)
+	if deviceID != "" && apiKey != "" {
+		log.Printf("window_only: using device_id=%s", deviceID)
+		commander.SetCredentials(apiURL, apiKey)
+		commander.SetDataDir(dataDir)
 
-	// The window service also polls remote commands: session-context actions
-	// (lock_screen) must run here because the root system service cannot reach
-	// the GUI session. Command claiming is atomic server-side, so both this
-	// process and the root service can poll concurrently without conflicts.
-	go commander.Poller(5 * time.Second)
+		// The window service also polls remote commands: session-context actions
+		// (lock_screen) must run here because the root system service cannot reach
+		// the GUI session. Command claiming is atomic server-side, so both this
+		// process and the root service can poll concurrently without conflicts.
+		go commander.Poller(5 * time.Second)
+	} else {
+		log.Printf("window_only: command polling disabled until credentials are readable")
+	}
 
 	activeWin := &collector.ActiveWindowTracker{}
 	if err := activeWin.Start(); err != nil {

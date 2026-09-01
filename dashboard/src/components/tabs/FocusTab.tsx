@@ -1,5 +1,6 @@
 'use client';
 
+import { motion } from 'motion/react';
 import { AppFocusSummary, ActiveWindowData, DailyAppUsageData, DailyPresenceData } from '@/types';
 import { buildAppUsageSummaries, formatDuration } from '@/lib/utils';
 import GaugeBar from '@/components/GaugeBar';
@@ -52,11 +53,18 @@ export default function FocusTab({ data, cachedSummaries, dailyUsage, dailyPrese
         <div className="no-data">No app usage recorded for this day yet.</div>
       ) : (
         <div className="focus-list">
-          {summaries.map(app => {
+          {summaries.map((app, index) => {
             const pct = totalSeconds > 0 ? (app.total_focus_seconds / totalSeconds) * 100 : 0;
             const isActive = app.app_name === currentApp;
             return (
-              <div key={app.app_name} className={`focus-item ${isActive ? 'is-active' : ''}`}>
+              <motion.div
+                key={app.app_name}
+                className={`focus-item ${isActive ? 'is-active' : ''}`}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: index * 0.025 }}
+                layout
+              >
                 <div className="focus-row">
                   <span className="focus-app-name" title={app.app_name}>
                     {isActive && <span className="live-dot" />}
@@ -71,7 +79,7 @@ export default function FocusTab({ data, cachedSummaries, dailyUsage, dailyPrese
                   height={3}
                 />
                 <div className="focus-pct">{pct.toFixed(1)}% of app usage time</div>
-              </div>
+              </motion.div>
             );
           })}
         </div>

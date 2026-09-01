@@ -1,5 +1,6 @@
 'use client';
 
+import { AnimatePresence, motion } from 'motion/react';
 import { AppFocusSummary, DailyAppUsageData, DailyPresenceData, Device, DeviceTab, HistoryEntry, UserRole } from '@/types';
 import { isOnline, timeAgo, metricColor, primaryDisk, deviceDisplayName } from '@/lib/utils';
 import OverviewTab from '@/components/tabs/OverviewTab';
@@ -102,7 +103,13 @@ export default function DeviceCard({
   };
 
   return (
-    <div className={`device-card state-${state}`}>
+    <motion.div
+      layout
+      className={`device-card state-${state}`}
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ type: 'spring', stiffness: 260, damping: 30 }}
+    >
       {/* Header */}
       <div className="device-header">
         <div className="device-header-left">
@@ -169,7 +176,7 @@ export default function DeviceCard({
       {/* Tab bar */}
       <div className="tab-bar" role="tablist" aria-label="Device details">
         {TABS.map(t => (
-          <button
+          <motion.button
             key={t.key}
             type="button"
             id={`device-tab-${t.key}`}
@@ -180,60 +187,73 @@ export default function DeviceCard({
             className={`tab-btn ${tab === t.key ? 'active' : ''}`}
             onClick={() => onTabChange(t.key)}
             onKeyDown={handleTabKeyDown}
+            whileHover={{ y: -1 }}
+            whileTap={{ scale: 0.98 }}
           >
             {t.icon}
             {t.label}
-          </button>
+          </motion.button>
         ))}
       </div>
 
       {/* Tab panel */}
-      <div
+      <motion.div
         className="tab-panel"
         id="device-tab-panel"
         role="tabpanel"
         aria-labelledby={`device-tab-${tab}`}
         tabIndex={0}
+        layout
       >
-        {tab === 'overview'  && <OverviewTab data={device.data} cachedFocus={cachedFocus} dailyAppUsage={dailyAppUsage} />}
-        {tab === 'hardware'  && <HardwareTab hw={hw} />}
-        {tab === 'processes' && <ProcessesTab procs={procs} />}
-        {tab === 'browser'   && (
-          <BrowserTab
-            history={history}
-            canFilterHistory={canFilterBrowserHistory}
-            historyRange={browserHistoryRange}
-            historyLoading={browserHistoryLoading}
-            historyLoaded={browserHistoryLoaded}
-            onHistoryRangeChange={onBrowserHistoryRangeChange}
-          />
-        )}
-        {tab === 'services'  && <ServicesTab data={device.data?.Services} />}
-        {tab === 'ports'     && <PortsTab data={device.data?.NetworkPorts} />}
-        {tab === 'apps'      && <AppsTab data={device.data?.InstalledApps} />}
-        {tab === 'security'  && (
-          <SecurityTab
-            usb={device.data?.USBEvents}
-            osUpd={device.data?.OSUpdates}
-            deviceId={device.device_id}
-            userRole={userRole ?? 'viewer'}
-            deviceOnline={isOnline(device.last_seen)}
-            quarantined={!!device.quarantined}
-          />
-        )}
-        {tab === 'focus'     && (
-          <FocusTab
-            data={device.data?.ActiveWindowTracker}
-            cachedSummaries={cachedFocus}
-            dailyUsage={dailyAppUsage}
-            dailyPresence={dailyPresence}
-            dailyUsageLoading={dailyAppUsageLoading}
-            usageDate={appUsageDate}
-            onUsageDateChange={onAppUsageDateChange}
-          />
-        )}
-        {tab === 'sysinfo'   && <SysInfoTab sys={sys} />}
-      </div>
-    </div>
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={tab}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.16, ease: 'easeOut' }}
+          >
+            {tab === 'overview'  && <OverviewTab data={device.data} cachedFocus={cachedFocus} dailyAppUsage={dailyAppUsage} />}
+            {tab === 'hardware'  && <HardwareTab hw={hw} />}
+            {tab === 'processes' && <ProcessesTab procs={procs} />}
+            {tab === 'browser'   && (
+              <BrowserTab
+                history={history}
+                canFilterHistory={canFilterBrowserHistory}
+                historyRange={browserHistoryRange}
+                historyLoading={browserHistoryLoading}
+                historyLoaded={browserHistoryLoaded}
+                onHistoryRangeChange={onBrowserHistoryRangeChange}
+              />
+            )}
+            {tab === 'services'  && <ServicesTab data={device.data?.Services} />}
+            {tab === 'ports'     && <PortsTab data={device.data?.NetworkPorts} />}
+            {tab === 'apps'      && <AppsTab data={device.data?.InstalledApps} />}
+            {tab === 'security'  && (
+              <SecurityTab
+                usb={device.data?.USBEvents}
+                osUpd={device.data?.OSUpdates}
+                deviceId={device.device_id}
+                userRole={userRole ?? 'viewer'}
+                deviceOnline={isOnline(device.last_seen)}
+                quarantined={!!device.quarantined}
+              />
+            )}
+            {tab === 'focus'     && (
+              <FocusTab
+                data={device.data?.ActiveWindowTracker}
+                cachedSummaries={cachedFocus}
+                dailyUsage={dailyAppUsage}
+                dailyPresence={dailyPresence}
+                dailyUsageLoading={dailyAppUsageLoading}
+                usageDate={appUsageDate}
+                onUsageDateChange={onAppUsageDateChange}
+              />
+            )}
+            {tab === 'sysinfo'   && <SysInfoTab sys={sys} />}
+          </motion.div>
+        </AnimatePresence>
+      </motion.div>
+    </motion.div>
   );
 }

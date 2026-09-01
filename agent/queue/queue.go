@@ -3,6 +3,8 @@ package queue
 import (
 	"database/sql"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 
 	_ "modernc.org/sqlite"
@@ -18,6 +20,8 @@ type TelemetryItem struct {
 }
 
 func NewQueue(dbPath string) (*Queue, error) {
+	ensureSharedSQLiteFiles(dbPath)
+
 	// Enable WAL mode and a busy timeout to prevent SQLITE_BUSY errors on concurrent access
 	dsn := dbPath + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
 	db, err := sql.Open("sqlite", dsn)
@@ -37,8 +41,20 @@ func NewQueue(dbPath string) (*Queue, error) {
 	if err != nil {
 		return nil, err
 	}
+	ensureSharedSQLiteFiles(dbPath)
 
 	return &Queue{db: db}, nil
+}
+
+func ensureSharedSQLiteFiles(dbPath string) {
+	if dir := filepath.Dir(dbPath); dir != "." && dir != "" {
+		_ = os.Chmod(dir, 0777)
+	}
+	for _, path := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		if _, err := os.Stat(path); err == nil {
+			_ = os.Chmod(path, 0666)
+		}
+	}
 }
 
 func (q *Queue) Push(payload map[string]interface{}) error {

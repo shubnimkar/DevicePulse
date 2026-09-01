@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { motion } from 'motion/react';
 import { HistoryEntry } from '@/types';
 import { getDomain, formatVisitTime, formatFullDateTime, browserEmoji, browserClass } from '@/lib/utils';
 
@@ -99,7 +100,7 @@ export default function BrowserTab({
       <div className="browser-section">
         <div className="browser-section-title">{rangeLabels[historyRange]} ({topRecent.length})</div>
         <ul className="history-list">
-          {topRecent.map(h => <HistoryRow variant="recent" key={`${h.browser || 'Unknown'}\u0000${historyIdentity(h)}`} h={h} />)}
+          {topRecent.map((h, i) => <HistoryRow variant="recent" key={`${h.browser || 'Unknown'}\u0000${historyIdentity(h)}`} h={h} index={i} />)}
         </ul>
       </div>
       )}
@@ -137,8 +138,8 @@ export default function BrowserTab({
                 <span className="browser-group-count">({byBrowser[browser].length})</span>
               </div>
               <ul className="history-list">
-                {items.map(h => (
-                  <HistoryRow key={`${h.browser || 'Unknown'}\u0000${historyIdentity(h)}`} h={h} />
+                {items.map((h, i) => (
+                  <HistoryRow key={`${h.browser || 'Unknown'}\u0000${historyIdentity(h)}`} h={h} index={i} />
                 ))}
               </ul>
             </div>
@@ -189,10 +190,14 @@ function Favicon({ url }: { url: string }) {
   );
 }
 
-function HistoryRow({ h, variant }: { h: HistoryEntry; variant?: 'recent' | 'full' }) {
+function HistoryRow({ h, variant, index = 0 }: { h: HistoryEntry; variant?: 'recent' | 'full'; index?: number }) {
   const domain = getDomain(h.url);
   return (
-    <li>
+    <motion.li
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: Math.min(index, 12) * 0.015 }}
+    >
       <a href={h.url} target="_blank" rel="noopener noreferrer" className="history-item">
         <Favicon url={h.url} />
         <div className="history-content">
@@ -210,6 +215,6 @@ function HistoryRow({ h, variant }: { h: HistoryEntry; variant?: 'recent' | 'ful
           </div>
         </div>
       </a>
-    </li>
+    </motion.li>
   );
 }

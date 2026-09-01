@@ -1,6 +1,8 @@
+import { motion } from 'motion/react';
+
 interface GaugeBarProps {
-  value: number;
-  color?: string;
+	value: number;
+	color?: string;
   height?: number;
 }
 
@@ -16,10 +18,12 @@ export default function GaugeBar({ value, color, height = 4 }: GaugeBarProps) {
       aria-valuemin={0}
       aria-valuemax={100}
     >
-      <div
+      <motion.div
         className="gauge-fill"
+        initial={false}
+        animate={{ width: `${pct}%` }}
+        transition={{ type: 'spring', stiffness: 260, damping: 30 }}
         style={{
-          width: `${pct}%`,
           background: color ?? 'var(--blue)',
         }}
       />
