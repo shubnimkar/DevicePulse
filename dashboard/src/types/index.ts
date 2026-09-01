@@ -119,6 +119,10 @@ export interface AppFocusSummary {
 
 export interface ActiveWindowData {
   current_app: string;
+  collected_at?: string;
+  last_sample_at?: string;
+  tracker_fresh?: boolean;
+  stale?: boolean;
   sessions?: Array<{
     app_name: string;
     start_time: string;

@@ -74,6 +74,8 @@ export function browserEmoji(browser: string): string {
 
 // ─── Shared app-usage filtering (used by Overview + Focus tabs) ────────────────
 
+const ACTIVE_WINDOW_FRESH_MS = 5 * 60 * 1000;
+
 export const IGNORED_APP_USAGE_NAMES = new Set([
   'apt-check',
   'apt.systemd.daily',
@@ -91,6 +93,23 @@ export function isVisibleAppUsageName(name: string): boolean {
   return !key.startsWith('devicepulse-');
 }
 
+export function isFreshActiveWindowData(activeWindow?: ActiveWindowData): boolean {
+  if (!activeWindow || activeWindow.stale || activeWindow.tracker_fresh === false) return false;
+  const candidates = [
+    activeWindow.collected_at,
+    activeWindow.last_sample_at,
+    ...(activeWindow.sessions ?? []).map(session => session.end_time),
+  ];
+  const newest = candidates.reduce((max, raw) => {
+    if (!raw) return max;
+    const ms = new Date(raw).getTime();
+    return Number.isFinite(ms) && ms > max ? ms : max;
+  }, 0);
+  if (!newest) return false;
+  const age = Date.now() - newest;
+  return age >= -ACTIVE_WINDOW_FRESH_MS && age <= ACTIVE_WINDOW_FRESH_MS;
+}
+
 export function buildAppUsageSummaries(
   activeWindow?: ActiveWindowData,
   cachedSummaries: AppFocusSummary[] = [],
@@ -103,11 +122,14 @@ export function buildAppUsageSummaries(
     total_focus_seconds: app.total_focus_seconds ?? app.total_seconds ?? 0,
     session_count: app.session_count ?? 0,
   }))).filter(app => isVisibleAppUsageName(app.app_name)) ?? [];
+  const liveWindowFresh = isFreshActiveWindowData(activeWindow);
 
   const sourceApps = dailyApps.length > 0
     ? dailyApps
-    : (activeWindow?.cumulative_summaries ?? activeWindow?.app_summaries ?? [])
-      .filter(app => isVisibleAppUsageName(app.app_name));
+    : liveWindowFresh
+      ? (activeWindow?.cumulative_summaries ?? activeWindow?.app_summaries ?? [])
+        .filter(app => isVisibleAppUsageName(app.app_name))
+      : [];
 
   const merged = new Map<string, AppFocusSummary>();
   for (const app of sourceApps) {
@@ -125,7 +147,7 @@ export function buildAppUsageSummaries(
     }
   }
 
-  if (dailyApps.length === 0) {
+  if (dailyApps.length === 0 && liveWindowFresh) {
     for (const app of cachedSummaries.filter(app => isVisibleAppUsageName(app.app_name))) {
       const existing = merged.get(app.app_name);
       if (!existing || app.total_focus_seconds > existing.total_focus_seconds) {

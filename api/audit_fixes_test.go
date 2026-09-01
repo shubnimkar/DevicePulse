@@ -50,6 +50,7 @@ func TestPayloadFocusSummariesPersistCycleDeltasOnly(t *testing.T) {
 	payload := map[string]interface{}{
 		"data": map[string]interface{}{
 			"ActiveWindowTracker": map[string]interface{}{
+				"collected_at":         time.Now(),
 				"app_summaries":        []interface{}{map[string]interface{}{"app_name": "Code", "total_focus_seconds": 7.0}},
 				"cumulative_summaries": []interface{}{map[string]interface{}{"app_name": "Code", "total_focus_seconds": 4242.0}},
 			},
@@ -62,6 +63,24 @@ func TestPayloadFocusSummariesPersistCycleDeltasOnly(t *testing.T) {
 	m := got[0].(map[string]interface{})
 	if seconds, _ := toFloat(m["total_focus_seconds"]); seconds != 7.0 {
 		t.Fatalf("expected persisted metadata to carry cycle deltas, got %v", seconds)
+	}
+}
+
+func TestPayloadFocusSummariesRejectsStaleActiveWindowSnapshot(t *testing.T) {
+	payload := map[string]interface{}{
+		"data": map[string]interface{}{
+			"ActiveWindowTracker": map[string]interface{}{
+				"sessions": []interface{}{map[string]interface{}{
+					"app_name":         "Chrome",
+					"end_time":         time.Now().Add(-activeWindowFreshnessWindow - time.Minute).Format(time.RFC3339Nano),
+					"duration_seconds": 10.0,
+				}},
+				"app_summaries": []interface{}{map[string]interface{}{"app_name": "Chrome", "total_focus_seconds": 10.0}},
+			},
+		},
+	}
+	if got := focusSummariesFromPayload(payload); len(got) != 0 {
+		t.Fatalf("expected stale active-window summaries to be rejected, got %#v", got)
 	}
 }
 

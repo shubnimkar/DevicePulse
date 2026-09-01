@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 )
@@ -93,5 +94,47 @@ func TestCapDailyAppUsageRowsToOnlineSecondsScalesFallbackSummary(t *testing.T) 
 	}
 	if chrome["session_count"] != 38 {
 		t.Fatalf("expected chrome sessions scaled with ceil, got %#v", chrome)
+	}
+}
+
+func TestActiveWindowFreshnessFallsBackToLatestSessionEnd(t *testing.T) {
+	now := time.Now()
+	awt := map[string]interface{}{
+		"sessions": []interface{}{
+			map[string]interface{}{"end_time": now.Add(-time.Minute).Format(time.RFC3339Nano)},
+		},
+	}
+	if !activeWindowSnapshotFreshAt(awt, now) {
+		t.Fatalf("expected recent session end_time to keep snapshot fresh")
+	}
+
+	awt["sessions"] = []interface{}{
+		map[string]interface{}{"end_time": now.Add(-activeWindowFreshnessWindow - time.Second).Format(time.RFC3339Nano)},
+	}
+	if activeWindowSnapshotFreshAt(awt, now) {
+		t.Fatalf("expected old session end_time to mark snapshot stale")
+	}
+}
+
+func TestSanitizeDeviceActiveWindowSnapshotBlanksStaleData(t *testing.T) {
+	device := bson.M{
+		"data": bson.M{
+			"ActiveWindowTracker": bson.M{
+				"sessions": bson.A{bson.M{"end_time": time.Now().Add(-time.Hour).Format(time.RFC3339Nano)}},
+				"cumulative_summaries": bson.A{
+					bson.M{"app_name": "Chrome", "total_focus_seconds": 5 * 3600.0},
+				},
+			},
+		},
+	}
+
+	sanitizeDeviceActiveWindowSnapshot(device, time.Now())
+
+	awt := device["data"].(bson.M)["ActiveWindowTracker"].(map[string]interface{})
+	if stale, _ := awt["stale"].(bool); !stale {
+		t.Fatalf("expected stale marker, got %#v", awt)
+	}
+	if summaries := awt["cumulative_summaries"].([]interface{}); len(summaries) != 0 {
+		t.Fatalf("expected stale cumulative summaries to be blanked, got %#v", summaries)
 	}
 }

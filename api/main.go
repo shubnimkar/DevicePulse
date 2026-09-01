@@ -55,6 +55,8 @@ var (
 	activityStore   *DailyActivityArchive
 )
 
+const activeWindowFreshnessWindow = 5 * time.Minute
+
 // ─── Focus Cache ──────────────────────────────────────────────────────────────
 
 // focusCache holds per-device cumulative focus totals aggregated from all
@@ -837,6 +839,9 @@ func focusSummariesFromPayload(payload map[string]interface{}) []interface{} {
 	if !ok {
 		return nil
 	}
+	if !activeWindowSnapshotFreshAt(awt, payloadTime(payload["timestamp"])) {
+		return nil
+	}
 	// Persist per-cycle app_summaries deltas only. cumulative_summaries holds
 	// totals-since-agent-start; storing those here would poison any consumer
 	// that sums documents across time (the focus-cache rebuild).
@@ -877,6 +882,102 @@ func sanitizeActiveWindowPayload(payload map[string]interface{}) {
 			}
 		}
 		awt[key] = filtered
+	}
+}
+
+func interfaceSlice(raw interface{}) ([]interface{}, bool) {
+	switch v := raw.(type) {
+	case []interface{}:
+		return v, true
+	case bson.A:
+		return []interface{}(v), true
+	default:
+		return nil, false
+	}
+}
+
+func mapValue(raw interface{}) (map[string]interface{}, bool) {
+	switch m := raw.(type) {
+	case map[string]interface{}:
+		return m, true
+	case bson.M:
+		return map[string]interface{}(m), true
+	default:
+		return nil, false
+	}
+}
+
+func activeWindowSnapshotFreshAt(raw interface{}, now time.Time) bool {
+	awt, ok := mapValue(raw)
+	if !ok {
+		return false
+	}
+	if stale, _ := awt["stale"].(bool); stale {
+		return false
+	}
+	if trackerFresh, ok := awt["tracker_fresh"].(bool); ok && !trackerFresh {
+		return false
+	}
+	snapshotTime, ok := activeWindowSnapshotTime(raw)
+	if !ok {
+		return false
+	}
+	if snapshotTime.After(now.Add(activeWindowFreshnessWindow)) {
+		return false
+	}
+	return now.Sub(snapshotTime) <= activeWindowFreshnessWindow
+}
+
+func activeWindowSnapshotTime(raw interface{}) (time.Time, bool) {
+	awt, ok := mapValue(raw)
+	if !ok {
+		return time.Time{}, false
+	}
+	var latest time.Time
+	for _, key := range []string{"collected_at", "last_sample_at"} {
+		if t, ok := bsonTime(awt[key]); ok && t.After(latest) {
+			latest = t
+		}
+	}
+	if sessions, ok := interfaceSlice(awt["sessions"]); ok {
+		for _, rawSession := range sessions {
+			session, ok := mapValue(rawSession)
+			if !ok {
+				continue
+			}
+			if t, ok := bsonTime(session["end_time"]); ok && t.After(latest) {
+				latest = t
+			}
+		}
+	}
+	if latest.IsZero() {
+		return time.Time{}, false
+	}
+	return latest, true
+}
+
+func staleActiveWindowPayload(now time.Time) map[string]interface{} {
+	return map[string]interface{}{
+		"current_app":          "",
+		"sessions":             []interface{}{},
+		"app_summaries":        []interface{}{},
+		"cumulative_summaries": []interface{}{},
+		"stale":                true,
+		"stale_checked_at":     now,
+		"stale_after_seconds":  activeWindowFreshnessWindow.Seconds(),
+	}
+}
+
+func sanitizeDeviceActiveWindowSnapshot(device bson.M, now time.Time) {
+	switch data := device["data"].(type) {
+	case bson.M:
+		if awt, ok := data["ActiveWindowTracker"]; ok && !activeWindowSnapshotFreshAt(awt, now) {
+			data["ActiveWindowTracker"] = staleActiveWindowPayload(now)
+		}
+	case map[string]interface{}:
+		if awt, ok := data["ActiveWindowTracker"]; ok && !activeWindowSnapshotFreshAt(awt, now) {
+			data["ActiveWindowTracker"] = staleActiveWindowPayload(now)
+		}
 	}
 }
 
@@ -1276,6 +1377,9 @@ func extractFocusSessions(payload map[string]interface{}) []interface{} {
 	}
 	awt, ok := data["ActiveWindowTracker"].(map[string]interface{})
 	if !ok {
+		return nil
+	}
+	if !activeWindowSnapshotFreshAt(awt, payloadTime(payload["timestamp"])) {
 		return nil
 	}
 	raw, ok := awt["sessions"].([]interface{})
@@ -3757,6 +3861,10 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 				applyBrowserHistoryDelta(setDoc, collectorPayload)
 				continue
 			}
+			if collectorName == "ActiveWindowTracker" && !activeWindowSnapshotFreshAt(collectorPayload, now) {
+				setDoc["data."+collectorName] = staleActiveWindowPayload(now)
+				continue
+			}
 			setDoc["data."+collectorName] = collectorPayload
 		}
 	} else {
@@ -3804,6 +3912,9 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		if data, ok := payload["data"].(map[string]interface{}); ok {
 			if awt, ok := data["ActiveWindowTracker"].(map[string]interface{}); ok {
+				if !activeWindowSnapshotFreshAt(awt, time.Now()) {
+					return
+				}
 				if raw, ok := awt["app_summaries"].([]interface{}); ok && len(raw) > 0 {
 					globalFocusCache.applyFocusSummaries(authDeviceID, raw)
 				}
@@ -3863,7 +3974,7 @@ func bsonTime(v interface{}) (time.Time, bool) {
 	case primitive.DateTime:
 		return t.Time(), !t.Time().IsZero()
 	case string:
-		parsed, err := time.Parse(time.RFC3339, t)
+		parsed, err := time.Parse(time.RFC3339Nano, t)
 		if err == nil {
 			return parsed, true
 		}
@@ -4567,6 +4678,10 @@ func devicesHandler(w http.ResponseWriter, r *http.Request) {
 	if err = cursor.All(ctx, &devices); err != nil {
 		http.Error(w, "Parsing error", http.StatusInternalServerError)
 		return
+	}
+	now := time.Now()
+	for _, device := range devices {
+		sanitizeDeviceActiveWindowSnapshot(device, now)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

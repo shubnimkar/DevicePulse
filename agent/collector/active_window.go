@@ -24,7 +24,11 @@ import (
 	"strings"
 )
 
-const sampleInterval = 2 * time.Second
+const (
+	sampleInterval            = 2 * time.Second
+	foregroundAppTimeout      = 10 * time.Second
+	activeWindowSampleStaleAt = 5 * time.Minute
+)
 
 // focusSession is a single contiguous focus period for one app.
 type focusSession struct {
@@ -60,6 +64,8 @@ type ActiveWindowTracker struct {
 	// cumulative totals since agent start — never reset
 	cumulative map[string]*AppFocusSummary
 
+	lastSampleAt time.Time
+
 	stopCh chan struct{}
 	wg     sync.WaitGroup
 }
@@ -68,9 +74,10 @@ func (a *ActiveWindowTracker) Name() string { return "ActiveWindowTracker" }
 
 func (a *ActiveWindowTracker) Start() error {
 	a.cumulative = make(map[string]*AppFocusSummary)
+	a.lastSampleAt = time.Now()
 	a.stopCh = make(chan struct{})
 	a.wg.Add(1)
-	go a.sample()
+	go a.runSampler()
 	return nil
 }
 
@@ -92,7 +99,8 @@ func (a *ActiveWindowTracker) Collect() (map[string]interface{}, error) {
 	// already counted by a previous Collect() — only the first fragment of a
 	// contiguous period counts as a session.
 	now := time.Now()
-	if a.currentApp != "" {
+	fresh := !a.lastSampleAt.IsZero() && now.Sub(a.lastSampleAt) <= activeWindowSampleStaleAt
+	if a.currentApp != "" && fresh {
 		dur := now.Sub(a.sessionStart).Seconds()
 		if dur > 0 {
 			a.sessions = append(a.sessions, focusSession{
@@ -143,10 +151,16 @@ func (a *ActiveWindowTracker) Collect() (map[string]interface{}, error) {
 	}
 
 	current := a.currentApp
+	if !fresh {
+		current = ""
+	}
 	sessions := append([]focusSession(nil), a.sessions...)
 	a.sessions = nil // reset per-cycle buffer only
 
 	return map[string]interface{}{
+		"collected_at":         now,
+		"last_sample_at":       a.lastSampleAt,
+		"tracker_fresh":        fresh,
 		"current_app":          current,
 		"sessions":             sessions,
 		"app_summaries":        cycleSummaries,
@@ -154,9 +168,34 @@ func (a *ActiveWindowTracker) Collect() (map[string]interface{}, error) {
 	}, nil
 }
 
-// sample polls the active window at sampleInterval.
-func (a *ActiveWindowTracker) sample() {
+// runSampler keeps the sampling loop alive even if a platform-specific active
+// window backend panics.
+func (a *ActiveWindowTracker) runSampler() {
 	defer a.wg.Done()
+
+	for {
+		stopped := a.sample()
+		if stopped {
+			return
+		}
+		select {
+		case <-a.stopCh:
+			return
+		case <-time.After(time.Second):
+			log.Printf("ActiveWindowTracker: restarting sampler after failure")
+		}
+	}
+}
+
+// sample polls the active window at sampleInterval. It returns false when the
+// loop exited because of a recovered panic and should be restarted.
+func (a *ActiveWindowTracker) sample() (stopped bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("ActiveWindowTracker: recovered sampler panic: %v", r)
+			stopped = false
+		}
+	}()
 
 	ticker := time.NewTicker(sampleInterval)
 	defer ticker.Stop()
@@ -164,11 +203,16 @@ func (a *ActiveWindowTracker) sample() {
 	for {
 		select {
 		case <-a.stopCh:
-			return
+			return true
 		case t := <-ticker.C:
-			app := getForegroundApp()
+			app, ok := foregroundAppWithTimeout(foregroundAppTimeout)
+			if !ok {
+				log.Printf("ActiveWindowTracker: active-window sample failed or timed out")
+				continue
+			}
 
 			a.mu.Lock()
+			a.lastSampleAt = t
 			if app == "" {
 				if a.currentApp != "" {
 					dur := t.Sub(a.sessionStart).Seconds()
@@ -208,6 +252,30 @@ func (a *ActiveWindowTracker) sample() {
 			}
 			a.mu.Unlock()
 		}
+	}
+}
+
+func foregroundAppWithTimeout(timeout time.Duration) (string, bool) {
+	type foregroundResult struct {
+		app string
+		ok  bool
+	}
+	result := make(chan foregroundResult, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("ActiveWindowTracker: recovered foreground app panic: %v", r)
+				result <- foregroundResult{ok: false}
+			}
+		}()
+		result <- foregroundResult{app: getForegroundApp(), ok: true}
+	}()
+
+	select {
+	case res := <-result:
+		return res.app, res.ok
+	case <-time.After(timeout):
+		return "", false
 	}
 }
 
