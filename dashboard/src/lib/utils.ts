@@ -95,6 +95,7 @@ export function buildAppUsageSummaries(
   activeWindow?: ActiveWindowData,
   cachedSummaries: AppFocusSummary[] = [],
   dailyUsage?: DailyAppUsageData,
+  maxTotalSeconds?: number,
 ): { summaries: AppFocusSummary[]; source: 'daily' | 'live' | 'empty' } {
   const dailyApps = dailyUsage?.users.flatMap(user => (user.top_apps ?? []).map(app => ({
     ...app,
@@ -133,8 +134,23 @@ export function buildAppUsageSummaries(
     }
   }
 
+  let summaries = Array.from(merged.values()).sort((a, b) => b.total_focus_seconds - a.total_focus_seconds);
+  const totalSeconds = summaries.reduce((sum, app) => sum + (app.total_focus_seconds ?? 0), 0);
+  if (maxTotalSeconds !== undefined && maxTotalSeconds <= 0) {
+    summaries = [];
+  } else if (maxTotalSeconds !== undefined && totalSeconds > maxTotalSeconds) {
+    const scale = maxTotalSeconds / totalSeconds;
+    summaries = summaries
+      .map(app => ({
+        ...app,
+        total_focus_seconds: (app.total_focus_seconds ?? 0) * scale,
+        session_count: app.session_count > 0 ? Math.max(1, Math.ceil(app.session_count * scale)) : 0,
+      }))
+      .filter(app => app.total_focus_seconds > 0);
+  }
+
   return {
-    summaries: Array.from(merged.values()).sort((a, b) => b.total_focus_seconds - a.total_focus_seconds),
+    summaries,
     source: dailyApps.length > 0 ? 'daily' : merged.size > 0 ? 'live' : 'empty',
   };
 }

@@ -20,7 +20,7 @@ export default function FocusTab({ data, cachedSummaries, dailyUsage, dailyPrese
   }
 
   const dailyUsers = dailyUsage?.users ?? [];
-  const { summaries } = buildAppUsageSummaries(data, cachedSummaries, dailyUsage);
+  const { summaries } = buildAppUsageSummaries(data, cachedSummaries, dailyUsage, dailyPresence?.online_seconds);
   const totalSeconds = summaries.reduce((s, a) => s + a.total_focus_seconds, 0);
   const currentApp = data?.current_app ?? '';
 
