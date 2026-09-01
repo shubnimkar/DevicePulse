@@ -162,13 +162,13 @@ function dedupeHistory(history: HistoryEntry[]): HistoryEntry[] {
 }
 
 function historyIdentity(item: HistoryEntry): string {
-  const title = (item.title || '').trim().toLowerCase();
-  if (title) return title;
+  const visitTime = Number.isFinite(item.last_visit_time) ? item.last_visit_time : 0;
   try {
     const parsed = new URL(item.url);
-    return `${parsed.hostname}${parsed.pathname}`.toLowerCase();
+    parsed.hash = '';
+    return `${parsed.toString().toLowerCase()}\u0000${visitTime}`;
   } catch {
-    return (item.url || '').trim().toLowerCase();
+    return `${(item.url || '').trim().toLowerCase()}\u0000${visitTime}`;
   }
 }
 

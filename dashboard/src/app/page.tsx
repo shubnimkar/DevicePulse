@@ -289,6 +289,7 @@ export default function Home() {
   const [renameError, setRenameError] = useState('');
   const [renameSaving, setRenameSaving] = useState(false);
   const [agentPingStatus, setAgentPingStatus] = useState<AgentPingStatus>({});
+  const [deviceActionError, setDeviceActionError] = useState('');
 
   const canManagePolicy = authUser?.role === 'admin' || authUser?.role === 'manager';
   const canManageUsers = authUser?.role === 'admin';
@@ -640,6 +641,11 @@ export default function Home() {
       setAuthUser(null);
       setDevices([]);
       setFocusCache({});
+      setBrowserHistoryCache({});
+      setDailyAppUsageCache({});
+      setDailyPresenceCache({});
+      setAgentPingStatus({});
+      setDeviceActionError('');
       goToPage('dashboard', { replace: true });
       setAuthMode('login');
       void loadCurrentUser();
@@ -648,6 +654,10 @@ export default function Home() {
 
   const createUser = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    if (!canManageUsers) {
+      setUserCreateStatus('Admin access required.');
+      return;
+    }
     setUserCreateStatus('');
     try {
       const res = await apiFetch('/users', {
@@ -669,6 +679,10 @@ export default function Home() {
 
   const resetUserPassword = async (e: FormEvent<HTMLFormElement>, user: DashboardUser) => {
     e.preventDefault();
+    if (!canManageUsers) {
+      setPasswordResetStatus('Admin access required.');
+      return;
+    }
     setPasswordResetStatus('');
     try {
       const res = await apiFetch(`/users/${user.id}/password`, {
@@ -690,6 +704,10 @@ export default function Home() {
   };
 
   const updateUserRole = async (user: DashboardUser, role: UserRole) => {
+    if (!canManageUsers) {
+      setRoleUpdateStatus('Admin access required.');
+      return;
+    }
     setRoleUpdateStatus('');
     try {
       const res = await apiFetch(`/users/${user.id}/role`, {
@@ -851,6 +869,7 @@ export default function Home() {
 
   const openDeleteConfirm = (deviceId: string, name: string) => {
     if (!canDeleteDevices) return;
+    setDeviceActionError('');
     setConfirmTarget({ deviceId, name });
   };
 
@@ -900,6 +919,7 @@ export default function Home() {
       }
     } catch (e) {
       console.error('Device deletion failed:', e);
+      setDeviceActionError(e instanceof Error ? e.message : 'Device deletion failed.');
     }
   };
 
@@ -1006,8 +1026,11 @@ export default function Home() {
     if (!authUser || currentPage !== 'inspect' || !selectedDeviceId) return;
     const tab = activeTab[selectedDeviceId] ?? 'overview';
     if (tab !== 'overview' && tab !== 'focus') return;
-    void fetchDailyAppUsage(selectedDeviceId, appUsageDate, { showLoader: false });
-    void fetchDailyPresence(selectedDeviceId, appUsageDate);
+    const t = window.setTimeout(() => {
+      void fetchDailyAppUsage(selectedDeviceId, appUsageDate, { showLoader: false });
+      void fetchDailyPresence(selectedDeviceId, appUsageDate);
+    }, 0);
+    return () => window.clearTimeout(t);
   }, [activeTab, appUsageDate, authUser, currentPage, fetchDailyAppUsage, fetchDailyPresence, selectedDeviceId]);
 
   const buildOnDemandReport = (report: WeeklyReport, type: OnDemandReportType): string => {
@@ -1593,6 +1616,8 @@ export default function Home() {
             )}
           </div>
 
+          {deviceActionError && <div className="auth-error" role="alert">{deviceActionError}</div>}
+
           {currentPage === 'dashboard' && (
             <>
               <section className="dashboard-tiles" aria-label="Fleet summary">
@@ -1754,7 +1779,13 @@ export default function Home() {
           )}
 
           {/* Content */}
-          {currentPage === 'access' ? (
+          {currentPage === 'access' && !canManageUsers ? (
+            <div className="empty-state">
+              <span className="empty-icon">🔒</span>
+              <div className="empty-title">Admin access required</div>
+              <div className="empty-sub">User management is available to dashboard admins only.</div>
+            </div>
+          ) : currentPage === 'access' ? (
             <div className="settings-layout">
               <section className="settings-panel">
                 <div className="settings-panel-header">

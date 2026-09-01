@@ -123,11 +123,14 @@ export function buildAppUsageSummaries(
     session_count: app.session_count ?? 0,
   }))).filter(app => isVisibleAppUsageName(app.app_name)) ?? [];
   const liveWindowFresh = isFreshActiveWindowData(activeWindow);
+  const dailyUsageLoaded = dailyUsage !== undefined;
 
   const sourceApps = dailyApps.length > 0
     ? dailyApps
+    : dailyUsageLoaded
+      ? []
     : liveWindowFresh
-      ? (activeWindow?.cumulative_summaries ?? activeWindow?.app_summaries ?? [])
+      ? (activeWindow?.app_summaries ?? [])
         .filter(app => isVisibleAppUsageName(app.app_name))
       : [];
 
@@ -147,7 +150,7 @@ export function buildAppUsageSummaries(
     }
   }
 
-  if (dailyApps.length === 0 && liveWindowFresh) {
+  if (dailyApps.length === 0 && !dailyUsageLoaded && liveWindowFresh) {
     for (const app of cachedSummaries.filter(app => isVisibleAppUsageName(app.app_name))) {
       const existing = merged.get(app.app_name);
       if (!existing || app.total_focus_seconds > existing.total_focus_seconds) {
