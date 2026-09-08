@@ -67,7 +67,7 @@ function diskSize(disk: DiskStat, kind: 'total' | 'used' | 'free'): string {
 }
 
 export default function HardwareTab({ hw }: Props) {
-  if (!hw) return <div className="no-data">No hardware data yet.</div>;
+  if (!hw) return <div className="no-data">Hardware telemetry was not included in the latest device check-in.</div>;
 
   const cpu  = hw.cpu;
   const ram  = hw.ram;
@@ -82,8 +82,8 @@ export default function HardwareTab({ hw }: Props) {
         {/* CPU */}
         <div className="hw-card">
           <div className="hw-label">CPU</div>
-          <div className="hw-value" style={{ color: metricColor(cpu?.usage_percent ?? 0) }}>
-            {cpu?.usage_percent?.toFixed(1) ?? '—'}%
+          <div className="hw-value" style={{ color: cpu?.usage_percent === undefined ? 'var(--text-3)' : metricColor(cpu.usage_percent) }}>
+            {cpu?.usage_percent === undefined ? 'Unavailable' : `${cpu.usage_percent.toFixed(1)}%`}
           </div>
           <GaugeBar value={cpu?.usage_percent ?? 0} color={metricColor(cpu?.usage_percent ?? 0)} />
           <div className="hw-sub">{cpu?.core_count ?? '?'} logical cores</div>
@@ -92,8 +92,8 @@ export default function HardwareTab({ hw }: Props) {
         {/* RAM */}
         <div className="hw-card">
           <div className="hw-label">Memory</div>
-          <div className="hw-value" style={{ color: metricColor(ram?.used_percent ?? 0) }}>
-            {ram?.used_percent?.toFixed(1) ?? '—'}%
+          <div className="hw-value" style={{ color: ram?.used_percent === undefined ? 'var(--text-3)' : metricColor(ram.used_percent) }}>
+            {ram?.used_percent === undefined ? 'Unavailable' : `${ram.used_percent.toFixed(1)}%`}
           </div>
           <GaugeBar value={ram?.used_percent ?? 0} color={metricColor(ram?.used_percent ?? 0)} />
           <div className="hw-sub">{ram?.used_gb?.toFixed(1) ?? '?'} / {ram?.total_gb?.toFixed(1) ?? '?'} GB</div>
@@ -102,11 +102,11 @@ export default function HardwareTab({ hw }: Props) {
         {/* Disk */}
         <div className="hw-card">
           <div className="hw-label">Disk {disk?.mount}</div>
-          <div className="hw-value" style={{ color: metricColor(diskPct ?? 0) }}>
-            {diskPct !== null ? diskPct.toFixed(1) : '—'}%
+          <div className="hw-value" style={{ color: diskPct === null ? 'var(--text-3)' : metricColor(diskPct) }}>
+            {diskPct === null ? 'Unavailable' : `${diskPct.toFixed(1)}%`}
           </div>
           <GaugeBar value={diskPct ?? 0} color={metricColor(diskPct ?? 0)} />
-          <div className="hw-sub">{disk ? `${diskSize(disk, 'used')} / ${diskSize(disk, 'total')}` : '—'}</div>
+          <div className="hw-sub">{disk ? `${diskSize(disk, 'used')} / ${diskSize(disk, 'total')}` : 'Telemetry unavailable'}</div>
         </div>
 
         {/* Network */}
@@ -115,11 +115,11 @@ export default function HardwareTab({ hw }: Props) {
           <div className="net-io-pair">
             <div className="net-io-item">
               <span className="net-io-arrow" style={{ color: 'var(--cyan)' }}>↑</span>
-              <span className="net-io-val">{net ? formatBytes(net.bytes_sent) : '—'}</span>
+              <span className="net-io-val">{net ? formatBytes(net.bytes_sent) : 'Unavailable'}</span>
             </div>
             <div className="net-io-item">
               <span className="net-io-arrow" style={{ color: 'var(--blue)' }}>↓</span>
-              <span className="net-io-val">{net ? formatBytes(net.bytes_recv) : '—'}</span>
+              <span className="net-io-val">{net ? formatBytes(net.bytes_recv) : 'Unavailable'}</span>
             </div>
           </div>
           {hw.uptime_human && <div className="hw-sub">Up {hw.uptime_human}</div>}
@@ -158,7 +158,7 @@ export default function HardwareTab({ hw }: Props) {
                             <GaugeBar value={pct ?? 0} color={metricColor(pct ?? 0)} height={3} />
                           </div>
                           <span className="mono disk-usage-pct" style={{ color: metricColor(pct ?? 0) }}>
-                            {pct !== null ? `${pct.toFixed(0)}%` : '—'}
+                            {pct !== null ? `${pct.toFixed(0)}%` : 'Unavailable'}
                           </span>
                         </div>
                       </td>

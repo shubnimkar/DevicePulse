@@ -17,7 +17,7 @@ interface Props {
 
 export default function FocusTab({ data, cachedSummaries, dailyUsage, dailyPresence, dailyUsageLoading = false, usageDate, onUsageDateChange }: Props) {
   if (!data && cachedSummaries.length === 0 && !dailyUsage) {
-    return <div className="no-data">No active window data yet.</div>;
+    return <div className="no-data">App-usage telemetry was not included in the latest device check-in.</div>;
   }
 
   const dailyUsers = dailyUsage?.users ?? [];

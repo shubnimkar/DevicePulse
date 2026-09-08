@@ -149,14 +149,14 @@ export default function SecurityTab({ usb, osUpd, deviceId, userRole, deviceOnli
           })}
         </div>
         {notice && (
-          <div className={`ra-notice ${notice.kind === 'ok' ? 'ra-notice-ok' : 'ra-notice-err'}`}>{notice.msg}</div>
+          <div role={notice.kind === 'err' ? 'alert' : 'status'} className={`ra-notice ${notice.kind === 'ok' ? 'ra-notice-ok' : 'ra-notice-err'}`}>{notice.msg}</div>
         )}
 
         {/* Command history */}
         <div className="ra-history">
           <div className="ra-history-title">
             Recent Commands
-            <button className="ra-refresh" onClick={loadCommands} disabled={cmdLoading} aria-label="Refresh command history">
+            <button type="button" className="ra-refresh" onClick={loadCommands} disabled={cmdLoading} aria-label="Refresh command history">
               {cmdLoading ? '…' : '⟳'}
             </button>
           </div>
@@ -213,7 +213,7 @@ export default function SecurityTab({ usb, osUpd, deviceId, userRole, deviceOnli
             )}
           </>
         ) : (
-          <div className="no-data no-data-roomy">No update data yet.</div>
+          <div className="no-data no-data-roomy">Update telemetry was not included in the latest device check-in.</div>
         )}
       </div>
 

@@ -16,7 +16,7 @@ export default function PortsTab({ data }: Props) {
         <span className="pill pill-green">{ports.length} open ports</span>
         {data?.source && <span className="pill pill-blue mono">{data.source}</span>}
       </div>
-      <table className="ports-table">
+      <div className="responsive-table"><table className="ports-table">
         <thead>
           <tr>
             <th scope="col">Protocol</th>
@@ -41,7 +41,7 @@ export default function PortsTab({ data }: Props) {
             </tr>
           ))}
         </tbody>
-      </table>
+      </table></div>
     </div>
   );
 }

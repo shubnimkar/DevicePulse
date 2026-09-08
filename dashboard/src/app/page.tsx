@@ -282,6 +282,7 @@ export default function Home() {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [currentPage, setCurrentPage] = useState<PageView>('dashboard');
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
   const [fleetConn, setFleetConn] = useState<'connecting' | 'live' | 'stale'>('connecting');
   const [confirmTarget, setConfirmTarget] = useState<{ deviceId: string; name: string } | null>(null);
@@ -291,6 +292,8 @@ export default function Home() {
   const [renameSaving, setRenameSaving] = useState(false);
   const [agentPingStatus, setAgentPingStatus] = useState<AgentPingStatus>({});
   const [deviceActionError, setDeviceActionError] = useState('');
+  const mobileNavButtonRef = useRef<HTMLButtonElement>(null);
+  const appMainRef = useRef<HTMLElement>(null);
 
   const canManagePolicy = authUser?.role === 'admin' || authUser?.role === 'manager';
   const canManageUsers = authUser?.role === 'admin';
@@ -343,6 +346,10 @@ export default function Home() {
       setActiveTab(prev => ({ ...prev, [deviceId]: tab }));
     }
     writeNavigationState(view, { ...options, deviceId, tab });
+    window.requestAnimationFrame(() => {
+      window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+      appMainRef.current?.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+    });
   }, [writeNavigationState]);
 
   const loadCurrentUser = useCallback(async () => {
@@ -378,6 +385,23 @@ export default function Home() {
   }, [loadCurrentUser]);
 
   useEffect(() => {
+    if (!mobileNavOpen) return;
+    const trigger = mobileNavButtonRef.current;
+    document.body.style.overflow = 'hidden';
+    const firstItem = document.querySelector<HTMLElement>('.app-sidebar.mobile-open .nav-item');
+    firstItem?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMobileNavOpen(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      document.body.style.overflow = '';
+      trigger?.focus();
+    };
+  }, [mobileNavOpen]);
+
+  useEffect(() => {
     const id = window.setTimeout(applyNavigationState, 0);
     window.addEventListener('popstate', applyNavigationState);
     return () => {
@@ -385,6 +409,14 @@ export default function Home() {
       window.removeEventListener('popstate', applyNavigationState);
     };
   }, [applyNavigationState]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+      appMainRef.current?.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [currentPage, selectedDeviceId]);
 
   // Latest-value refs keep the 5s polling interval stable across tab/range/date changes.
   const activeTabRef = useRef(activeTab);
@@ -1135,6 +1167,19 @@ export default function Home() {
     ? dailyPresenceCache[selectedDevice.device_id]?.[appUsageDate]
     : undefined;
 
+  useEffect(() => {
+    const pageName = currentPage === 'dashboard'
+      ? 'Overview'
+      : currentPage === 'inventory'
+        ? 'Devices'
+        : currentPage === 'inspect'
+          ? selectedDeviceName || 'Device'
+          : currentPage === 'access'
+            ? 'Access Control'
+            : currentPage.charAt(0).toUpperCase() + currentPage.slice(1);
+    document.title = `${pageName} · DevicePulse`;
+  }, [currentPage, selectedDeviceName]);
+
   const deviceRisk = (device: Device) => {
     const hw = device.data?.HardwareStats;
     return Math.max(hw?.cpu?.usage_percent ?? 0, hw?.ram?.used_percent ?? 0, primaryDisk(hw?.disks)?.used_percent ?? 0);
@@ -1149,10 +1194,8 @@ export default function Home() {
 
   const criticalCount = devices.filter(d => getDeviceState(d) === 'critical').length;
   const warningCount  = devices.filter(d => getDeviceState(d) === 'warning').length;
-  const attentionDevice = [...devices]
-    .sort((a, b) => deviceRisk(b) - deviceRisk(a))
-    .find(d => deviceRisk(d) > 0);
-  const hotDevices = [...devices]
+  const attentionDevices = [...devices]
+    .filter(d => getDeviceState(d) !== 'online')
     .sort((a, b) => {
       const stateWeight = (device: Device) => {
         const state = getDeviceState(device);
@@ -1162,9 +1205,8 @@ export default function Home() {
         return 0;
       };
       return stateWeight(b) + deviceRisk(b) - (stateWeight(a) + deviceRisk(a));
-    })
-    .slice(0, 5);
-  const radarDevices = hotDevices.length ? hotDevices : devices.slice(0, 5);
+    });
+  const needsAttentionCount = attentionDevices.length;
   const avgCpu = devices.length > 0
     ? devices.reduce((sum, d) => sum + (d.data?.HardwareStats?.cpu?.usage_percent ?? 0), 0) / devices.length
     : 0;
@@ -1174,18 +1216,6 @@ export default function Home() {
   const avgDisk = devices.length > 0
     ? devices.reduce((sum, d) => sum + (primaryDisk(d.data?.HardwareStats?.disks)?.used_percent ?? 0), 0) / devices.length
     : 0;
-  const commandStatus = criticalCount > 0
-    ? 'Critical'
-    : offlineCount > 0 || warningCount > 0
-      ? 'Watch'
-      : 'Stable';
-  const signalBars = [
-    { label: 'CPU', value: avgCpu, className: 'signal-cpu' },
-    { label: 'RAM', value: avgRam, className: 'signal-ram' },
-    { label: 'Disk', value: avgDisk, className: 'signal-disk' },
-    { label: 'Link', value: fleetUptimePercent, className: 'signal-link' },
-  ];
-
   const normalizedQuery = searchQuery.trim().toLowerCase();
   const filteredDevices = devices.filter(device => {
     const state = getDeviceState(device);
@@ -1296,7 +1326,7 @@ export default function Home() {
               <li><IconDevices /> Cross-platform agents, one dashboard</li>
             </ul>
             <div className="auth-demo">
-              <div className="auth-demo-title"><span className="auth-demo-dot" />Live fleet snapshot</div>
+              <div className="auth-demo-title"><span className="auth-demo-dot" />Sample fleet snapshot</div>
               <div className="auth-demo-row">
                 <span className="auth-demo-label">CPU</span>
                 <span className="auth-demo-track"><span className="auth-demo-fill" style={{ width: '34%' }} /></span>
@@ -1410,6 +1440,16 @@ export default function Home() {
 
       {/* ── Top header bar ── */}
       <header className="app-header">
+        <button
+          ref={mobileNavButtonRef}
+          type="button"
+          className="mobile-nav-toggle"
+          aria-label={mobileNavOpen ? 'Close navigation' : 'Open navigation'}
+          aria-expanded={mobileNavOpen}
+          onClick={() => setMobileNavOpen(open => !open)}
+        >
+          <span /><span /><span />
+        </button>
         <div className="header-brand">
           <div className="header-logo"><IconLogo /></div>
           <span className="brand-name">DevicePulse</span>
@@ -1448,32 +1488,32 @@ export default function Home() {
       </header>
 
       {/* ── Sidebar ── */}
-      <aside className="app-sidebar">
+      <aside className={`app-sidebar ${mobileNavOpen ? 'mobile-open' : ''}`} aria-label="Primary navigation">
         <div className="sidebar-section">
           <div className="sidebar-label">Navigation</div>
           <nav className="sidebar-nav" aria-label="Dashboard pages">
             <button
               type="button"
               className={`nav-item ${currentPage === 'dashboard' ? 'active' : ''}`}
-              onClick={() => goToPage('dashboard')}
+              onClick={() => { goToPage('dashboard'); setMobileNavOpen(false); }}
               aria-current={currentPage === 'dashboard' ? 'page' : undefined}
             >
               <IconGrid />
-              Dashboard
+              Overview
             </button>
             <button
               type="button"
               className={`nav-item ${currentPage === 'inventory' ? 'active' : ''}`}
-              onClick={() => goToPage('inventory')}
+              onClick={() => { goToPage('inventory'); setMobileNavOpen(false); }}
               aria-current={currentPage === 'inventory' ? 'page' : undefined}
             >
               <IconList />
-              Device Inventory
+              Devices
             </button>
             <button
               type="button"
               className={`nav-item ${currentPage === 'reports' ? 'active' : ''}`}
-              onClick={() => goToPage('reports')}
+              onClick={() => { goToPage('reports'); setMobileNavOpen(false); }}
               aria-current={currentPage === 'reports' ? 'page' : undefined}
             >
               <IconReport />
@@ -1482,7 +1522,7 @@ export default function Home() {
             <button
               type="button"
               className={`nav-item ${currentPage === 'settings' ? 'active' : ''}`}
-              onClick={() => goToPage('settings')}
+              onClick={() => { goToPage('settings'); setMobileNavOpen(false); }}
               aria-current={currentPage === 'settings' ? 'page' : undefined}
             >
               <IconSettings />
@@ -1492,7 +1532,7 @@ export default function Home() {
               <button
                 type="button"
                 className={`nav-item ${currentPage === 'access' ? 'active' : ''}`}
-                onClick={() => goToPage('access')}
+                onClick={() => { goToPage('access'); setMobileNavOpen(false); }}
                 aria-current={currentPage === 'access' ? 'page' : undefined}
               >
                 <IconSettings />
@@ -1502,42 +1542,16 @@ export default function Home() {
           </nav>
         </div>
 
-        <div className="sidebar-section">
-          <div className="sidebar-label">Fleet — {filteredDevices.length}/{devices.length}</div>
-          <div className="fleet-widget">
-            <input
-              value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
-              placeholder="Search devices…"
-              className="fleet-search"
-              aria-label="Search devices"
-            />
-            <div className="fleet-filter-row" role="group" aria-label="Status filter">
-              {(['all', 'online', 'offline'] as const).map(f => (
-                <button
-                  key={f}
-                  type="button"
-                  className={`fleet-filter-btn ${statusFilter === f ? 'active' : ''}`}
-                  onClick={() => setStatusFilter(f)}
-                >
-                  {f}
-                </button>
-              ))}
-            </div>
-            {attentionDevice && (
-              <div className="attention-strip">
-                <div className="kicker">Needs Attention</div>
-                <strong>{deviceDisplayName(attentionDevice)}</strong>
-                <span>Peak load {deviceRisk(attentionDevice).toFixed(0)}%</span>
-              </div>
-            )}
-          </div>
+        <div className="sidebar-status" aria-label="Fleet connection status">
+          <span className={`status-indicator ${fleetConn === 'live' ? 'is-live' : ''}`} />
+          <div><strong>{fleetConn === 'live' ? 'Fleet connected' : 'Updating fleet'}</strong><span>{onlineCount} of {devices.length} online now</span></div>
         </div>
 
       </aside>
+      {mobileNavOpen && <button type="button" className="mobile-nav-backdrop" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)} />}
 
       {/* ── Main content ── */}
-      <main className="app-main">
+      <main ref={appMainRef} className="app-main">
         <AnimatePresence mode="wait">
         <motion.div
           key={`${currentPage}:${selectedDeviceId || 'fleet'}`}
@@ -1560,8 +1574,8 @@ export default function Home() {
                   : currentPage === 'reports'
                     ? 'Weekly Report'
                   : currentPage === 'inventory'
-                    ? 'Device Inventory'
-                    : 'Telemetry Dashboard'}
+                    ? 'Devices'
+                    : 'Overview'}
               </h1>
               <p>
                 {currentPage === 'settings'
@@ -1573,8 +1587,8 @@ export default function Home() {
                   : currentPage === 'reports'
                   ? 'Seven-day fleet activity and coverage'
                   : currentPage === 'inventory'
-                  ? `${devices.length.toLocaleString()} device${devices.length !== 1 ? 's' : ''} registered`
-                  : 'Fleet status summary'}
+                  ? `${devices.length.toLocaleString()} registered endpoint${devices.length !== 1 ? 's' : ''}`
+                  : 'Current fleet health and devices that need attention'}
               </p>
             </div>
             {currentPage === 'inspect' ? (
@@ -1627,6 +1641,15 @@ export default function Home() {
                 </button>
               </div>
             )}
+            {currentPage === 'settings' && (
+              <div className="page-save-status" aria-live="polite">
+                <span className={`status-indicator ${isUpdating ? 'is-saving' : policySavedAt ? 'is-saved' : ''}`} />
+                <div>
+                  <strong>{!canManagePolicy ? 'Read-only access' : isUpdating ? 'Saving changes' : policySavedAt ? 'Policy saved' : 'Changes save automatically'}</strong>
+                  <small>{!canManagePolicy ? 'A manager or admin can change fleet policy.' : policySavedAt ? `Last saved ${policySavedAt}` : 'Updates apply to the global fleet policy.'}</small>
+                </div>
+              </div>
+            )}
           </div>
 
           {deviceActionError && <div className="auth-error" role="alert">{deviceActionError}</div>}
@@ -1644,6 +1667,7 @@ export default function Home() {
                 >
                   <span>Total Devices</span>
                   <strong>{devices.length.toLocaleString()}</strong>
+                  <small>Registered endpoints</small>
                 </button>
                 <button
                   type="button"
@@ -1653,8 +1677,9 @@ export default function Home() {
                     goToPage('inventory');
                   }}
                 >
-                  <span>Online</span>
+                  <span>Online Now</span>
                   <strong>{onlineCount.toLocaleString()}</strong>
+                  <small>{fleetUptimePercent.toFixed(0)}% of fleet</small>
                 </button>
                 <button
                   type="button"
@@ -1666,110 +1691,65 @@ export default function Home() {
                 >
                   <span>Offline</span>
                   <strong>{offlineCount.toLocaleString()}</strong>
+                  <small>Missed recent check-in</small>
                 </button>
                 <button
                   type="button"
-                  className="dashboard-tile tile-uptime"
+                  className="dashboard-tile tile-attention"
                   onClick={() => {
-                    setStatusFilter('all');
+                    setStatusFilter(criticalCount > 0 ? 'critical' : warningCount > 0 ? 'warning' : offlineCount > 0 ? 'offline' : 'all');
                     goToPage('inventory');
                   }}
                 >
-                  <span>Total Uptime</span>
-                  <strong>{fleetUptimePercent.toFixed(1)}%</strong>
+                  <span>Needs Attention</span>
+                  <strong>{needsAttentionCount.toLocaleString()}</strong>
+                  <small>{criticalCount} critical · {warningCount} warning</small>
                 </button>
               </section>
 
-              <section className="command-panel" aria-label="Fleet command radar">
-                <div className="command-radar">
-                  <div className="radar-header">
-                    <div>
-                      <span>Fleet Command</span>
-                      <strong>{commandStatus}</strong>
-                    </div>
-                    <button
-                      type="button"
-                      className={`command-state state-${commandStatus.toLowerCase()}`}
-                      onClick={() => {
-                        setStatusFilter(commandStatus === 'Stable' ? 'online' : criticalCount > 0 ? 'critical' : 'offline');
-                        goToPage('inventory');
-                      }}
-                    >
-                      {criticalCount + warningCount + offlineCount} Signals
-                    </button>
+              <section className="overview-workspace">
+                <div className="attention-panel">
+                  <div className="section-heading">
+                    <div><span>Priority queue</span><h2>Needs attention</h2></div>
+                    <button type="button" className="text-button" onClick={() => goToPage('inventory')}>View all devices</button>
                   </div>
-
-                  <div className="radar-stage">
-                    <div className="radar-sweep" />
-                    <div className="radar-ring ring-one" />
-                    <div className="radar-ring ring-two" />
-                    <div className="radar-ring ring-three" />
-                    {radarDevices.map((device, index) => {
-                      const state = getDeviceState(device);
-                      const positions = [
-                        { left: '68%', top: '28%' },
-                        { left: '34%', top: '34%' },
-                        { left: '54%', top: '62%' },
-                        { left: '77%', top: '68%' },
-                        { left: '24%', top: '70%' },
-                      ];
-                      return (
-                        <button
-                          key={device.device_id}
-                          type="button"
-                          className={`radar-blip blip-${state}`}
-                          style={positions[index % positions.length]}
-                          onClick={() => goToPage('inspect', { deviceId: device.device_id, tab: 'overview' })}
-                          aria-label={`Inspect ${deviceDisplayName(device)}`}
-                        />
-                      );
-                    })}
-                    <div className="radar-core">
-                      <strong>{fleetUptimePercent.toFixed(0)}%</strong>
-                      <span>link</span>
+                  {attentionDevices.length ? (
+                    <div className="attention-list">
+                      {attentionDevices.slice(0, 6).map(device => {
+                        const state = getDeviceState(device);
+                        const risk = deviceRisk(device);
+                        const reason = state === 'offline' ? 'Device is no longer checking in' : `${risk.toFixed(0)}% peak resource usage`;
+                        return (
+                          <button key={device.device_id} type="button" className="attention-row" onClick={() => viewDeviceDetails(device.device_id)}>
+                            <span className={`attention-icon state-${state}`} aria-hidden="true">{state === 'critical' ? '!' : state === 'warning' ? '↑' : '–'}</span>
+                            <span className="attention-copy"><strong>{deviceDisplayName(device)}</strong><small>{reason}</small></span>
+                            <span className={`status-badge badge-${state}`}><span className="dot" />{state === 'offline' ? 'Offline' : state}</span>
+                            <span className="attention-seen">{timeAgo(device.last_seen)}</span>
+                            <span className="row-chevron" aria-hidden="true">›</span>
+                          </button>
+                        );
+                      })}
                     </div>
-                  </div>
+                  ) : (
+                    <div className="healthy-empty"><span>✓</span><div><strong>Fleet looks healthy</strong><p>All connected devices are within the current resource thresholds.</p></div></div>
+                  )}
                 </div>
 
-                <div className="command-side">
-                  <div className="signal-stack">
-                    {signalBars.map(signal => (
-                      <div key={signal.label} className="signal-row">
-                        <span>{signal.label}</span>
-                        <div className="signal-track">
-                          <i className={signal.className} style={{ width: `${Math.min(100, Math.max(0, signal.value))}%` }} />
-                        </div>
-                        <strong>{signal.value.toFixed(0)}%</strong>
-                      </div>
-                    ))}
-                  </div>
-
-                  <div className="hot-list">
-                    <div className="hot-list-title">
-                      <span>Heat Map</span>
-                      <strong>{hotDevices.length ? 'Top Signals' : 'No Devices'}</strong>
+                <aside className="fleet-snapshot" aria-label="Fleet resource snapshot">
+                  <div className="section-heading"><div><span>Current snapshot</span><h2>Fleet resources</h2></div></div>
+                  {[
+                    ['CPU', avgCpu, 'blue'],
+                    ['Memory', avgRam, 'cyan'],
+                    ['Disk', avgDisk, 'violet'],
+                    ['Connected', fleetUptimePercent, 'green'],
+                  ].map(([label, value, tone]) => (
+                    <div className="snapshot-metric" key={String(label)}>
+                      <div><span>{label}</span><strong>{Number(value).toFixed(0)}%</strong></div>
+                      <div className="snapshot-track"><i className={`tone-${tone}`} style={{ width: `${Math.min(100, Number(value))}%` }} /></div>
                     </div>
-                    {hotDevices.length ? hotDevices.map(device => {
-                      const state = getDeviceState(device);
-                      return (
-                        <button
-                          key={device.device_id}
-                          type="button"
-                          className={`hot-device hot-${state}`}
-                          onClick={() => goToPage('inspect', { deviceId: device.device_id, tab: 'overview' })}
-                        >
-                          <span>{deviceDisplayName(device)}</span>
-                          <strong>{state === 'offline' ? 'Offline' : `${deviceRisk(device).toFixed(0)}%`}</strong>
-                        </button>
-                      );
-                    }) : (
-                      <div className="hot-device hot-empty">
-                        <span>Waiting for telemetry</span>
-                        <strong>Idle</strong>
-                      </div>
-                    )}
-                  </div>
-                </div>
+                  ))}
+                  <p>Current fleet averages from the latest device check-ins.</p>
+                </aside>
               </section>
             </>
           )}
@@ -1800,6 +1780,11 @@ export default function Home() {
             </div>
           ) : currentPage === 'access' ? (
             <div className="settings-layout">
+              <section className="role-summary-grid" aria-label="Dashboard role permissions">
+                <div><span>Viewer</span><strong>Read telemetry</strong><p>Can inspect devices, reports, and current policy.</p></div>
+                <div><span>Manager</span><strong>Manage policy</strong><p>Viewer access plus collection and retention settings.</p></div>
+                <div><span>Admin</span><strong>Full control</strong><p>Can manage users, devices, releases, and fleet policy.</p></div>
+              </section>
               <section className="settings-panel">
                 <div className="settings-panel-header">
                   <div>
@@ -1866,11 +1851,11 @@ export default function Home() {
                   <table className="data-table">
                     <thead>
                       <tr>
-                        <th>User</th>
-                        <th>Role</th>
-                        <th>Status</th>
-                        <th>Created</th>
-                        <th style={{ textAlign: 'right' }}>Password</th>
+                        <th scope="col">User</th>
+                        <th scope="col">Role</th>
+                        <th scope="col">Status</th>
+                        <th scope="col">Created</th>
+                        <th scope="col" style={{ textAlign: 'right' }}>Password</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1951,10 +1936,6 @@ export default function Home() {
                     <h2>Retention</h2>
                     <p>Controls how long new server telemetry remains queryable.</p>
                   </div>
-                  {isUpdating
-                    ? <span className="save-state muted" role="status">Saving…</span>
-                    : policySavedAt && <span className="save-state" role="status">Saved {policySavedAt}</span>}
-                  {!canManagePolicy && <span className="save-state muted">Read only</span>}
                 </div>
                 <div className="settings-grid two-col">
                   <label className="setting-field">
@@ -2285,20 +2266,24 @@ export default function Home() {
 
                   <section className="dashboard-tiles report-tiles" aria-label="Weekly report summary">
                     <div className="dashboard-tile">
-                      <span>Devices</span>
+                      <span>Reporting Devices</span>
                       <strong>{weeklyReport.coverage.device_count.toLocaleString()}</strong>
+                      <small>Present in selected window</small>
                     </div>
                     <div className="dashboard-tile tile-online">
-                      <span>Online</span>
+                      <span>Online Now</span>
                       <strong>{weeklyReport.fleet.online.toLocaleString()}</strong>
+                      <small>Current fleet snapshot</small>
                     </div>
                     <div className="dashboard-tile tile-offline">
-                      <span>Offline</span>
+                      <span>Offline Now</span>
                       <strong>{weeklyReport.fleet.offline.toLocaleString()}</strong>
+                      <small>Current fleet snapshot</small>
                     </div>
-                    <div className="dashboard-tile tile-uptime">
+                    <div className="dashboard-tile tile-attention">
                       <span>App Usage</span>
                       <strong>{formatDuration(weeklyReport.app_usage.total_seconds)}</strong>
+                      <small>During selected window</small>
                     </div>
                   </section>
 
@@ -2395,11 +2380,11 @@ export default function Home() {
                           <table className="data-table report-table">
                             <thead>
                               <tr>
-                                <th>Device</th>
-                                <th>Status</th>
-                                <th>Usage Days</th>
-                                <th>App Usage</th>
-                                <th>Browser Entries</th>
+                                <th scope="col">Device</th>
+                                <th scope="col">Status</th>
+                                <th scope="col">Usage Days</th>
+                                <th scope="col">App Usage</th>
+                                <th scope="col">Browser Entries</th>
                               </tr>
                             </thead>
                             <tbody>
@@ -2464,11 +2449,11 @@ export default function Home() {
                           <table className="data-table report-table">
                             <thead>
                               <tr>
-                                <th>Device</th>
-                                <th>Usage Days</th>
-                                <th>App Usage</th>
-                                <th>Sessions</th>
-                                <th>Browser Entries</th>
+                                <th scope="col">Device</th>
+                                <th scope="col">Usage Days</th>
+                                <th scope="col">App Usage</th>
+                                <th scope="col">Sessions</th>
+                                <th scope="col">Browser Entries</th>
                               </tr>
                             </thead>
                             <tbody>
@@ -2521,13 +2506,13 @@ export default function Home() {
                           <table className="data-table report-table">
                             <thead>
                               <tr>
-                                <th>Device</th>
-                                <th>Status</th>
-                                <th>CPU</th>
-                                <th>Memory</th>
-                                <th>Disk</th>
-                                <th>Updates</th>
-                                <th>Telemetry</th>
+                                <th scope="col">Device</th>
+                                <th scope="col">Status</th>
+                                <th scope="col">CPU</th>
+                                <th scope="col">Memory</th>
+                                <th scope="col">Disk</th>
+                                <th scope="col">Updates</th>
+                                <th scope="col">Telemetry</th>
                               </tr>
                             </thead>
                             <tbody>
@@ -2545,9 +2530,9 @@ export default function Home() {
                                       {device.state === 'online' ? 'Online' : device.state}
                                     </span>
                                   </td>
-                                  <td>{(device.cpu_percent ?? 0).toFixed(1)}%</td>
-                                  <td>{(device.ram_percent ?? 0).toFixed(1)}%</td>
-                                  <td>{(device.disk_percent ?? 0).toFixed(1)}%</td>
+                                  <td>{device.cpu_percent === undefined ? 'Unavailable' : `${device.cpu_percent.toFixed(1)}%`}</td>
+                                  <td>{device.ram_percent === undefined ? 'Unavailable' : `${device.ram_percent.toFixed(1)}%`}</td>
+                                  <td>{device.disk_percent === undefined ? 'Unavailable' : `${device.disk_percent.toFixed(1)}%`}</td>
                                   <td>{device.pending_updates.toLocaleString()}</td>
                                   <td>{device.telemetry_events.toLocaleString()}</td>
                                 </tr>
@@ -2618,17 +2603,40 @@ export default function Home() {
           ) : currentPage === 'inventory' ? (
             /* ── Inventory table ── */
             <div>
+              <div className="inventory-mobile-list">
+                {filteredDevices.map(device => {
+                  const sys = device.data?.SystemInfo;
+                  const state = getDeviceState(device);
+                  const name = deviceDisplayName(device);
+                  const cpu = device.data?.HardwareStats?.cpu?.usage_percent;
+                  const ram = device.data?.HardwareStats?.ram?.used_percent;
+                  return (
+                    <article key={device.device_id} className={`inventory-mobile-card state-${state}`}>
+                      <button type="button" className="mobile-device-main" onClick={() => viewDeviceDetails(device.device_id)}>
+                        <span className="mobile-device-title"><strong>{name}</strong><span className={`status-badge badge-${state}`}><span className="dot" />{state === 'online' ? 'Online' : state}</span></span>
+                        <span className="mobile-device-meta">{sys?.hostname || device.hostname || device.device_id}</span>
+                        <span className="mobile-device-meta">{sys?.platform || device.agent_os || 'Platform unavailable'} · {timeAgo(device.last_seen)}</span>
+                        <span className="mobile-resource-row"><span>CPU <strong>{cpu === undefined ? 'Unavailable' : `${cpu.toFixed(0)}%`}</strong></span><span>Memory <strong>{ram === undefined ? 'Unavailable' : `${ram.toFixed(0)}%`}</strong></span></span>
+                      </button>
+                      <div className="mobile-device-actions">
+                        <button type="button" className="action-btn primary" onClick={() => viewDeviceDetails(device.device_id)}>Inspect</button>
+                        {canDeleteDevices && <button type="button" className="action-btn" onClick={() => openRenameDevice(device)}>Rename</button>}
+                        {canDeleteDevices && <button type="button" className="action-btn danger" onClick={() => openDeleteConfirm(device.device_id, name)}>Remove</button>}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
               <div className="table-wrap">
                 <table className="data-table">
                   <thead>
                     <tr>
-                      <th>Device</th>
-                      <th>Status</th>
-                      <th>Agent</th>
-                      <th>Platform</th>
-                      <th>Connection</th>
-                      <th>Last Seen</th>
-                      <th style={{ textAlign: 'right' }}>Actions</th>
+                      <th scope="col">Device</th>
+                      <th scope="col">Status</th>
+                      <th scope="col">Resources</th>
+                      <th scope="col">Platform</th>
+                      <th scope="col">Last Seen</th>
+                      <th scope="col" style={{ textAlign: 'right' }}>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -2637,8 +2645,9 @@ export default function Home() {
                       const state  = getDeviceState(device);
                       const online = isOnline(device.last_seen);
                       const name   = deviceDisplayName(device);
-                      const risk   = deviceRisk(device);
                       const hw     = device.data?.HardwareStats;
+                      const cpu    = hw?.cpu?.usage_percent;
+                      const ram    = hw?.ram?.used_percent;
 
                       const stateLabel = state === 'critical' ? 'Critical'
                         : state === 'warning' ? 'Warning'
@@ -2653,8 +2662,8 @@ export default function Home() {
                           <td>
                             <div className="device-cell">
                               <div className="device-cell-text">
-                                <strong>{name}</strong>
-                                <span>{device.device_id}</span>
+                                <button type="button" onClick={() => viewDeviceDetails(device.device_id)}>{name}</button>
+                                <span>{sys?.hostname || device.hostname || device.device_id}</span>
                               </div>
                             </div>
                           </td>
@@ -2665,43 +2674,19 @@ export default function Home() {
                             </span>
                           </td>
                           <td>
-                            <div className="cell-stack">
-                              <strong>
-                                {device.agent_version
-                                  ? `Agent ${device.agent_version}`
-                                  : online ? 'DevicePulse Agent' : 'Unknown agent'}
-                              </strong>
-                              <span>
-                                {device.agent_update_status === 'update_requested'
-                                  ? `Update requested${device.agent_target_version ? ` -> ${device.agent_target_version}` : ''}`
-                                  : device.agent_update_status === 'update_available'
-                                    ? `Update available${device.agent_target_version ? ` -> ${device.agent_target_version}` : ''}`
-                                    : device.agent_update_status === 'checking'
-                                      ? 'Checking for update'
-                                      : [device.agent_os, device.agent_arch].filter(Boolean).join(', ') ||
-                                        device.agent_update_status ||
-                                        (online ? 'Waiting for version' : 'No check-in')}
-                              </span>
+                            <div className="resource-pair">
+                              <div><span>CPU</span><i><b style={{ width: `${Math.min(100, cpu ?? 0)}%` }} /></i><strong>{cpu === undefined ? '—' : `${cpu.toFixed(0)}%`}</strong></div>
+                              <div><span>MEM</span><i><b style={{ width: `${Math.min(100, ram ?? 0)}%` }} /></i><strong>{ram === undefined ? '—' : `${ram.toFixed(0)}%`}</strong></div>
                             </div>
                           </td>
                           <td>
                             <div className="cell-stack">
                               <strong>{platform}</strong>
-                              <span>{sys?.platform_version ?? '—'}</span>
+                              <span>{device.agent_version ? `Agent ${device.agent_version}` : 'Agent version unavailable'}</span>
                             </div>
                           </td>
                           <td>
-                            <div className="cell-stack">
-                              <strong style={{ color: online ? 'var(--text-1)' : 'var(--red)' }}>
-                                {online ? `${risk.toFixed(0)}% peak load` : 'Connection lost'}
-                              </strong>
-                              <span>{hw?.uptime_human || sys?.os || '—'}</span>
-                            </div>
-                          </td>
-                          <td>
-                            <span className="mono" style={{ fontSize: '0.8125rem', color: 'var(--text-2)' }}>
-                              {timeAgo(device.last_seen)}
-                            </span>
+                            <div className="cell-stack"><strong>{timeAgo(device.last_seen)}</strong><span>{online ? 'Receiving telemetry' : 'Last known state'}</span></div>
                           </td>
                           <td>
                             <div className="row-actions">

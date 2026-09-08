@@ -37,8 +37,8 @@ export default function OverviewTab({ data, cachedFocus, dailyAppUsage }: Props)
           <div className="resource-card">
             <div className="rc-header">
               <span className="rc-label">CPU</span>
-              <span className="rc-value" style={{ color: metricColor(cpu?.usage_percent ?? 0) }}>
-                {cpu?.usage_percent?.toFixed(1) ?? '—'}%
+              <span className="rc-value" style={{ color: cpu?.usage_percent === undefined ? 'var(--text-3)' : metricColor(cpu.usage_percent) }}>
+                {cpu?.usage_percent === undefined ? 'Unavailable' : `${cpu.usage_percent.toFixed(1)}%`}
               </span>
             </div>
             <GaugeBar value={cpu?.usage_percent ?? 0} color={metricColor(cpu?.usage_percent ?? 0)} />
@@ -48,23 +48,23 @@ export default function OverviewTab({ data, cachedFocus, dailyAppUsage }: Props)
           <div className="resource-card">
             <div className="rc-header">
               <span className="rc-label">Memory</span>
-              <span className="rc-value" style={{ color: metricColor(ram?.used_percent ?? 0) }}>
-                {ram?.used_percent?.toFixed(1) ?? '—'}%
+              <span className="rc-value" style={{ color: ram?.used_percent === undefined ? 'var(--text-3)' : metricColor(ram.used_percent) }}>
+                {ram?.used_percent === undefined ? 'Unavailable' : `${ram.used_percent.toFixed(1)}%`}
               </span>
             </div>
             <GaugeBar value={ram?.used_percent ?? 0} color={metricColor(ram?.used_percent ?? 0)} />
-            <div className="rc-sub">{ram ? `${ram.used_gb.toFixed(1)} / ${ram.total_gb.toFixed(1)} GB` : '—'}</div>
+            <div className="rc-sub">{ram ? `${ram.used_gb.toFixed(1)} / ${ram.total_gb.toFixed(1)} GB` : 'Telemetry unavailable'}</div>
           </div>
 
           <div className="resource-card">
             <div className="rc-header">
               <span className="rc-label">Disk</span>
-              <span className="rc-value" style={{ color: metricColor(disk?.used_percent ?? 0) }}>
-                {disk?.used_percent?.toFixed(1) ?? '—'}%
+              <span className="rc-value" style={{ color: disk?.used_percent === undefined ? 'var(--text-3)' : metricColor(disk.used_percent) }}>
+                {disk?.used_percent === undefined ? 'Unavailable' : `${disk.used_percent.toFixed(1)}%`}
               </span>
             </div>
             <GaugeBar value={disk?.used_percent ?? 0} color={metricColor(disk?.used_percent ?? 0)} />
-            <div className="rc-sub">{disk ? `${disk.used_gb.toFixed(1)} / ${disk.total_gb.toFixed(1)} GB` : '—'}</div>
+            <div className="rc-sub">{disk ? `${disk.used_gb.toFixed(1)} / ${disk.total_gb.toFixed(1)} GB` : 'Telemetry unavailable'}</div>
           </div>
 
           <div className="resource-card">
@@ -73,11 +73,11 @@ export default function OverviewTab({ data, cachedFocus, dailyAppUsage }: Props)
             </div>
             <div className="net-row">
               <span className="net-dir up">↑</span>
-              <span className="net-val">{hw?.network?.[0] ? formatBytes(hw.network[0].bytes_sent) : '—'}</span>
+              <span className="net-val">{hw?.network?.[0] ? formatBytes(hw.network[0].bytes_sent) : 'Unavailable'}</span>
             </div>
             <div className="net-row">
               <span className="net-dir down">↓</span>
-              <span className="net-val">{hw?.network?.[0] ? formatBytes(hw.network[0].bytes_recv) : '—'}</span>
+              <span className="net-val">{hw?.network?.[0] ? formatBytes(hw.network[0].bytes_recv) : 'Unavailable'}</span>
             </div>
             {hw?.uptime_human && <div className="rc-sub">Up {hw.uptime_human}</div>}
           </div>

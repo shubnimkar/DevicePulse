@@ -10,7 +10,7 @@ interface Props {
 export default function AppsTab({ data }: Props) {
   const [search, setSearch] = useState('');
   const allApps = data?.installed_apps ?? [];
-  if (!allApps.length) return <div className="no-data">No installed apps data yet.</div>;
+  if (!allApps.length) return <div className="no-data">Application inventory was not included in the latest device check-in.</div>;
 
   const filtered = search
     ? allApps.filter(a => a.name.toLowerCase().includes(search.toLowerCase()))
@@ -30,12 +30,12 @@ export default function AppsTab({ data }: Props) {
         />
       </div>
       <div className="apps-grid">
-        {filtered.map(app => (
+        {filtered.length ? filtered.map(app => (
           <div key={app.path || app.name} className="app-item" title={app.path}>
             <div className="app-name">{app.name}</div>
             <div className="app-version">{app.version ?? '—'}</div>
           </div>
-        ))}
+        )) : <div className="no-data">No installed apps match “{search}”.</div>}
       </div>
     </div>
   );

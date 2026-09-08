@@ -10,20 +10,35 @@ const PAGE_SIZE = 10;
 
 export default function ProcessesTab({ procs }: Props) {
   const [selectedPage, setSelectedPage] = useState(0);
+  const [sort, setSort] = useState<'cpu' | 'memory' | 'name'>('cpu');
 
   // Derive the effective page during render instead of clamping via an effect.
   const pageCount = Math.max(Math.ceil(procs.length / PAGE_SIZE), 1);
   const page = Math.min(selectedPage, pageCount - 1);
   const start = page * PAGE_SIZE;
   const end = Math.min(start + PAGE_SIZE, procs.length);
-  const pageItems = useMemo(() => procs.slice(start, end), [procs, start, end]);
+  const sortedProcesses = useMemo(() => [...procs].sort((a, b) => {
+    if (sort === 'name') return a.name.localeCompare(b.name);
+    return sort === 'memory' ? b.memory - a.memory : b.cpu - a.cpu;
+  }), [procs, sort]);
+  const pageItems = useMemo(() => sortedProcesses.slice(start, end), [sortedProcesses, start, end]);
 
   const goToPage = (next: number) => setSelectedPage(Math.max(0, Math.min(next, pageCount - 1)));
 
-  if (!procs.length) return <div className="no-data">No process data yet.</div>;
+  if (!procs.length) return <div className="no-data">Process telemetry was not included in the latest device check-in.</div>;
 
   return (
     <div>
+      <div className="tab-toolbar">
+        <div><strong>Processes</strong><span>{procs.length} reported by the latest check-in</span></div>
+        <div className="segmented-control compact" role="group" aria-label="Sort processes">
+          {(['cpu', 'memory', 'name'] as const).map(option => (
+            <button key={option} type="button" className={sort === option ? 'active' : ''} onClick={() => { setSort(option); setSelectedPage(0); }}>
+              {option === 'cpu' ? 'CPU' : option === 'memory' ? 'Memory' : 'Name'}
+            </button>
+          ))}
+        </div>
+      </div>
       <ul className="proc-list">
         {pageItems.map((p, i) => (
           <motion.li

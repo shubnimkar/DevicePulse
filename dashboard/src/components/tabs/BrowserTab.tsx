@@ -111,6 +111,7 @@ export default function BrowserTab({
 
       {hasMore && (
         <button
+          type="button"
           className="view-all-btn"
           onClick={() => setExpandedCount(c => {
             if (c === 0) return Math.min(uniqueHistory.length, EXPAND_STEP);

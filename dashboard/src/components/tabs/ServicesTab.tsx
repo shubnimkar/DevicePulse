@@ -10,7 +10,7 @@ interface Props {
 export default function ServicesTab({ data }: Props) {
   const [filter, setFilter] = useState<'all' | 'running' | 'stopped'>('all');
   const services = data?.services ?? [];
-  if (!services.length) return <div className="no-data">No service data yet.</div>;
+  if (!services.length) return <div className="no-data">Service telemetry was not included in the latest device check-in.</div>;
 
   const filtered = filter === 'all' ? services : services.filter(s => s.status === filter);
   const runCount  = services.filter(s => s.status === 'running').length;
@@ -31,13 +31,13 @@ export default function ServicesTab({ data }: Props) {
         </div>
       </div>
       <div className="svc-grid">
-        {filtered.map((s, i) => (
+        {filtered.length ? filtered.map((s, i) => (
           <div key={`${s.name}:${s.pid ?? 'x'}:${i}`} className="svc-item">
             <div className={`svc-dot ${s.status}`} />
             <div className="svc-name" title={s.name}>{s.name}</div>
             {s.pid && <div className="svc-pid">{s.pid}</div>}
           </div>
-        ))}
+        )) : <div className="no-data">No {filter} services in the latest check-in.</div>}
       </div>
     </div>
   );
