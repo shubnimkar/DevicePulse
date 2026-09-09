@@ -73,8 +73,6 @@ openssl rand -hex 32
 
 ```bash
 NEXT_PUBLIC_API_URL=http://localhost:8000
-NEXT_PUBLIC_DASHBOARD_TOKEN=<same-value-as-api-DASHBOARD_TOKEN-if-configured>
-NEXT_PUBLIC_ADMIN_SECRET=<same-value-as-api-ADMIN_SECRET-for-policy-updates>
 ```
 
 For production builds:

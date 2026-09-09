@@ -11,20 +11,22 @@ services:
       DASHBOARD_ORIGIN: ${DASHBOARD_ORIGIN:-http://localhost:3000}
       PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
     ports:
-      - "8000:8000"
+      - "${API_BIND_ADDRESS:-127.0.0.1}:8000:8000"
     restart: unless-stopped
 
   dashboard:
     build:
       context: ./dashboard
       args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL-http://localhost:8000}
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-/api}
+        API_INTERNAL_URL: http://api:8000
     image: devicepulse-dashboard:local
     environment:
       PORT: "3000"
       NODE_ENV: production
+      API_INTERNAL_URL: http://api:8000
     ports:
-      - "3000:3000"
+      - "${DASHBOARD_BIND_ADDRESS:-127.0.0.1}:3000:3000"
     depends_on:
       - api
     restart: unless-stopped

@@ -372,7 +372,7 @@ DevicePulse/
 | `DEVICEPULSE_API_URL` | Agent | `http://localhost:8000` | API endpoint override at runtime |
 | `SESSION_SECRET` | API | falls back to `ADMIN_SECRET` | HMAC key signing dashboard session cookies |
 | `DASHBOARD_EXTRA_ORIGINS` | API | — | Comma-separated extra browser origins allowed for credentialed CORS |
-| `COOKIE_SECURE` | API | `false` | Mark the session cookie Secure (enable behind HTTPS) |
+| `COOKIE_SECURE` | API | automatic | Non-loopback/HTTPS dashboard origins always require Secure cookies; `true` also forces this locally |
 | `LOGIN_RATE_LIMIT_PER_MINUTE` | API | `30` | Per-IP login attempts per minute (0 disables) |
 | `REGISTER_RATE_LIMIT_PER_MINUTE` | API | `10` | Per-IP device registrations per minute (0 disables) |
 | `NEXT_PUBLIC_API_URL` | Dashboard | `/api` | API URL used by the browser dashboard |

@@ -1,5 +1,31 @@
 # DevicePulse security configuration check — 8 September 2026
 
+## Remediation update — 9 September 2026
+
+The findings below remain the historical check. Subsequent work:
+
+- User reports the production payload-encryption deployment issue resolved.
+- Local `api/.env`, `agent/.env`, `dashboard/.env.local`, and registration cache
+  permissions changed to `0600`. Agent code now repairs existing cache modes,
+  rejects symlinks on cache reads, and atomically saves private replacements.
+- Secure login/logout cookies are enforced for non-local dashboard origins in
+  code; this still needs deployment and verification of a production login.
+- Docker Compose ports now bind to loopback by default, with a working internal
+  API proxy target. Host firewall/security groups remain unverified.
+- Obsolete public dashboard token/secret configuration removed locally and from
+  the example. Production build configuration still needs the same cleanup.
+- **Live S3 policy updated and read back successfully:**
+  `DevicePulseDenyInsecureTransport` denies non-TLS client requests while exempting
+  direct AWS service principals. Existing grants were preserved. Original policy:
+  `/var/folders/lj/kpnqfqnj7dzbpdjh3myff69c0000gn/T/devicepulse-s3-policy-jn1r6nhy/before.json`.
+- nginx HSTS/security-header snippet prepared; not installed on production.
+- API and agent `go test ./...` passed; Docker Compose configuration validated.
+
+See [production rollout steps](../deploy/SECURITY_ROLLOUT.md). The public website
+URL does not provide host access, so nginx/service changes remain pending.
+
+## Original check
+
 Scope: read-only checks of https://devicepulse.waybeyond.tech/, the running local
 API, workspace configuration, and the MongoDB/S3 resources configured in the
 local API environment. The production server environment was not available;

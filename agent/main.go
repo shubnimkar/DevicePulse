@@ -453,7 +453,11 @@ func registerDeviceWithCache(useCache bool) error {
 
 	// Try loading cached credentials
 	if useCache {
-		if data, err := os.ReadFile(regFile); err == nil {
+		data, err := readRegistrationCache(regFile)
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("read private registration cache: %w", err)
+		}
+		if err == nil {
 			var reg map[string]string
 			if json.Unmarshal(data, &reg) == nil {
 				cachedUUID := reg["hardware_uuid"]
@@ -511,8 +515,12 @@ func registerDeviceWithCache(useCache bool) error {
 		"hardware_uuid": fp.HardwareUUID,
 		"mac_address":   fp.MACAddress,
 	}
-	if data, err := json.MarshalIndent(reg, "", "  "); err == nil {
-		os.WriteFile(regFile, data, 0600)
+	data, err := json.MarshalIndent(reg, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := writeRegistrationCache(regFile, data); err != nil {
+		return fmt.Errorf("persist registration credentials: %w", err)
 	}
 
 	return nil

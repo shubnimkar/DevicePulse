@@ -2686,7 +2686,7 @@ func setSessionCookie(w http.ResponseWriter, user DashboardUser) error {
 	if err != nil {
 		return err
 	}
-	secureCookie := strings.EqualFold(os.Getenv("COOKIE_SECURE"), "true")
+	secureCookie := secureSessionCookies()
 	http.SetCookie(w, &http.Cookie{
 		Name:     "devicepulse_session",
 		Value:    token,
@@ -2703,6 +2703,7 @@ func clearSessionCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "devicepulse_session",
 		Value:    "",
+		Secure:   secureSessionCookies(),
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
