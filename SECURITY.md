@@ -1,5 +1,50 @@
 # Security Guide
 
+## Dashboard response encryption
+
+Dashboard API responses use **AES-256-GCM** payload encryption in addition to
+HTTPS. The Network tab receives `application/octet-stream` ciphertext; the
+dashboard decrypts it in memory before reading JSON or error text.
+
+Each fetch generates an ephemeral P-256 ECDH key pair. The browser sends only
+its public key in `X-DevicePulse-Public-Key`; the API generates a fresh server
+key pair and derives a 256-bit AES key with HKDF-SHA256, a random 32-byte salt,
+and the context `devicepulse-response-v1`. AES-GCM uses a random 12-byte nonce
+and a 128-bit authentication tag. The response status and original content type
+are authenticated as additional data. The binary body contains the server
+public key, salt, nonce, and ciphertext/tag. Private keys are never transmitted
+or persisted; browser private and AES keys are non-exportable Web Crypto keys.
+
+Implementation: `api/response_encryption.go` and
+`dashboard/src/lib/encrypted-fetch.ts`. All current dashboard fetches use this
+helper, including authentication, device data, reports, settings, and commands.
+Dashboard authentication and role-protected handlers reject requests without
+encryption negotiation. The client rejects missing encryption metadata,
+truncated responses, failed authentication tags, and plaintext fallbacks.
+Responses disable caching and are buffered with a 64 MiB plaintext limit;
+oversized responses return an encrypted error. No streaming is supported.
+HTTP responses that cannot carry a body, such as HEAD and 204, carry no ciphertext.
+
+Deploy the API and dashboard together, restart the API, and reload open
+dashboard tabs. Old dashboard clients and scripts calling dashboard endpoints
+must adopt the encrypted protocol. No new shared secret or environment variable
+is required. Use HTTPS in production and `COOKIE_SECURE=true`; browser Web
+Crypto also supports localhost development. The HTTPS connection authenticates
+the ephemeral key exchange. This encryption does not replace TLS.
+
+Scope: response bodies only. Request bodies, URL paths/query parameters, cookies,
+and headers are not encrypted by this application layer; HTTPS protects them
+in transit. Existing agent calls, downloaded installers, local agent files,
+and database/S3 storage are not changed by this feature. Protocol negotiation
+errors may be plaintext but never include the requested dashboard data.
+An authorized person controlling the browser can still inspect decrypted data
+in memory or instrument the client. This feature does not replace authorization.
+
+Validation: `cd api && go test ./...`. With Node and dashboard dependencies
+installed, this also runs the actual TypeScript helper against the Go test
+server using Web Crypto, checking decryption, concurrent requests, encrypted
+errors, tampering, replay to a different request, and plaintext rejection.
+
 ## Secrets Management
 
 ### API Secrets (`api/.env`)

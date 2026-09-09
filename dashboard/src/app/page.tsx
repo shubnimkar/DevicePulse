@@ -1,5 +1,7 @@
 'use client';
 
+import { encryptedFetch } from '@/lib/encrypted-fetch';
+
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { AnimatePresence, MotionConfig, motion } from 'motion/react';
 import type { FormEvent } from 'react';
@@ -303,7 +305,7 @@ export default function Home() {
   const canPingAgents = authUser?.role === 'admin';
 
   const apiFetch = useCallback((path: string, init?: RequestInit) => {
-    return fetch(`${API}${path}`, {
+    return encryptedFetch(`${API}${path}`, {
       ...init,
       credentials: 'include',
       headers: init?.headers,

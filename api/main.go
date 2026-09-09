@@ -2426,12 +2426,13 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 		}
 		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
-		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, Authorization, X-API-Key")
+		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, Authorization, X-API-Key, X-DevicePulse-Public-Key")
+		w.Header().Set("Access-Control-Expose-Headers", "X-DevicePulse-Encryption, X-DevicePulse-Content-Type")
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		next(w, r)
+		encryptedResponse(next)(w, r)
 	}
 }
 
@@ -2715,7 +2716,7 @@ func currentUser(r *http.Request) (SessionClaims, bool) {
 }
 
 func requireAuth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+	return requireEncryptedResponse(func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie("devicepulse_session")
 		if err != nil {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -2755,7 +2756,7 @@ func requireAuth(next http.HandlerFunc) http.HandlerFunc {
 		claims.Role = user.Role
 
 		next(w, r.WithContext(context.WithValue(r.Context(), dashboardUserContextKey, claims)))
-	}
+	})
 }
 
 func requireRole(required UserRole, next http.HandlerFunc) http.HandlerFunc {
@@ -6177,10 +6178,10 @@ func main() {
 func registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/health", corsMiddleware(healthHandler))
 	mux.HandleFunc("/devices/register", corsMiddleware(registerHandler))
-	mux.HandleFunc("/auth/bootstrap", corsMiddleware(authBootstrapHandler))
-	mux.HandleFunc("/auth/register", corsMiddleware(requireRateLimit(registerLimiter, authRegisterHandler)))
-	mux.HandleFunc("/auth/login", corsMiddleware(requireRateLimit(loginLimiter, authLoginHandler)))
-	mux.HandleFunc("/auth/logout", corsMiddleware(authLogoutHandler))
+	mux.HandleFunc("/auth/bootstrap", corsMiddleware(requireEncryptedResponse(authBootstrapHandler)))
+	mux.HandleFunc("/auth/register", corsMiddleware(requireEncryptedResponse(requireRateLimit(registerLimiter, authRegisterHandler))))
+	mux.HandleFunc("/auth/login", corsMiddleware(requireEncryptedResponse(requireRateLimit(loginLimiter, authLoginHandler))))
+	mux.HandleFunc("/auth/logout", corsMiddleware(requireEncryptedResponse(authLogoutHandler)))
 	mux.HandleFunc("/auth/me", corsMiddleware(requireAuth(authMeHandler)))
 	mux.HandleFunc("/users/", corsMiddleware(requireRole(RoleAdmin, userDetailHandler)))
 	mux.HandleFunc("/users", corsMiddleware(requireRole(RoleAdmin, usersHandler)))

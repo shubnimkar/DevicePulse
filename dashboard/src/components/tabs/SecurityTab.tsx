@@ -1,5 +1,7 @@
 'use client';
 
+import { encryptedFetch } from '@/lib/encrypted-fetch';
+
 import { useCallback, useEffect, useState } from 'react';
 import { USBDevice, OSUpdateInfo, UserRole, RemoteActionType, DeviceCommand } from '@/types';
 import { API, timeAgo } from '@/lib/utils';
@@ -68,7 +70,7 @@ export default function SecurityTab({ usb, osUpd, deviceId, userRole, deviceOnli
     if (!deviceId) return;
     setCmdLoading(true);
     try {
-      const res = await fetch(`${API}/devices/${encodeURIComponent(deviceId)}/commands`, {
+      const res = await encryptedFetch(`${API}/devices/${encodeURIComponent(deviceId)}/commands`, {
         credentials: 'include',
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -90,7 +92,7 @@ export default function SecurityTab({ usb, osUpd, deviceId, userRole, deviceOnli
     setBusyType(action.type);
     setNotice(null);
     try {
-      const res = await fetch(`${API}/devices/${encodeURIComponent(deviceId)}/commands`, {
+      const res = await encryptedFetch(`${API}/devices/${encodeURIComponent(deviceId)}/commands`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
