@@ -4,12 +4,16 @@ import { encryptedFetch } from '@/lib/encrypted-fetch';
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { AnimatePresence, MotionConfig, motion } from 'motion/react';
+import Link from 'next/link';
 import type { FormEvent } from 'react';
 import { Device, AppFocusSummary, FocusCacheData, DeviceTab, EnterprisePolicy, DashboardUser, UserRole, HistoryEntry, BrowserHistoryArchiveData, DailyAppUsageData, DailyPresenceData, AgentRelease, AgentBuildJob, AgentRolloutResponse, WeeklyReport } from '@/types';
 import { API, readHeaders, adminHeaders, isOnline, timeAgo, primaryDisk, deviceDisplayName, formatDuration } from '@/lib/utils';
 import DeviceCard from '@/components/DeviceCard';
 import HeaderClock from '@/components/HeaderClock';
 import ConfirmDialog from '@/components/ConfirmDialog';
+import FleetTelemetryOrb from '@/components/FleetTelemetryOrb';
+import LogoMark from '@/components/LogoMark';
+import MissionMetricTile from '@/components/MissionMetricTile';
 import type { BrowserHistoryRange } from '@/components/tabs/BrowserTab';
 
 type PageView = 'dashboard' | 'inventory' | 'reports' | 'inspect' | 'settings' | 'access';
@@ -67,6 +71,7 @@ const RELEASE_TARGETS: Array<{ os: AgentRelease['os']; label: string }> = [
 
 const PAGE_VIEWS: PageView[] = ['dashboard', 'inventory', 'reports', 'inspect', 'settings', 'access'];
 const DEVICE_TABS: DeviceTab[] = ['overview', 'hardware', 'processes', 'browser', 'services', 'ports', 'apps', 'security', 'focus', 'sysinfo'];
+const AUTH_CHECK_TIMEOUT_MS = 8_000;
 
 const roleLabel: Record<UserRole, string> = {
   admin: 'Admin',
@@ -165,13 +170,6 @@ const IconList = () => (
 const IconSearch = () => (
   <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
     <circle cx="6.5" cy="6.5" r="5"/><path d="M10.5 10.5L14 14"/>
-  </svg>
-);
-const IconLogo = () => (
-  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-    <circle cx="8" cy="8" r="6" stroke="white" strokeWidth="1.5"/>
-    <circle cx="8" cy="8" r="2.5" fill="white"/>
-    <path d="M8 2v2M8 12v2M2 8h2M12 8h2" stroke="white" strokeWidth="1.5" strokeLinecap="round"/>
   </svg>
 );
 const IconMail = () => (
@@ -356,15 +354,17 @@ export default function Home() {
 
   const loadCurrentUser = useCallback(async () => {
     setAuthLoading(true);
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), AUTH_CHECK_TIMEOUT_MS);
     try {
-      const bootRes = await apiFetch('/auth/bootstrap');
+      const bootRes = await apiFetch('/auth/bootstrap', { signal: controller.signal });
       if (bootRes.ok) {
         const boot = await bootRes.json();
         setBootstrapRequired(Boolean(boot.bootstrap_required));
         if (boot.bootstrap_required) setAuthMode('register');
       }
 
-      const res = await apiFetch('/auth/me');
+      const res = await apiFetch('/auth/me', { signal: controller.signal });
       if (res.ok) {
         const data = await res.json();
         setAuthUser(data.user);
@@ -375,6 +375,7 @@ export default function Home() {
       setAuthUser(null);
       setAuthError('Could not reach the API. Check that the DevicePulse API is running.');
     } finally {
+      window.clearTimeout(timeout);
       setAuthLoading(false);
     }
   }, [apiFetch]);
@@ -1299,7 +1300,7 @@ export default function Home() {
       <div className="auth-shell auth-shell-solo">
         <div className="auth-form-col">
           <div className="auth-panel">
-            <div className="auth-logo-lg pulse"><IconLogo /></div>
+            <div className="auth-logo-lg pulse"><LogoMark /></div>
             <h1>DevicePulse</h1>
             <p>Checking dashboard session…</p>
           </div>
@@ -1315,7 +1316,7 @@ export default function Home() {
         {/* ── Brand panel ── */}
         <aside className="auth-brand" aria-hidden="true">
           <div className="auth-brand-inner">
-            <div className="auth-brand-mark"><IconLogo /></div>
+            <div className="auth-brand-mark"><LogoMark /></div>
             <div className="auth-brand-name">DevicePulse</div>
             <h2 className="auth-brand-headline">Your fleet,<br />at a glance.</h2>
             <p className="auth-brand-sub">
@@ -1353,7 +1354,7 @@ export default function Home() {
         <main className="auth-form-col">
           <form className="auth-form" onSubmit={submitAuth}>
             <div className="auth-form-brand">
-              <div className="auth-logo-lg"><IconLogo /></div>
+              <div className="auth-logo-lg"><LogoMark /></div>
               <span>DevicePulse</span>
             </div>
             <h1>{isBootstrap ? 'Create first admin' : 'Sign in'}</h1>
@@ -1426,7 +1427,10 @@ export default function Home() {
               <p className="auth-hint">New accounts are created by an admin.</p>
             )}
           </form>
-          <div className="auth-form-foot">DevicePulse · Endpoint telemetry console</div>
+          <div className="auth-form-foot">
+            <span>DevicePulse · Endpoint telemetry console</span>
+            <Link href="/platform">Explore the platform</Link>
+          </div>
         </main>
       </div>
     );
@@ -1453,8 +1457,11 @@ export default function Home() {
           <span /><span /><span />
         </button>
         <div className="header-brand">
-          <div className="header-logo"><IconLogo /></div>
-          <span className="brand-name">DevicePulse</span>
+          <div className="header-logo"><LogoMark /></div>
+          <span className="brand-lockup">
+            <span className="brand-name">DevicePulse</span>
+            <span className="brand-mode">Fleet operations</span>
+          </span>
         </div>
 
         <div className="header-right">
@@ -1565,7 +1572,10 @@ export default function Home() {
 
           {/* Page header */}
           <div className="page-header">
-            <div>
+            <div className="page-heading-copy">
+              {currentPage === 'dashboard' && (
+                <div className="page-kicker"><span aria-hidden="true" /> Live command layer</div>
+              )}
               <h1>
                 {currentPage === 'settings'
                   ? 'Settings'
@@ -1659,54 +1669,45 @@ export default function Home() {
           {currentPage === 'dashboard' && (
             <>
               <section className="dashboard-tiles" aria-label="Fleet summary">
-                <button
-                  type="button"
-                  className="dashboard-tile"
+                <MissionMetricTile
+                  label="Total devices"
+                  value={devices.length.toLocaleString()}
+                  detail="Registered endpoints"
                   onClick={() => {
                     setStatusFilter('all');
                     goToPage('inventory');
                   }}
-                >
-                  <span>Total Devices</span>
-                  <strong>{devices.length.toLocaleString()}</strong>
-                  <small>Registered endpoints</small>
-                </button>
-                <button
-                  type="button"
-                  className="dashboard-tile tile-online"
+                />
+                <MissionMetricTile
+                  label="Online now"
+                  value={onlineCount.toLocaleString()}
+                  detail={`${fleetUptimePercent.toFixed(0)}% of fleet`}
+                  tone="online"
                   onClick={() => {
                     setStatusFilter('online');
                     goToPage('inventory');
                   }}
-                >
-                  <span>Online Now</span>
-                  <strong>{onlineCount.toLocaleString()}</strong>
-                  <small>{fleetUptimePercent.toFixed(0)}% of fleet</small>
-                </button>
-                <button
-                  type="button"
-                  className="dashboard-tile tile-offline"
+                />
+                <MissionMetricTile
+                  label="Offline"
+                  value={offlineCount.toLocaleString()}
+                  detail="Missed recent check-in"
+                  tone="offline"
                   onClick={() => {
                     setStatusFilter('offline');
                     goToPage('inventory');
                   }}
-                >
-                  <span>Offline</span>
-                  <strong>{offlineCount.toLocaleString()}</strong>
-                  <small>Missed recent check-in</small>
-                </button>
-                <button
-                  type="button"
-                  className="dashboard-tile tile-attention"
+                />
+                <MissionMetricTile
+                  label="Needs attention"
+                  value={needsAttentionCount.toLocaleString()}
+                  detail={`${criticalCount} critical · ${warningCount} warning`}
+                  tone="attention"
                   onClick={() => {
                     setStatusFilter(criticalCount > 0 ? 'critical' : warningCount > 0 ? 'warning' : offlineCount > 0 ? 'offline' : 'all');
                     goToPage('inventory');
                   }}
-                >
-                  <span>Needs Attention</span>
-                  <strong>{needsAttentionCount.toLocaleString()}</strong>
-                  <small>{criticalCount} critical · {warningCount} warning</small>
-                </button>
+                />
               </section>
 
               <section className="overview-workspace">
@@ -1739,6 +1740,8 @@ export default function Home() {
 
                 <aside className="fleet-snapshot" aria-label="Fleet resource snapshot">
                   <div className="section-heading"><div><span>Current snapshot</span><h2>Fleet resources</h2></div></div>
+                  <FleetTelemetryOrb connectedPercent={fleetUptimePercent} online={onlineCount} total={devices.length} />
+                  <div className="snapshot-metrics">
                   {[
                     ['CPU', avgCpu, 'blue'],
                     ['Memory', avgRam, 'cyan'],
@@ -1750,6 +1753,7 @@ export default function Home() {
                       <div className="snapshot-track"><i className={`tone-${tone}`} style={{ width: `${Math.min(100, Number(value))}%` }} /></div>
                     </div>
                   ))}
+                  </div>
                   <p>Current fleet averages from the latest device check-ins.</p>
                 </aside>
               </section>
