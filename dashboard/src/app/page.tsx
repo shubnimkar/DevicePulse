@@ -1419,11 +1419,12 @@ export default function Home() {
               <span><strong>Protected session</strong><small>HTTP-only cookies · encrypted API responses</small></span>
             </div>
           </motion.section>
-          <div className="auth-form-foot">
-            <span>DevicePulse endpoint operations</span>
-            <span aria-hidden="true">·</span>
-            <span>Private by design</span>
-          </div>
+          <nav className="auth-form-foot" aria-label="Legal and trust documents">
+            <Link href="/privacy">Privacy</Link>
+            <Link href="/terms">Terms</Link>
+            <Link href="/security">Security</Link>
+            <Link href="/data-processing">Data processing</Link>
+          </nav>
         </motion.main>
       </div>
       </MotionConfig>

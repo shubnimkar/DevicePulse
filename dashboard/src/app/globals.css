@@ -4707,6 +4707,15 @@ body::before {
   text-transform: uppercase;
 }
 
+.auth-shell-portal .auth-form-foot a {
+  color: #667e94;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.auth-shell-portal .auth-form-foot a:hover { color: var(--mission-cyan); text-decoration: none; }
+.auth-shell-portal .auth-form-foot a:focus-visible { outline: 2px solid var(--mission-cyan); outline-offset: 4px; border-radius: 2px; }
+
 @media (max-width: 1180px) {
   .auth-shell-portal { grid-template-columns: minmax(0, 1fr) minmax(420px, .86fr); }
   .auth-shell-portal .auth-brand { padding: 2.5rem; }
