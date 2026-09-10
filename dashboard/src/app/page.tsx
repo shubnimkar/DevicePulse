@@ -11,6 +11,7 @@ import { API, readHeaders, adminHeaders, isOnline, timeAgo, primaryDisk, deviceD
 import DeviceCard from '@/components/DeviceCard';
 import HeaderClock from '@/components/HeaderClock';
 import ConfirmDialog from '@/components/ConfirmDialog';
+import AuthMissionPanel from '@/components/AuthMissionPanel';
 import FleetTelemetryOrb from '@/components/FleetTelemetryOrb';
 import LogoMark from '@/components/LogoMark';
 import MissionMetricTile from '@/components/MissionMetricTile';
@@ -197,22 +198,10 @@ const IconEyeOff = () => (
     <path d="M6.2 6.4a2 2 0 003.1 2.5"/>
   </svg>
 );
-const IconPulse = () => (
-  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M1.5 8.5h3l1.75-4.5 3.5 8 1.75-3.5h3"/>
-  </svg>
-);
 const IconShield = () => (
   <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
     <path d="M8 1.75l5 1.9v4.1c0 3.1-2.1 5.4-5 6.5-2.9-1.1-5-3.4-5-6.5v-4.1z"/>
     <path d="M5.9 8l1.5 1.5 2.7-2.9"/>
-  </svg>
-);
-const IconDevices = () => (
-  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
-    <rect x="1.5" y="2.5" width="9.5" height="7" rx="1"/>
-    <path d="M4 12.5h4.5"/>
-    <rect x="11.5" y="6.5" width="3.5" height="6" rx="0.75"/>
   </svg>
 );
 const IconSettings = () => (
@@ -1312,127 +1301,132 @@ export default function Home() {
   if (!authUser) {
     const isBootstrap = authMode === 'register' && bootstrapRequired;
     return (
-      <div className="auth-shell">
-        {/* ── Brand panel ── */}
-        <aside className="auth-brand" aria-hidden="true">
-          <div className="auth-brand-inner">
-            <div className="auth-brand-mark"><LogoMark /></div>
-            <div className="auth-brand-name">DevicePulse</div>
-            <h2 className="auth-brand-headline">Your fleet,<br />at a glance.</h2>
-            <p className="auth-brand-sub">
-              Real-time endpoint telemetry for Linux, Windows and macOS — hardware,
-              processes, browser activity and security posture in a single console.
-            </p>
-            <ul className="auth-brand-points">
-              <li><IconPulse /> Live telemetry, refreshed every few seconds</li>
-              <li><IconShield /> Role-based access with remote quarantine</li>
-              <li><IconDevices /> Cross-platform agents, one dashboard</li>
-            </ul>
-            <div className="auth-demo">
-              <div className="auth-demo-title"><span className="auth-demo-dot" />Sample fleet snapshot</div>
-              <div className="auth-demo-row">
-                <span className="auth-demo-label">CPU</span>
-                <span className="auth-demo-track"><span className="auth-demo-fill" style={{ width: '34%' }} /></span>
-                <span className="auth-demo-val">34%</span>
-              </div>
-              <div className="auth-demo-row">
-                <span className="auth-demo-label">MEM</span>
-                <span className="auth-demo-track"><span className="auth-demo-fill warn" style={{ width: '58%' }} /></span>
-                <span className="auth-demo-val">58%</span>
-              </div>
-              <div className="auth-demo-row">
-                <span className="auth-demo-label">Online</span>
-                <span className="auth-demo-track"><span className="auth-demo-fill ok" style={{ width: '86%' }} /></span>
-                <span className="auth-demo-val">128</span>
-              </div>
-            </div>
-          </div>
-          <div className="auth-brand-foot">Sessions are secured with HTTP-only cookies over TLS.</div>
-        </aside>
+      <MotionConfig reducedMotion="user">
+      <div className="auth-shell auth-shell-portal">
+        <AuthMissionPanel />
 
         {/* ── Form panel ── */}
-        <main className="auth-form-col">
-          <form className="auth-form" onSubmit={submitAuth}>
+        <motion.main
+          className="auth-form-col"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: .35 }}
+        >
+          <div className="auth-form-topbar">
+            <span>Private operations console</span>
+            <Link href="/platform">Platform overview <span aria-hidden="true">↗</span></Link>
+          </div>
+          <motion.section
+            className="auth-form-card"
+            aria-labelledby="auth-title"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: .45, ease: [0.22, 1, 0.36, 1] }}
+          >
             <div className="auth-form-brand">
               <div className="auth-logo-lg"><LogoMark /></div>
-              <span>DevicePulse</span>
+              <span><strong>DevicePulse</strong><small>Fleet operations console</small></span>
             </div>
-            <h1>{isBootstrap ? 'Create first admin' : 'Sign in'}</h1>
-            <p className="auth-form-sub">
-              {isBootstrap
-                ? 'Bootstrap the first administrator account for this DevicePulse dashboard.'
-                : 'Use your dashboard account to view endpoint telemetry.'}
-            </p>
+            <div className="auth-form-heading">
+              <div className="auth-form-kicker">{isBootstrap ? 'Initial setup' : 'Authorized access'}</div>
+              <h1 id="auth-title">{isBootstrap ? 'Create first admin' : 'Welcome back'}</h1>
+              <p className="auth-form-sub">
+                {isBootstrap
+                  ? 'Create the first administrator account for this DevicePulse deployment.'
+                  : 'Sign in to inspect endpoint health, activity and security posture.'}
+              </p>
+            </div>
 
-            {authMode === 'register' && (
-              <label className="auth-field">
-                <span>Name</span>
-                <input
-                  value={authForm.name}
-                  onChange={e => setAuthForm(f => ({ ...f, name: e.target.value }))}
-                  autoComplete="name"
-                  required
-                />
+            <form className="auth-form" onSubmit={submitAuth}>
+              {authMode === 'register' && (
+                <label className="auth-field" htmlFor="auth-name">
+                  <span>Name</span>
+                  <input
+                    id="auth-name"
+                    value={authForm.name}
+                    onChange={e => setAuthForm(f => ({ ...f, name: e.target.value }))}
+                    autoComplete="name"
+                    required
+                  />
+                </label>
+              )}
+
+              <label className="auth-field" htmlFor="auth-email">
+                <span>Email address</span>
+                <span className="auth-input-wrap">
+                  <span className="auth-input-icon"><IconMail /></span>
+                  <input
+                    id="auth-email"
+                    type="email"
+                    value={authForm.email}
+                    onChange={e => setAuthForm(f => ({ ...f, email: e.target.value }))}
+                    autoComplete="email"
+                    inputMode="email"
+                    required
+                  />
+                </span>
               </label>
-            )}
 
-            <label className="auth-field">
-              <span>Email</span>
-              <span className="auth-input-wrap">
-                <span className="auth-input-icon"><IconMail /></span>
-                <input
-                  type="email"
-                  value={authForm.email}
-                  onChange={e => setAuthForm(f => ({ ...f, email: e.target.value }))}
-                  autoComplete="email"
-                  required
-                />
-              </span>
-            </label>
+              <label className="auth-field" htmlFor="auth-password">
+                <span>Password</span>
+                <span className="auth-input-wrap has-toggle">
+                  <span className="auth-input-icon"><IconLock /></span>
+                  <input
+                    id="auth-password"
+                    type={showAuthPassword ? 'text' : 'password'}
+                    value={authForm.password}
+                    onChange={e => setAuthForm(f => ({ ...f, password: e.target.value }))}
+                    autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
+                    minLength={8}
+                    required
+                  />
+                  <button
+                    type="button"
+                    className="auth-pass-toggle"
+                    onClick={() => setShowAuthPassword(v => !v)}
+                    aria-label={showAuthPassword ? 'Hide password' : 'Show password'}
+                    aria-pressed={showAuthPassword}
+                  >
+                    {showAuthPassword ? <IconEyeOff /> : <IconEye />}
+                  </button>
+                </span>
+              </label>
 
-            <label className="auth-field">
-              <span>Password</span>
-              <span className="auth-input-wrap has-toggle">
-                <span className="auth-input-icon"><IconLock /></span>
-                <input
-                  type={showAuthPassword ? 'text' : 'password'}
-                  value={authForm.password}
-                  onChange={e => setAuthForm(f => ({ ...f, password: e.target.value }))}
-                  autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
-                  minLength={8}
-                  required
-                />
-                <button
-                  type="button"
-                  className="auth-pass-toggle"
-                  onClick={() => setShowAuthPassword(v => !v)}
-                  aria-label={showAuthPassword ? 'Hide password' : 'Show password'}
-                  aria-pressed={showAuthPassword}
-                >
-                  {showAuthPassword ? <IconEyeOff /> : <IconEye />}
-                </button>
-              </span>
-            </label>
+              {authError && <div className="auth-error" id="auth-error" role="alert">{authError}</div>}
 
-            {authError && <div className="auth-error" role="alert">{authError}</div>}
+              <motion.button
+                type="submit"
+                className="auth-submit"
+                disabled={authSubmitting}
+                whileTap={{ opacity: .9 }}
+              >
+                {authSubmitting && <span className="auth-btn-spinner" aria-hidden="true" />}
+                <span aria-live="polite">
+                  {authSubmitting
+                    ? (authMode === 'register' ? 'Creating account…' : 'Verifying access…')
+                    : (authMode === 'register' ? 'Create admin account' : 'Enter operations console')}
+                </span>
+                {!authSubmitting && <span className="auth-submit-arrow" aria-hidden="true">→</span>}
+              </motion.button>
 
-            <button type="submit" className="auth-submit" disabled={authSubmitting}>
-              {authSubmitting && <span className="auth-btn-spinner" aria-hidden="true" />}
-              {authSubmitting
-                ? (authMode === 'register' ? 'Creating account…' : 'Signing in…')
-                : (authMode === 'register' ? 'Create admin account' : 'Sign in')}
-            </button>
+              {!bootstrapRequired && (
+                <p className="auth-hint"><IconShield /> Accounts are provisioned by your DevicePulse administrator.</p>
+              )}
+            </form>
 
-            {!bootstrapRequired && (
-              <p className="auth-hint">New accounts are created by an admin.</p>
-            )}
-          </form>
+            <div className="auth-session-note">
+              <IconLock />
+              <span><strong>Protected session</strong><small>HTTP-only cookies · encrypted API responses</small></span>
+            </div>
+          </motion.section>
           <div className="auth-form-foot">
-            <span>DevicePulse · Endpoint telemetry console</span>
-            <Link href="/platform">Explore the platform</Link>
+            <span>DevicePulse endpoint operations</span>
+            <span aria-hidden="true">·</span>
+            <span>Private by design</span>
           </div>
-        </main>
+        </motion.main>
       </div>
+      </MotionConfig>
     );
   }
 
