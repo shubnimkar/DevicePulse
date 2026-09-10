@@ -58,8 +58,14 @@ the host, or be executed once that access is provided.
    blindly. Direct non-Docker installations must restrict their listening ports
    separately; these Compose bindings only affect Docker deployments.
 
-3. Install `deploy/nginx-security.conf` as
-   `/etc/nginx/snippets/devicepulse-security.conf`. Include this inside the
+3. A complete cleaned-up virtual host is provided in
+   `deploy/devicepulse.nginx.conf`. It preserves both `/api/*` and legacy root
+   API routes, including `/commands`, `/reports`, `/users`, and `/health`, which
+   were absent from the previous nginx configuration. Install it as the site's
+   enabled nginx configuration after backing up the existing file.
+
+   Alternatively, install `deploy/nginx-security.conf` as
+   `/etc/nginx/snippets/devicepulse-security.conf` and include it inside the
    existing TLS `server {}` for the production domain:
 
    ```nginx
