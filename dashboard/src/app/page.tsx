@@ -1302,7 +1302,7 @@ export default function Home() {
     const isBootstrap = authMode === 'register' && bootstrapRequired;
     return (
       <MotionConfig reducedMotion="user">
-      <div className="auth-shell auth-shell-portal">
+      <div className="auth-shell auth-shell-floating">
         <AuthMissionPanel />
 
         {/* ── Form panel ── */}

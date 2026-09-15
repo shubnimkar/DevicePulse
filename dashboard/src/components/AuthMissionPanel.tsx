@@ -1,76 +1,58 @@
 'use client';
 
-import { motion, useReducedMotion } from 'motion/react';
-import LogoMark from '@/components/LogoMark';
-
-const signalRows = [
-  { label: 'Endpoint health', value: 'Nominal', tone: 'ok' },
-  { label: 'Policy channel', value: 'Secured', tone: 'blue' },
-  { label: 'Telemetry queue', value: 'Synced', tone: 'cyan' },
-];
-
 export default function AuthMissionPanel() {
-  const reduceMotion = useReducedMotion();
-
   return (
-    <aside className="auth-brand" aria-label="About DevicePulse">
-      <motion.div
-        className="auth-brand-inner"
-        initial={reduceMotion ? false : { opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: .55, ease: [0.22, 1, 0.36, 1] }}
+    <div className="auth-floating-backdrop" aria-hidden="true">
+      <div className="auth-floating-grid" />
+      <div className="auth-floating-halo" />
+
+      <svg
+        className="auth-floating-wave"
+        viewBox="0 0 1440 520"
+        preserveAspectRatio="none"
+        focusable="false"
       >
-        <div className="auth-brand-top">
-          <div className="auth-brand-mark"><LogoMark /></div>
-          <div className="auth-brand-lockup">
-            <strong>DevicePulse</strong>
-            <span>Endpoint operations</span>
-          </div>
-        </div>
+        <defs>
+          <linearGradient id="floating-wave-gradient" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stopColor="#45e7d0" stopOpacity="0" />
+            <stop offset="0.18" stopColor="#45e7d0" stopOpacity="0.52" />
+            <stop offset="0.5" stopColor="#8af7e6" stopOpacity="0.88" />
+            <stop offset="0.82" stopColor="#65b9ff" stopOpacity="0.48" />
+            <stop offset="1" stopColor="#65b9ff" stopOpacity="0" />
+          </linearGradient>
+          <filter id="floating-wave-glow" x="-20%" y="-100%" width="140%" height="300%">
+            <feGaussianBlur stdDeviation="11" result="blur" />
+            <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
+          </filter>
+        </defs>
+        <path
+          className="auth-floating-wave-soft"
+          d="M0 284H276l26-8 20-62 21 132 26-201 27 252 27-175 25 92 27-30h112l21-9 18-48 20 104 25-167 27 206 27-139 24 75 29-22h116l28-8 18-45 22 98 26-151 28 183 26-122 24 64 28-18h286"
+        />
+        <path
+          d="M0 284H276l26-8 20-62 21 132 26-201 27 252 27-175 25 92 27-30h112l21-9 18-48 20 104 25-167 27 206 27-139 24 75 29-22h116l28-8 18-45 22 98 26-151 28 183 26-122 24 64 28-18h286"
+        />
+      </svg>
 
-        <div className="auth-brand-copy">
-          <div className="auth-eyebrow"><i aria-hidden="true" /> Secure command layer</div>
-          <h2 className="auth-brand-headline">Every endpoint.<br /><span>One operational picture.</span></h2>
-          <p className="auth-brand-sub">
-            Move from fleet health to device-level evidence without losing context.
-            Hardware, runtime, activity and security telemetry stay connected.
-          </p>
-        </div>
-
-        <div className="auth-command-visual" aria-hidden="true">
-          <div className="auth-orbit-stage">
-            <motion.div
-              className="auth-radar-sweep"
-              animate={reduceMotion ? undefined : { rotate: 360 }}
-              transition={{ duration: 8, ease: 'linear', repeat: Infinity }}
-            />
-            <div className="auth-orbit orbit-one" />
-            <div className="auth-orbit orbit-two" />
-            <div className="auth-orbit-core"><LogoMark /></div>
-            <i className="auth-orbit-node node-one" />
-            <i className="auth-orbit-node node-two" />
-            <i className="auth-orbit-node node-three" />
-            <span className="auth-orbit-label label-agent">Agents</span>
-            <span className="auth-orbit-label label-api">Control API</span>
-            <span className="auth-orbit-label label-console">Console</span>
-          </div>
-          <div className="auth-signal-stack">
-            <div className="auth-signal-head"><span>Illustrative fleet signal</span><i /></div>
-            {signalRows.map(row => (
-              <div className="auth-signal-row" key={row.label}>
-                <span><i className={`tone-${row.tone}`} />{row.label}</span>
-                <strong>{row.value}</strong>
-              </div>
-            ))}
-            <div className="auth-signal-foot"><span>LINUX</span><span>WINDOWS</span><span>MACOS</span></div>
-          </div>
-        </div>
-      </motion.div>
-
-      <div className="auth-brand-foot">
-        <span><i aria-hidden="true" /> Encrypted response channel</span>
-        <span>Role-governed access</span>
+      <div className="auth-floating-rings">
+        <span className="ring ring-one" />
+        <span className="ring ring-two" />
+        <span className="ring ring-three" />
+        <span className="ring ring-four" />
       </div>
-    </aside>
+
+      <div className="auth-floating-landscape landscape-left" />
+      <div className="auth-floating-landscape landscape-right" />
+      <span className="auth-floating-node node-north" />
+      <span className="auth-floating-node node-west" />
+      <span className="auth-floating-node node-east" />
+      <span className="auth-floating-node node-south" />
+
+      <div className="auth-floating-status status-left">
+        <span className="status-dot" />
+        Protected channel
+      </div>
+      <div className="auth-floating-status status-right">Endpoint operations · 24/7</div>
+    </div>
   );
 }
