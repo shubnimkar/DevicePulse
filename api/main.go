@@ -249,8 +249,10 @@ func extractFocusSummaries(doc bson.M) []interface{} {
 // ─── Policy Store ─────────────────────────────────────────────────────────────
 
 type PolicyStore struct {
-	mu     sync.RWMutex
-	config map[string]interface{}
+	mu        sync.RWMutex
+	config    map[string]interface{}
+	updatedBy string // dashboard user who last saved the policy (never sent to agents)
+	updatedAt string // RFC3339
 }
 
 var globalPolicy = PolicyStore{
@@ -2337,9 +2339,12 @@ func loadPolicyFromMongo() {
 		return
 	}
 	delete(doc, "_id")
+	by, _ := doc["updated_by"].(string)
+	at, _ := doc["updated_at"].(string)
 
 	globalPolicy.mu.Lock()
 	globalPolicy.config = normalizePolicy(doc)
+	globalPolicy.updatedBy, globalPolicy.updatedAt = by, at
 	globalPolicy.mu.Unlock()
 	log.Printf("Policy loaded from MongoDB: %v", globalPolicy.config)
 }
@@ -2378,6 +2383,9 @@ func cleanupBootstrapLocks() {
 // savePolicyToMongo persists the current policy config to MongoDB so it
 // survives API restarts.
 func savePolicyToMongo(cfg map[string]interface{}) {
+	if mongoClient == nil {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -3552,6 +3560,7 @@ func usersHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Database error", http.StatusInternalServerError)
 			return
 		}
+		recordAudit(r, "user.created", user.Email, string(user.Role))
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]interface{}{"user": userResponse(user)})
@@ -3603,7 +3612,6 @@ func userPasswordHandler(w http.ResponseWriter, r *http.Request) {
 		"$set": bson.M{
 			"password_hash": string(passwordHash),
 			"updated_at":    time.Now(),
-			"status":        "active",
 		},
 		// Invalidate every outstanding session token for this user.
 		"$inc": bson.M{"token_epoch": 1},
@@ -3618,6 +3626,173 @@ func userPasswordHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.WriteHeader(http.StatusOK)
+}
+
+// errLastAdmin / errSelfChange are returned by the access guards below.
+var (
+	errSelfChange = errors.New("You cannot change your own role or status")
+	errLastAdmin  = errors.New("At least one active admin must remain")
+)
+
+// checkRoleChange enforces the access-control invariants for a role change:
+// nobody edits their own role, and the last active admin cannot be demoted.
+func checkRoleChange(actorID, targetID string, targetRole, newRole UserRole, targetActive bool, activeAdmins int) error {
+	if actorID == targetID {
+		return errSelfChange
+	}
+	if targetRole == RoleAdmin && newRole != RoleAdmin && targetActive && activeAdmins <= 1 {
+		return errLastAdmin
+	}
+	return nil
+}
+
+// checkDeactivate enforces the same invariants when disabling an account.
+func checkDeactivate(actorID, targetID string, targetRole UserRole, targetActive bool, activeAdmins int) error {
+	if actorID == targetID {
+		return errSelfChange
+	}
+	if targetRole == RoleAdmin && targetActive && activeAdmins <= 1 {
+		return errLastAdmin
+	}
+	return nil
+}
+
+func activeAdminCount(ctx context.Context) int {
+	n, err := mongoClient.Database(dbName).Collection("users").CountDocuments(ctx, bson.M{"role": RoleAdmin, "status": "active"})
+	if err != nil {
+		return 0
+	}
+	return int(n)
+}
+
+func loadUserByID(ctx context.Context, id primitive.ObjectID) (DashboardUser, bool) {
+	var u DashboardUser
+	err := mongoClient.Database(dbName).Collection("users").FindOne(ctx, bson.M{"_id": id}).Decode(&u)
+	return u, err == nil
+}
+
+// AuditEvent is one access-control or policy change, kept for the admin activity feed.
+type AuditEvent struct {
+	Action string    `bson:"action" json:"action"`
+	Actor  string    `bson:"actor"  json:"actor"`
+	Target string    `bson:"target" json:"target"`
+	Detail string    `bson:"detail" json:"detail"`
+	At     time.Time `bson:"at"     json:"at"`
+}
+
+// recordAudit stores an event for the signed-in actor. Best effort: it never
+// fails the request, and is a no-op without a database (unit tests).
+func recordAudit(r *http.Request, action, target, detail string) {
+	if mongoClient == nil {
+		return
+	}
+	actor := "system"
+	if u, ok := currentUser(r); ok {
+		actor = u.Email
+	}
+	ev := AuditEvent{Action: action, Actor: actor, Target: target, Detail: detail, At: time.Now().UTC()}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := mongoClient.Database(dbName).Collection("audit_log").InsertOne(ctx, ev); err != nil {
+			log.Printf("Audit log write failed: %v", err)
+		}
+	}()
+}
+
+// GET /audit — latest 50 access-control events (admin only).
+func auditHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cur, err := mongoClient.Database(dbName).Collection("audit_log").Find(ctx, bson.M{},
+		options.Find().SetSort(bson.D{{Key: "at", Value: -1}}).SetLimit(50))
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	defer cur.Close(ctx)
+	events := []AuditEvent{}
+	if err := cur.All(ctx, &events); err != nil {
+		http.Error(w, "Parsing error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(events)
+}
+
+// POST /users/{id}/status  body {"status":"active"|"disabled"}
+// Deactivating ends all of the user's sessions and blocks sign-in until reactivated.
+func userStatusHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+	userID, err := primitive.ObjectIDFromHex(parts[1])
+	if len(parts) != 3 || err != nil {
+		http.Error(w, "Invalid URL", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || (body.Status != "active" && body.Status != "disabled") {
+		http.Error(w, "Status must be active or disabled", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	target, ok := loadUserByID(ctx, userID)
+	if !ok {
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+	actor, _ := currentUser(r)
+	update := bson.M{"$set": bson.M{"status": body.Status, "updated_at": time.Now()}}
+	if body.Status == "disabled" {
+		if err := checkDeactivate(actor.UserID, target.ID.Hex(), target.Role, target.Status == "active", activeAdminCount(ctx)); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		update["$inc"] = bson.M{"token_epoch": 1}
+	}
+	if _, err := mongoClient.Database(dbName).Collection("users").UpdateOne(ctx, bson.M{"_id": userID}, update); err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	recordAudit(r, "user."+map[string]string{"active": "reactivate", "disabled": "deactivate"}[body.Status], target.Email, "")
+	w.WriteHeader(http.StatusOK)
+}
+
+// POST /users/{id}/sessions/revoke — signs the user out everywhere.
+func userRevokeSessionsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+	userID, err := primitive.ObjectIDFromHex(parts[1])
+	if len(parts) != 4 || err != nil {
+		http.Error(w, "Invalid URL", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	target, ok := loadUserByID(ctx, userID)
+	if !ok {
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+	if _, err := mongoClient.Database(dbName).Collection("users").UpdateOne(ctx, bson.M{"_id": userID}, bson.M{"$inc": bson.M{"token_epoch": 1}}); err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	recordAudit(r, "user.sessions_revoked", target.Email, "")
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -3654,19 +3829,26 @@ func userRoleHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	target, ok := loadUserByID(ctx, userID)
+	if !ok {
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+	actor, _ := currentUser(r)
+	if err := checkRoleChange(actor.UserID, target.ID.Hex(), target.Role, role, target.Status == "active", activeAdminCount(ctx)); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+
 	update := bson.M{"$set": bson.M{
 		"role":       role,
 		"updated_at": time.Now(),
 	}}
-	res, err := mongoClient.Database(dbName).Collection("users").UpdateOne(ctx, bson.M{"_id": userID}, update)
-	if err != nil {
+	if _, err := mongoClient.Database(dbName).Collection("users").UpdateOne(ctx, bson.M{"_id": userID}, update); err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
-	if res.MatchedCount == 0 {
-		http.Error(w, "User not found", http.StatusNotFound)
-		return
-	}
+	recordAudit(r, "user.role_changed", target.Email, string(target.Role)+" → "+string(role))
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -3678,6 +3860,14 @@ func userDetailHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.HasSuffix(r.URL.Path, "/role") {
 		userRoleHandler(w, r)
+		return
+	}
+	if strings.HasSuffix(r.URL.Path, "/status") {
+		userStatusHandler(w, r)
+		return
+	}
+	if strings.HasSuffix(r.URL.Path, "/sessions/revoke") {
+		userRevokeSessionsHandler(w, r)
 		return
 	}
 	http.NotFound(w, r)
@@ -4916,7 +5106,17 @@ func policyHandler(w http.ResponseWriter, r *http.Request) {
 		globalPolicy.mu.RLock()
 		defer globalPolicy.mu.RUnlock()
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(globalPolicy.config)
+		out := globalPolicy.config
+		// Audit fields are for the dashboard only; agents authenticate with X-API-Key.
+		if r.Header.Get("X-API-Key") == "" && globalPolicy.updatedAt != "" {
+			out = make(map[string]interface{}, len(globalPolicy.config)+2)
+			for k, v := range globalPolicy.config {
+				out[k] = v
+			}
+			out["updated_by"] = globalPolicy.updatedBy
+			out["updated_at"] = globalPolicy.updatedAt
+		}
+		json.NewEncoder(w).Encode(out)
 
 	case http.MethodPost:
 		var newConfig map[string]interface{}
@@ -4933,13 +5133,22 @@ func policyHandler(w http.ResponseWriter, r *http.Request) {
 			merged[k] = v
 		}
 		globalPolicy.config = normalizePolicy(merged)
-		savedConfig := make(map[string]interface{}, len(globalPolicy.config))
+		if user, ok := currentUser(r); ok {
+			globalPolicy.updatedBy = user.Email
+			globalPolicy.updatedAt = time.Now().UTC().Format(time.RFC3339)
+		}
+		savedConfig := make(map[string]interface{}, len(globalPolicy.config)+2)
 		for k, v := range globalPolicy.config {
 			savedConfig[k] = v
+		}
+		if globalPolicy.updatedAt != "" {
+			savedConfig["updated_by"] = globalPolicy.updatedBy
+			savedConfig["updated_at"] = globalPolicy.updatedAt
 		}
 		globalPolicy.mu.Unlock()
 		// Persist so the policy survives API restarts.
 		go savePolicyToMongo(savedConfig)
+		recordAudit(r, "policy.updated", "fleet policy", "")
 		log.Println("Global policy updated")
 		w.WriteHeader(http.StatusOK)
 
@@ -6186,6 +6395,7 @@ func registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/auth/me", corsMiddleware(requireAuth(authMeHandler)))
 	mux.HandleFunc("/users/", corsMiddleware(requireRole(RoleAdmin, userDetailHandler)))
 	mux.HandleFunc("/users", corsMiddleware(requireRole(RoleAdmin, usersHandler)))
+	mux.HandleFunc("/audit", corsMiddleware(requireRole(RoleAdmin, auditHandler)))
 	mux.HandleFunc("/devices/", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/browser-history") {
 			requireRole(RoleViewer, browserHistoryHandler)(w, r)

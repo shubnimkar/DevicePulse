@@ -1,7 +1,8 @@
 'use client';
 
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { EnterprisePolicy } from '@/types';
+import ConfirmDialog from '@/components/ConfirmDialog';
 
 type CollectorKey = Extract<keyof EnterprisePolicy, `collect_${string}`>;
 
@@ -14,7 +15,18 @@ interface Props {
   savedAt: string;
   saveFailed: boolean;
   releases?: ReactNode; // admin-only agent rollout section, rendered by the page
+  deviceCount: number;
+  audit?: { by: string; at: string } | null;
+  onDirtyChange?: (dirty: boolean) => void;
 }
+
+// Collectors that capture what a person is doing, not just machine health.
+const SENSITIVE: ReadonlySet<string> = new Set(['collect_processes', 'collect_active_window', 'collect_installed_apps']);
+
+const fmtWhen = (iso: string) => {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString(undefined, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+};
 
 const FIELD_LABEL: Partial<Record<keyof EnterprisePolicy, string>> = {
   telemetry_retention_days: 'Retention', sync_interval_seconds: 'Sync interval', delta_upload_enabled: 'Delta upload',
@@ -31,16 +43,18 @@ function Switch({ label, checked, disabled, onChange }: { label: string; checked
   return <input type="checkbox" role="switch" className="switch" aria-label={label} checked={checked} disabled={disabled} onChange={e => onChange(e.target.checked)} />;
 }
 
-function Row({ title, hint, children, error }: { title: string; hint: string; children: ReactNode; error?: string }) {
+// clickable: the whole row is a <label>, so the text toggles the switch inside it.
+function Row({ title, hint, children, error, clickable }: { title: string; hint: string; children: ReactNode; error?: string; clickable?: boolean }) {
+  const Tag = clickable ? 'label' : 'div';
   return (
-    <div className="set-row">
+    <Tag className={`set-row${clickable ? ' is-clickable' : ''}`}>
       <div className="set-row-text"><strong>{title}</strong><small>{hint}</small>{error && <em role="alert">{error}</em>}</div>
       <div className="set-row-control">{children}</div>
-    </div>
+    </Tag>
   );
 }
 
-export default function SettingsView({ policy, canManage, collectors, onSave, saving, savedAt, saveFailed, releases }: Props) {
+export default function SettingsView({ policy, canManage, collectors, onSave, saving, savedAt, saveFailed, releases, deviceCount, audit, onDirtyChange }: Props) {
   const [draft, setDraft] = useState(policy);
   const [base, setBase] = useState(policy);
   if (base !== policy) { setBase(policy); setDraft(policy); } // re-sync when the saved policy changes
@@ -60,6 +74,38 @@ export default function SettingsView({ policy, canManage, collectors, onSave, sa
   }, {});
   const invalid = Object.keys(errors).length > 0;
   const changedLabels = [...new Set(changed.map(k => FIELD_LABEL[k] ?? (k.startsWith('collect_') ? 'Collectors' : k)))];
+
+  // Changes that reduce what the fleet collects or keeps get an explicit confirm.
+  const risky = [
+    ...collectors.filter(c => policy[c.key] && !draft[c.key]).map(c => `Stop collecting ${c.label.toLowerCase()}`),
+    ...(draft.telemetry_retention_days < policy.telemetry_retention_days ? [`Shorten retention to ${draft.telemetry_retention_days} days`] : []),
+  ];
+  const [confirming, setConfirming] = useState(false);
+  const dirty = changed.length > 0;
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+    return () => onDirtyChange?.(false);
+  }, [dirty, onDirtyChange]);
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (e: BeforeUnloadEvent) => { e.preventDefault(); };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [dirty]);
+  const requestSave = () => (risky.length ? setConfirming(true) : void onSave(draft));
+
+  const [active, setActive] = useState('set-collect');
+  useEffect(() => {
+    const ids = ['set-collect', 'set-retention', 'set-upload', 'set-privacy', 'set-releases'];
+    const seen = new Map<string, boolean>();
+    const io = new IntersectionObserver(entries => {
+      entries.forEach(e => seen.set(e.target.id, e.isIntersecting));
+      const first = ids.find(id => seen.get(id));
+      if (first) setActive(first);
+    }, { rootMargin: '-15% 0px -70% 0px' });
+    ids.forEach(id => { const el = document.getElementById(id); if (el) io.observe(el); });
+    return () => io.disconnect();
+  }, []);
 
   const num = (key: keyof typeof LIMITS, unit: string) => (
     <div className="number-control">
@@ -82,22 +128,31 @@ export default function SettingsView({ policy, canManage, collectors, onSave, sa
   return (
     <div className="set-shell">
       <nav className="set-nav" aria-label="Settings sections">
-        {sections.map(s => <button key={s.id} type="button" onClick={() => go(s.id)}>{s.label}</button>)}
+        {sections.map(s => <button key={s.id} type="button" aria-current={active === s.id ? 'true' : undefined} onClick={() => go(s.id)}>{s.label}</button>)}
       </nav>
 
       <div className="set-main">
+        {audit?.at && <p className="set-meta">Last changed by <strong>{audit.by || 'unknown'}</strong> on {fmtWhen(audit.at)}</p>}
         {!canManage && <div className="set-notice" role="status">Read-only access. A manager or admin can change fleet policy.</div>}
 
         <section id="set-collect" className="set-card" aria-labelledby="set-collect-h">
           <header><div><h2 id="set-collect-h">Data collection</h2><p>Only enable the telemetry categories your environment needs.</p></div><span className="count-badge">{enabledCount} of {collectors.length} on</span></header>
-          <div className="set-grid">
-            {collectors.map(c => (
-              <label key={c.key} className="set-tile">
-                <span><strong>{c.label}</strong><small>{c.meta}</small></span>
-                <Switch label={c.label} checked={Boolean(draft[c.key])} disabled={!canManage} onChange={v => set(c.key, v)} />
-              </label>
-            ))}
-          </div>
+          {([
+            ['Device health', collectors.filter(c => !SENSITIVE.has(c.key)), false],
+            ['User activity', collectors.filter(c => SENSITIVE.has(c.key)), true],
+          ] as const).map(([title, items, sensitive]) => items.length > 0 && (
+            <div key={title} className="set-group">
+              <h3>{title}{sensitive && <span className="tag tag-resource">Privacy-sensitive</span>}</h3>
+              <div className="set-grid">
+                {items.map(c => (
+                  <label key={c.key} className="set-tile">
+                    <span><strong>{c.label}</strong><small>{c.meta}</small></span>
+                    <Switch label={c.label} checked={Boolean(draft[c.key])} disabled={!canManage} onChange={v => set(c.key, v)} />
+                  </label>
+                ))}
+              </div>
+            </div>
+          ))}
         </section>
 
         <section id="set-retention" className="set-card" aria-labelledby="set-retention-h">
@@ -108,10 +163,10 @@ export default function SettingsView({ policy, canManage, collectors, onSave, sa
 
         <section id="set-upload" className="set-card" aria-labelledby="set-upload-h">
           <header><div><h2 id="set-upload-h">Upload efficiency</h2><p>Send less by skipping data that has not changed.</p></div></header>
-          <Row title="Delta upload" hint="Upload changed collector payloads instead of full repeated snapshots.">
+          <Row clickable title="Delta upload" hint="Upload changed collector payloads instead of full repeated snapshots.">
             <Switch label="Delta upload" checked={draft.delta_upload_enabled} disabled={!canManage} onChange={v => set('delta_upload_enabled', v)} />
           </Row>
-          <Row title="Cache unchanged collector data" hint="Keep local fingerprints so unchanged apps, services, ports and browser entries are skipped.">
+          <Row clickable title="Cache unchanged collector data" hint="Keep local fingerprints so unchanged apps, services, ports and browser entries are skipped.">
             <Switch label="Cache unchanged collector data" checked={draft.cache_unchanged_collector_data} disabled={!canManage} onChange={v => set('cache_unchanged_collector_data', v)} />
           </Row>
         </section>
@@ -141,12 +196,22 @@ export default function SettingsView({ policy, canManage, collectors, onSave, sa
             {changed.length > 0 && (
               <div className="save-bar-actions">
                 <button type="button" className="action-btn" disabled={saving} onClick={() => setDraft(policy)}>Discard</button>
-                <button type="button" className="action-btn primary" disabled={saving || invalid} onClick={() => void onSave(draft)}>{saving ? 'Saving…' : 'Save changes'}</button>
+                <button type="button" className="action-btn primary" disabled={saving || invalid} onClick={requestSave}>{saving ? 'Saving…' : 'Save changes'}</button>
               </div>
             )}
           </div>
         )}
       </div>
+
+      <ConfirmDialog
+        open={confirming}
+        title="Apply to the whole fleet?"
+        message={`${risky.join('\n')}\n\nThis applies to all ${deviceCount} device${deviceCount === 1 ? '' : 's'} on their next check-in.`}
+        confirmLabel="Apply to all devices"
+        danger
+        onConfirm={() => { setConfirming(false); void onSave(draft); }}
+        onCancel={() => setConfirming(false)}
+      />
     </div>
   );
 }

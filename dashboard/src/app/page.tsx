@@ -7,6 +7,8 @@ import { AnimatePresence, MotionConfig, motion } from 'motion/react';
 import Link from 'next/link';
 import type { FormEvent } from 'react';
 import SettingsView from '@/components/views/SettingsView';
+import AccessView, { roleChangeSummary } from '@/components/views/AccessView';
+import type { AuditEvent } from '@/types';
 import { Device, AppFocusSummary, FocusCacheData, DeviceTab, EnterprisePolicy, DashboardUser, UserRole, HistoryEntry, BrowserHistoryArchiveData, DailyAppUsageData, DailyPresenceData, AgentRelease, AgentBuildJob, AgentRolloutResponse, WeeklyReport } from '@/types';
 import { API, readHeaders, adminHeaders, isOnline, primaryDisk, deviceDisplayName, formatDuration } from '@/lib/utils';
 import DeviceCard from '@/components/DeviceCard';
@@ -213,15 +215,8 @@ export default function Home() {
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [bootstrapRequired, setBootstrapRequired] = useState(false);
   const [users, setUsers]             = useState<DashboardUser[]>([]);
-  const [userForm, setUserForm]       = useState<{ name: string; email: string; password: string; role: UserRole }>({
-    name: '',
-    email: '',
-    password: '',
-    role: 'viewer',
-  });
+  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [userCreateStatus, setUserCreateStatus] = useState('');
-  const [passwordResetFor, setPasswordResetFor] = useState('');
-  const [passwordResetValue, setPasswordResetValue] = useState('');
   const [passwordResetStatus, setPasswordResetStatus] = useState('');
   const [roleUpdateStatus, setRoleUpdateStatus] = useState('');
   const [devices, setDevices]         = useState<Device[]>([]);
@@ -229,6 +224,9 @@ export default function Home() {
   const [isUpdating, setIsUpdating]   = useState(false);
   const [policy, setPolicy]           = useState<EnterprisePolicy>(DEFAULT_POLICY);
   const [policySavedAt, setPolicySavedAt] = useState<string>('');
+  const [policyAudit, setPolicyAudit] = useState<{ by: string; at: string } | null>(null);
+  const [settingsDirty, setSettingsDirty] = useState(false);
+  const [pendingPage, setPendingPage] = useState<PageView | null>(null);
   const [policyResult, setPolicyResult] = useState<{ ok: boolean } | null>(null);
   const [agentReleases, setAgentReleases] = useState<AgentRelease[]>([]);
   const [allAgentReleases, setAllAgentReleases] = useState<AgentRelease[]>([]);
@@ -542,9 +540,9 @@ export default function Home() {
     try {
       const res = await apiFetch('/policy', { headers: readHeaders() });
       if (res.ok) {
-        const d = await res.json();
-        const nextPolicy = { ...DEFAULT_POLICY, ...d };
-        setPolicy(nextPolicy);
+        const { updated_by, updated_at, ...d } = await res.json();
+        setPolicy({ ...DEFAULT_POLICY, ...d });
+        setPolicyAudit(updated_at ? { by: String(updated_by ?? ''), at: String(updated_at) } : null);
       }
     } catch {}
   }, [apiFetch]);
@@ -554,6 +552,14 @@ export default function Home() {
     try {
       const res = await apiFetch('/users');
       if (res.ok) setUsers(await res.json());
+    } catch {}
+  }, [apiFetch, canManageUsers]);
+
+  const fetchAudit = useCallback(async () => {
+    if (!canManageUsers) return;
+    try {
+      const res = await apiFetch('/audit');
+      if (res.ok) setAuditEvents(await res.json());
     } catch {}
   }, [apiFetch, canManageUsers]);
 
@@ -596,9 +602,9 @@ export default function Home() {
 
   useEffect(() => {
     if (currentPage !== 'access') return;
-    const t = window.setTimeout(() => { void fetchUsers(); }, 0);
+    const t = window.setTimeout(() => { void fetchUsers(); void fetchAudit(); }, 0);
     return () => window.clearTimeout(t);
-  }, [currentPage, fetchUsers]);
+  }, [currentPage, fetchUsers, fetchAudit]);
 
   useEffect(() => {
     if (currentPage !== 'settings') return;
@@ -690,54 +696,59 @@ export default function Home() {
     }
   };
 
-  const createUser = async (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
+  const createUser = async (form: { name: string; email: string; password: string; role: UserRole }): Promise<boolean> => {
     if (!canManageUsers) {
       setUserCreateStatus('Admin access required.');
-      return;
+      return false;
     }
     setUserCreateStatus('');
+    setPasswordResetStatus('');
+    setRoleUpdateStatus('');
     try {
       const res = await apiFetch('/users', {
         method: 'POST',
         headers: adminHeaders(),
-        body: JSON.stringify(userForm),
+        body: JSON.stringify(form),
       });
       if (!res.ok) {
         setUserCreateStatus(await readApiError(res));
-        return;
+        return false;
       }
-      setUserForm({ name: '', email: '', password: '', role: 'viewer' });
-      setUserCreateStatus('User created');
+      setUserCreateStatus(`User ${form.email} created`);
       void fetchUsers();
+      void fetchAudit();
+      return true;
     } catch {
       setUserCreateStatus('Could not create user. Check the API connection and try again.');
+      return false;
     }
   };
 
-  const resetUserPassword = async (e: FormEvent<HTMLFormElement>, user: DashboardUser) => {
-    e.preventDefault();
+  const resetUserPassword = async (user: DashboardUser, password: string): Promise<boolean> => {
     if (!canManageUsers) {
       setPasswordResetStatus('Admin access required.');
-      return;
+      return false;
     }
     setPasswordResetStatus('');
+    setUserCreateStatus('');
+    setRoleUpdateStatus('');
     try {
       const res = await apiFetch(`/users/${user.id}/password`, {
         method: 'POST',
         headers: adminHeaders(),
-        body: JSON.stringify({ password: passwordResetValue }),
+        body: JSON.stringify({ password }),
       });
       if (!res.ok) {
         setPasswordResetStatus(await readApiError(res));
-        return;
+        return false;
       }
-      setPasswordResetValue('');
-      setPasswordResetFor('');
       setPasswordResetStatus(`Password reset for ${user.email}`);
       void fetchUsers();
+      void fetchAudit();
+      return true;
     } catch {
       setPasswordResetStatus('Could not reset password. Check the API connection and try again.');
+      return false;
     }
   };
 
@@ -759,9 +770,47 @@ export default function Home() {
       }
       setUsers(list => list.map(item => item.id === user.id ? { ...item, role } : item));
       setRoleUpdateStatus(`Role updated for ${user.email}`);
+      void fetchAudit();
       if (authUser?.id === user.id) void loadCurrentUser();
     } catch {
       setRoleUpdateStatus('Could not update role. Check the API connection and try again.');
+    }
+  };
+
+  const setUserStatus = async (user: DashboardUser, status: 'active' | 'disabled'): Promise<boolean> => {
+    if (!canManageUsers) return false;
+    setRoleUpdateStatus('');
+    try {
+      const res = await apiFetch(`/users/${user.id}/status`, { method: 'POST', headers: adminHeaders(), body: JSON.stringify({ status }) });
+      if (!res.ok) {
+        setRoleUpdateStatus(await readApiError(res));
+        return false;
+      }
+      setRoleUpdateStatus(`${user.email} ${status === 'active' ? 'reactivated' : 'deactivated and signed out'}`);
+      void fetchUsers();
+      void fetchAudit();
+      return true;
+    } catch {
+      setRoleUpdateStatus('Could not update the account. Check the API connection and try again.');
+      return false;
+    }
+  };
+
+  const revokeUserSessions = async (user: DashboardUser): Promise<boolean> => {
+    if (!canManageUsers) return false;
+    setRoleUpdateStatus('');
+    try {
+      const res = await apiFetch(`/users/${user.id}/sessions/revoke`, { method: 'POST', headers: adminHeaders() });
+      if (!res.ok) {
+        setRoleUpdateStatus(await readApiError(res));
+        return false;
+      }
+      setRoleUpdateStatus(`${user.email} was signed out everywhere`);
+      void fetchAudit();
+      return true;
+    } catch {
+      setRoleUpdateStatus('Could not revoke sessions. Check the API connection and try again.');
+      return false;
     }
   };
 
@@ -818,6 +867,7 @@ export default function Home() {
       if (res.ok) {
         setPolicy(nextPolicy);
         setPolicySavedAt(new Date().toLocaleTimeString());
+        void fetchPolicy();
       }
       setPolicyResult({ ok: res.ok });
       return res.ok;
@@ -1232,7 +1282,7 @@ export default function Home() {
         return true;
       });
   };
-  const visibleBuildJobs = showAllBuildHistory ? agentBuildJobs : agentBuildJobs.slice(0, 2);
+  const visibleBuildJobs = showAllBuildHistory ? agentBuildJobs : agentBuildJobs.slice(0, 1);
   const hiddenBuildJobCount = Math.max(0, agentBuildJobs.length - visibleBuildJobs.length);
   const weeklyCoverageLabel = weeklyReport
     ? weeklyReport.coverage.complete_app_usage_week
@@ -1421,7 +1471,7 @@ export default function Home() {
     <MotionConfig reducedMotion="user" transition={{ duration: 0.18, ease: 'easeOut' }}>
     <AppShell
       currentPage={currentPage}
-      onNavigate={page => goToPage(page)}
+      onNavigate={page => (currentPage === 'settings' && settingsDirty && page !== 'settings' ? setPendingPage(page) : goToPage(page))}
       canManageUsers={canManageUsers}
       fleetConn={fleetConn}
       loading={loading}
@@ -1538,155 +1588,17 @@ export default function Home() {
               <div className="empty-sub">User management is available to dashboard admins only.</div>
             </div>
           ) : currentPage === 'access' ? (
-            <div className="settings-layout">
-              <section className="role-summary-grid" aria-label="Dashboard role permissions">
-                <div><span>Viewer</span><strong>Read telemetry</strong><p>Can inspect devices, reports, and current policy.</p></div>
-                <div><span>Manager</span><strong>Manage policy</strong><p>Viewer access plus collection and retention settings.</p></div>
-                <div><span>Admin</span><strong>Full control</strong><p>Can manage users, devices, releases, and fleet policy.</p></div>
-              </section>
-              <section className="settings-panel">
-                <div className="settings-panel-header">
-                  <div>
-                    <h2>Dashboard Users</h2>
-                    <p>Accounts with active access to this dashboard.</p>
-                  </div>
-                  {passwordResetStatus && <span className="save-state" role="status">{passwordResetStatus}</span>}
-                  {roleUpdateStatus && <span className="save-state" role="status">{roleUpdateStatus}</span>}
-                </div>
-                <div className="table-wrap" role="region" tabIndex={0} aria-label="Dashboard users, scrollable table">
-                  <table className="data-table dt-no-sticky">
-                    <thead>
-                      <tr>
-                        <th scope="col">User</th>
-                        <th scope="col">Role</th>
-                        <th scope="col">Status</th>
-                        <th scope="col">Created</th>
-                        <th scope="col" style={{ textAlign: 'right' }}>Password</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {users.map(user => (
-                        <tr key={user.id}>
-                          <td>
-                            <div className="device-cell-text">
-                              <strong>{user.name || user.email}</strong>
-                              <span>{user.email}</span>
-                            </div>
-                          </td>
-                          <td>
-                            <select
-                              className="role-select"
-                              value={user.role}
-                              onChange={e => setRoleChange({ user, role: e.target.value as UserRole })}
-                              aria-label={`Change role for ${user.email}`}
-                            >
-                              <option value="viewer">Viewer</option>
-                              <option value="manager">Manager</option>
-                              <option value="admin">Admin</option>
-                            </select>
-                          </td>
-                          <td>{user.status ?? 'active'}</td>
-                          <td>{user.created_at ? new Date(user.created_at).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '—'}</td>
-                          <td>
-                            {passwordResetFor === user.id ? (
-                              <form className="reset-password-form" onSubmit={e => resetUserPassword(e, user)}>
-                                <input
-                                  type="password"
-                                  value={passwordResetValue}
-                                  onChange={e => setPasswordResetValue(e.target.value)}
-                                  placeholder="New password"
-                                  minLength={8}
-                                  autoComplete="new-password"
-                                  required
-                                />
-                                <button type="submit" className="action-btn">Save</button>
-                                <button
-                                  type="button"
-                                  className="action-btn"
-                                  onClick={() => {
-                                    setPasswordResetFor('');
-                                    setPasswordResetValue('');
-                                  }}
-                                >
-                                  Cancel
-                                </button>
-                              </form>
-                            ) : (
-                              <div className="row-actions">
-                                <button
-                                  type="button"
-                                  className="action-btn"
-                                  onClick={() => {
-                                    setPasswordResetStatus('');
-                                    setPasswordResetFor(user.id);
-                                    setPasswordResetValue('');
-                                  }}
-                                >
-                                  Reset password
-                                </button>
-                              </div>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </section>
-              <section className="settings-panel">
-                <div className="settings-panel-header">
-                  <div>
-                    <h2>Create Dashboard User</h2>
-                    <p>New users can sign in after an admin creates their account.</p>
-                  </div>
-                  {userCreateStatus && <span className="save-state" role="status">{userCreateStatus}</span>}
-                </div>
-                <form className="user-form" onSubmit={createUser}>
-                  <label className="auth-field">
-                    <span>Name</span>
-                    <input
-                      value={userForm.name}
-                      onChange={e => setUserForm(f => ({ ...f, name: e.target.value }))}
-                      autoComplete="name"
-                    />
-                  </label>
-                  <label className="auth-field">
-                    <span>Email</span>
-                    <input
-                      type="email"
-                      value={userForm.email}
-                      onChange={e => setUserForm(f => ({ ...f, email: e.target.value }))}
-                      autoComplete="email"
-                      required
-                    />
-                  </label>
-                  <label className="auth-field">
-                    <span>Role</span>
-                    <select
-                      value={userForm.role}
-                      onChange={e => setUserForm(f => ({ ...f, role: e.target.value as UserRole }))}
-                    >
-                      <option value="viewer">Viewer</option>
-                      <option value="manager">Manager</option>
-                      <option value="admin">Admin</option>
-                    </select>
-                  </label>
-                  <label className="auth-field">
-                    <span>Temporary Password</span>
-                    <input
-                      type="password"
-                      value={userForm.password}
-                      onChange={e => setUserForm(f => ({ ...f, password: e.target.value }))}
-                      autoComplete="new-password"
-                      minLength={8}
-                      required
-                    />
-                  </label>
-                  <button type="submit" className="auth-submit user-submit">Create user</button>
-                </form>
-              </section>
-
-            </div>
+            <AccessView
+              users={users}
+              currentUserId={authUser?.id}
+              onRequestRoleChange={(user, role) => setRoleChange({ user, role })}
+              onCreate={createUser}
+              onResetPassword={resetUserPassword}
+              notices={[userCreateStatus, passwordResetStatus, roleUpdateStatus]}
+              onSetStatus={setUserStatus}
+              onRevokeSessions={revokeUserSessions}
+              audit={auditEvents}
+            />
           ) : currentPage === 'settings' ? (
             <SettingsView
               policy={policy}
@@ -1696,17 +1608,20 @@ export default function Home() {
               saving={isUpdating}
               savedAt={policySavedAt}
               saveFailed={policyResult?.ok === false}
+              deviceCount={devices.length}
+              audit={policyAudit}
+              onDirtyChange={setSettingsDirty}
               releases={canManageReleases ? (
-                <section className="settings-panel">
-                  <div className="settings-panel-header">
+                <section className="set-card">
+                  <header className="rel-card-head">
                     <div>
-                      <h2>Agent Rollouts</h2>
+                      <h2>Agent releases</h2>
                       <p>Build, upload, publish, and roll back agent binaries for supported targets.</p>
                     </div>
                     <div className="release-header-actions">
                       <button
                         type="button"
-                        className="action-btn primary"
+                        className="action-btn"
                         onClick={() => void rolloutLatestAgents()}
                         disabled={rolloutSaving || allAgentReleases.length === 0}
                       >
@@ -1716,7 +1631,7 @@ export default function Home() {
                         Refresh
                       </button>
                     </div>
-                  </div>
+                  </header>
 
                   <div className="rel-grid">
                     {releasesByOS.map(target => (
@@ -1818,7 +1733,7 @@ export default function Home() {
                     <div className="build-history">
                       <div className="build-history-head">
                         <div className="sub-section-title">Build History</div>
-                        {agentBuildJobs.length > 2 && (
+                        {agentBuildJobs.length > 1 && (
                           <button
                             type="button"
                             className="action-btn compact"
@@ -2309,9 +2224,19 @@ export default function Home() {
       />
 
       <ConfirmDialog
+        open={pendingPage !== null}
+        title="Discard unsaved changes?"
+        message="You have unsaved settings changes. They will be lost if you leave this page."
+        confirmLabel="Discard and leave"
+        cancelLabel="Keep editing"
+        danger
+        onConfirm={() => { const next = pendingPage; setPendingPage(null); setSettingsDirty(false); if (next) goToPage(next); }}
+        onCancel={() => setPendingPage(null)}
+      />
+      <ConfirmDialog
         open={!!roleChange}
         title="Change role"
-        message={`Change ${roleChange?.user.email ?? ''} from ${roleChange?.user.role ?? ''} to ${roleChange?.role ?? ''}?`}
+        message={roleChange ? roleChangeSummary(roleChange.user.email, roleChange.user.role, roleChange.role) : ''}
         confirmLabel="Change role"
         danger={roleChange?.user.role === 'admin' || roleChange?.role === 'admin'}
         onConfirm={() => { if (roleChange) void updateUserRole(roleChange.user, roleChange.role); setRoleChange(null); }}

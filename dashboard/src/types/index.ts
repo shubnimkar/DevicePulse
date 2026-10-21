@@ -304,6 +304,14 @@ export interface DashboardUser {
   updated_at?: string;
 }
 
+export interface AuditEvent {
+  action: string;
+  actor: string;
+  target: string;
+  detail: string;
+  at: string;
+}
+
 export interface AgentRelease {
   version: string;
   os: 'darwin' | 'linux' | 'windows';
