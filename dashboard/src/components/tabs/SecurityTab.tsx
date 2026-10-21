@@ -65,6 +65,7 @@ export default function SecurityTab({ usb, osUpd, deviceId, userRole, deviceOnli
   const [busyType, setBusyType]     = useState('');
   const [notice, setNotice]         = useState<{ kind: 'ok' | 'err'; msg: string } | null>(null);
   const [pendingAction, setPendingAction] = useState<ActionDef | null>(null);
+  const [refreshMsg, setRefreshMsg]       = useState('');
 
   const loadCommands = useCallback(async () => {
     if (!deviceId) return;
@@ -145,7 +146,14 @@ export default function SecurityTab({ usb, osUpd, deviceId, userRole, deviceOnli
                 onClick={() => (a.confirm ? setPendingAction(a) : void issueCommand(a))}
               >
                 <span className="ra-btn-label">{busy ? 'Sending…' : a.label}</span>
-                {!allowed && <span className="ra-btn-role">🔒 {a.minRole}</span>}
+                {!allowed && (
+                  <span className="ra-btn-role">
+                    <svg aria-hidden="true" width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" style={{ verticalAlign: '-1px', marginRight: 3 }}>
+                      <rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 015 0v2"/>
+                    </svg>
+                    {a.minRole}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -158,10 +166,20 @@ export default function SecurityTab({ usb, osUpd, deviceId, userRole, deviceOnli
         <div className="ra-history">
           <div className="ra-history-title">
             Recent Commands
-            <button type="button" className="ra-refresh" onClick={loadCommands} disabled={cmdLoading} aria-label="Refresh command history">
-              {cmdLoading ? '…' : '⟳'}
+            <button
+              type="button"
+              className="ra-refresh"
+              onClick={async () => {
+                setRefreshMsg('Refreshing command history…');
+                await loadCommands();
+                setRefreshMsg('Command history refreshed.');
+              }}
+              disabled={cmdLoading}
+            >
+              <span aria-hidden="true">{cmdLoading ? '…' : '⟳'}</span> {cmdLoading ? 'Refreshing' : 'Refresh'}
             </button>
           </div>
+          <span className="sr-only" role="status">{refreshMsg}</span>
           {commands.length === 0 && !cmdLoading && (
             <div className="no-data no-data-tight">No remote commands issued yet.</div>
           )}

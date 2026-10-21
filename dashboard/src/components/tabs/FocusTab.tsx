@@ -74,6 +74,7 @@ export default function FocusTab({ data, cachedSummaries, dailyUsage, dailyPrese
                   <span className="focus-sessions">{app.session_count} session{app.session_count !== 1 ? 's' : ''}</span>
                 </div>
                 <GaugeBar
+                  label={`${app.app_name} share of app usage time`}
                   value={pct}
                   color={isActive ? 'var(--green)' : 'var(--blue)'}
                   height={3}

@@ -4,9 +4,10 @@ interface GaugeBarProps {
 	value: number;
 	color?: string;
   height?: number;
+  label?: string;
 }
 
-export default function GaugeBar({ value, color, height = 4 }: GaugeBarProps) {
+export default function GaugeBar({ value, color, height = 4, label }: GaugeBarProps) {
   const pct = Number.isFinite(value) ? Math.min(Math.max(value, 0), 100) : 0;
 
   return (
@@ -14,6 +15,8 @@ export default function GaugeBar({ value, color, height = 4 }: GaugeBarProps) {
       className="gauge-track"
       style={{ height }}
       role="progressbar"
+      aria-label={label}
+      aria-valuetext={`${Math.round(pct)}%`}
       aria-valuenow={pct}
       aria-valuemin={0}
       aria-valuemax={100}

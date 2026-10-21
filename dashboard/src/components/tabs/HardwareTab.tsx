@@ -85,7 +85,7 @@ export default function HardwareTab({ hw }: Props) {
           <div className="hw-value" style={{ color: cpu?.usage_percent === undefined ? 'var(--text-3)' : metricColor(cpu.usage_percent) }}>
             {cpu?.usage_percent === undefined ? 'Unavailable' : `${cpu.usage_percent.toFixed(1)}%`}
           </div>
-          <GaugeBar value={cpu?.usage_percent ?? 0} color={metricColor(cpu?.usage_percent ?? 0)} />
+          <GaugeBar label="CPU usage" value={cpu?.usage_percent ?? 0} color={metricColor(cpu?.usage_percent ?? 0)} />
           <div className="hw-sub">{cpu?.core_count ?? '?'} logical cores</div>
         </div>
 
@@ -95,7 +95,7 @@ export default function HardwareTab({ hw }: Props) {
           <div className="hw-value" style={{ color: ram?.used_percent === undefined ? 'var(--text-3)' : metricColor(ram.used_percent) }}>
             {ram?.used_percent === undefined ? 'Unavailable' : `${ram.used_percent.toFixed(1)}%`}
           </div>
-          <GaugeBar value={ram?.used_percent ?? 0} color={metricColor(ram?.used_percent ?? 0)} />
+          <GaugeBar label="Memory usage" value={ram?.used_percent ?? 0} color={metricColor(ram?.used_percent ?? 0)} />
           <div className="hw-sub">{ram?.used_gb?.toFixed(1) ?? '?'} / {ram?.total_gb?.toFixed(1) ?? '?'} GB</div>
         </div>
 
@@ -105,7 +105,7 @@ export default function HardwareTab({ hw }: Props) {
           <div className="hw-value" style={{ color: diskPct === null ? 'var(--text-3)' : metricColor(diskPct) }}>
             {diskPct === null ? 'Unavailable' : `${diskPct.toFixed(1)}%`}
           </div>
-          <GaugeBar value={diskPct ?? 0} color={metricColor(diskPct ?? 0)} />
+          <GaugeBar label="Disk usage" value={diskPct ?? 0} color={metricColor(diskPct ?? 0)} />
           <div className="hw-sub">{disk ? `${diskSize(disk, 'used')} / ${diskSize(disk, 'total')}` : 'Telemetry unavailable'}</div>
         </div>
 
@@ -155,7 +155,7 @@ export default function HardwareTab({ hw }: Props) {
                       <td className="disk-usage-cell">
                         <div className="disk-usage-wrap">
                           <div className="disk-usage-gauge">
-                            <GaugeBar value={pct ?? 0} color={metricColor(pct ?? 0)} height={3} />
+                            <GaugeBar label={`Disk usage ${d.mount}`} value={pct ?? 0} color={metricColor(pct ?? 0)} height={3} />
                           </div>
                           <span className="mono disk-usage-pct" style={{ color: metricColor(pct ?? 0) }}>
                             {pct !== null ? `${pct.toFixed(0)}%` : 'Unavailable'}

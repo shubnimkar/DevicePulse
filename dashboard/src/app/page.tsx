@@ -204,6 +204,18 @@ const IconShield = () => (
     <path d="M5.9 8l1.5 1.5 2.7-2.9"/>
   </svg>
 );
+const IconSignal = () => (
+  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+    <circle cx="8" cy="8" r="1.4"/>
+    <path d="M5.2 5.2a4 4 0 000 5.6M10.8 5.2a4 4 0 010 5.6M3 3a7 7 0 000 10M13 3a7 7 0 010 10"/>
+  </svg>
+);
+const IconWarning = () => (
+  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M8 2l6.5 11.5h-13L8 2z"/>
+    <path d="M8 6.5v3M8 11.6v.1"/>
+  </svg>
+);
 const IconSettings = () => (
   <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
     <circle cx="8" cy="8" r="2.25"/>
@@ -274,7 +286,15 @@ export default function Home() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
   const [fleetConn, setFleetConn] = useState<'connecting' | 'live' | 'stale'>('connecting');
+  const [inventorySort, setInventorySort] = useState<{ key: 'status' | 'lastSeen'; dir: 'asc' | 'desc' } | null>(null);
+  const [reportRowLimit, setReportRowLimit] = useState(25);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState(0);
+  const [nowTick, setNowTick] = useState(0);
+  const [staleDismissed, setStaleDismissed] = useState(false);
+  const [fetchError, setFetchError] = useState('');
   const [confirmTarget, setConfirmTarget] = useState<{ deviceId: string; name: string } | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  const [confirmError, setConfirmError] = useState('');
   const [renameTarget, setRenameTarget] = useState<Device | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [renameError, setRenameError] = useState('');
@@ -283,6 +303,7 @@ export default function Home() {
   const [deviceActionError, setDeviceActionError] = useState('');
   const mobileNavButtonRef = useRef<HTMLButtonElement>(null);
   const appMainRef = useRef<HTMLElement>(null);
+  const userMenuRef = useRef<HTMLDetailsElement>(null);
 
   const canManagePolicy = authUser?.role === 'admin' || authUser?.role === 'manager';
   const canManageUsers = authUser?.role === 'admin';
@@ -507,7 +528,10 @@ export default function Home() {
     }
   }, [apiFetch, weeklyReportFrom, weeklyReportTo]);
 
+  const fetchAllInFlight = useRef(false);
   const fetchAll = useCallback(async () => {
+    if (fetchAllInFlight.current) return; // skip poll/Retry while a fetch is running
+    fetchAllInFlight.current = true;
     try {
       const devRes = await apiFetch('/devices', { headers: readHeaders() });
       if (!devRes.ok) throw new Error(`HTTP ${devRes.status}`);
@@ -524,10 +548,16 @@ export default function Home() {
           .map(d => fetchDailyAppUsage(d.device_id, appUsageDateRef.current, { showLoader: false })),
       ]);
       setFleetConn('live');
+      setFetchError('');
+      setLastUpdatedAt(Date.now());
+      setStaleDismissed(false);
     } catch (e) {
       console.error('Fetch error:', e);
       setFleetConn('stale');
+      setNowTick(Date.now());
+      setFetchError(e instanceof Error ? e.message : 'Could not reach the API.');
     } finally {
+      fetchAllInFlight.current = false;
       setLoading(false);
     }
   }, [apiFetch, fetchBrowserHistory, fetchDailyAppUsage]);
@@ -580,6 +610,28 @@ export default function Home() {
     const id = setInterval(fetchAll, 5000);
     return () => { window.clearTimeout(t); clearInterval(id); };
   }, [authUser, fetchAll, fetchPolicy]);
+
+  // Tick once a second while stale so "Last updated Xs ago" stays current.
+  useEffect(() => {
+    if (fleetConn !== 'stale') return;
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [fleetConn]);
+
+  // User menu: close on Escape or outside click.
+  useEffect(() => {
+    const menu = userMenuRef.current;
+    if (!menu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && menu.open) { menu.open = false; menu.querySelector('summary')?.focus(); }
+    };
+    const onDown = (e: MouseEvent) => {
+      if (menu.open && e.target instanceof Node && !menu.contains(e.target)) menu.open = false;
+    };
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onDown);
+    return () => { document.removeEventListener('keydown', onKey); document.removeEventListener('mousedown', onDown); };
+  }, [authUser]);
 
   useEffect(() => {
     if (currentPage !== 'access') return;
@@ -895,11 +947,14 @@ export default function Home() {
   const openDeleteConfirm = (deviceId: string, name: string) => {
     if (!canDeleteDevices) return;
     setDeviceActionError('');
+    setConfirmError('');
     setConfirmTarget({ deviceId, name });
   };
 
   const performDeleteDevice = async (deviceId: string) => {
-    if (!canDeleteDevices) return;
+    if (!canDeleteDevices || confirmBusy) return;
+    setConfirmBusy(true);
+    setConfirmError('');
     try {
       const res = await apiFetch(`/devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE', headers: adminHeaders() });
       if (!res.ok) throw new Error(await readApiError(res));
@@ -942,9 +997,14 @@ export default function Home() {
       if (selectedDeviceId === deviceId) {
         goToPage('inventory', { replace: true });
       }
+      setConfirmTarget(null);
     } catch (e) {
       console.error('Device deletion failed:', e);
-      setDeviceActionError(e instanceof Error ? e.message : 'Device deletion failed.');
+      const msg = e instanceof Error ? e.message : 'Device deletion failed.';
+      setDeviceActionError(msg);
+      setConfirmError(msg);
+    } finally {
+      setConfirmBusy(false);
     }
   };
 
@@ -1219,6 +1279,23 @@ export default function Home() {
       .filter(Boolean).join(' ').toLowerCase().includes(normalizedQuery);
   });
 
+  const sortedDevices = !inventorySort ? filteredDevices : [...filteredDevices].sort((a, b) => {
+    const sev = { critical: 0, warning: 1, online: 2, offline: 3 };
+    const diff = inventorySort.key === 'status'
+      ? sev[getDeviceState(a)] - sev[getDeviceState(b)]
+      : (Date.parse(a.last_seen ?? '') || 0) - (Date.parse(b.last_seen ?? '') || 0);
+    return inventorySort.dir === 'asc' ? diff : -diff;
+  });
+  const toggleInventorySort = (key: 'status' | 'lastSeen') =>
+    setInventorySort(prev => (prev?.key === key ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' }));
+  const sortHeader = (key: 'status' | 'lastSeen', label: string) => (
+    <th scope="col" aria-sort={inventorySort?.key === key ? (inventorySort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+      <button type="button" className="th-sort" onClick={() => toggleInventorySort(key)}>
+        {label}<span aria-hidden="true">{inventorySort?.key === key ? (inventorySort.dir === 'asc' ? ' ▲' : ' ▼') : ' ↕'}</span>
+      </button>
+    </th>
+  );
+
   const filterOptions: { key: StatusFilter; label: string; count: number }[] = [
     { key: 'all',      label: 'All Devices', count: devices.length },
     { key: 'online',   label: 'Online',      count: onlineCount },
@@ -1267,6 +1344,13 @@ export default function Home() {
       : `Partial app-usage data: ${weeklyReport.coverage.app_usage_days}/${weeklyReport.requested_days} days`
     : '';
   const weeklyDevices = weeklyReport?.devices ?? [];
+  const visibleWeeklyDevices = weeklyDevices.slice(0, reportRowLimit);
+  const reportDatesDirty = !!weeklyReport && (weeklyReport.from !== weeklyReportFrom || weeklyReport.to !== weeklyReportTo);
+  const reportShowMore = weeklyDevices.length > reportRowLimit && (
+    <button type="button" className="action-btn show-more-btn" onClick={() => setReportRowLimit(n => n + 25)}>
+      Show more ({weeklyDevices.length - reportRowLimit} remaining)
+    </button>
+  );
 
   const toggleBuildPlatform = (os: AgentRelease['os'], checked: boolean) => {
     setBuildForm(form => ({
@@ -1288,7 +1372,7 @@ export default function Home() {
     return (
       <div className="auth-shell auth-shell-solo">
         <div className="auth-form-col">
-          <div className="auth-panel">
+          <div className="auth-panel" role="status">
             <div className="auth-logo-lg pulse"><LogoMark /></div>
             <h1>DevicePulse</h1>
             <p>Checking dashboard session…</p>
@@ -1346,6 +1430,8 @@ export default function Home() {
                     value={authForm.name}
                     onChange={e => setAuthForm(f => ({ ...f, name: e.target.value }))}
                     autoComplete="name"
+                    aria-invalid={authError ? true : undefined}
+                    aria-describedby={authError ? 'auth-error' : undefined}
                     required
                   />
                 </label>
@@ -1362,6 +1448,8 @@ export default function Home() {
                     onChange={e => setAuthForm(f => ({ ...f, email: e.target.value }))}
                     autoComplete="email"
                     inputMode="email"
+                    aria-invalid={authError ? true : undefined}
+                    aria-describedby={authError ? 'auth-error' : undefined}
                     required
                   />
                 </span>
@@ -1378,6 +1466,8 @@ export default function Home() {
                     onChange={e => setAuthForm(f => ({ ...f, password: e.target.value }))}
                     autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
                     minLength={8}
+                    aria-invalid={authError ? true : undefined}
+                    aria-describedby={authError ? 'auth-error' : undefined}
                     required
                   />
                   <button
@@ -1401,7 +1491,7 @@ export default function Home() {
                 whileTap={{ opacity: .9 }}
               >
                 {authSubmitting && <span className="auth-btn-spinner" aria-hidden="true" />}
-                <span aria-live="polite">
+                <span>
                   {authSubmitting
                     ? (authMode === 'register' ? 'Creating account…' : 'Verifying access…')
                     : (authMode === 'register' ? 'Create admin account' : 'Enter operations console')}
@@ -1474,9 +1564,14 @@ export default function Home() {
                 Reconnecting…
               </span>
             )}
+            {fleetConn === 'stale' && lastUpdatedAt > 0 && (
+              <span className="last-updated">
+                Last updated {Math.max(0, Math.round((nowTick - lastUpdatedAt) / 1000))}s ago
+              </span>
+            )}
           </div>
-          <details className="user-menu">
-            <summary className="user-chip" aria-label="User menu">
+          <details className="user-menu" ref={userMenuRef}>
+            <summary className="user-chip" aria-label={`User menu, ${authUser.name || authUser.email}, ${roleLabel[authUser.role]}`}>
               <span className="user-avatar">{(authUser.name || authUser.email || 'U').charAt(0).toUpperCase()}</span>
               <span className="user-copy">
                 <span className="user-name">{authUser.name || authUser.email}</span>
@@ -1485,7 +1580,7 @@ export default function Home() {
               <span className="user-caret" aria-hidden="true" />
             </summary>
             <div className="user-menu-panel">
-              <button type="button" onClick={logout}>Sign out</button>
+              <button type="button" onClick={() => { if (userMenuRef.current) userMenuRef.current.open = false; void logout(); }}>Sign out</button>
             </div>
           </details>
         </div>
@@ -1564,6 +1659,14 @@ export default function Home() {
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: -8 }}
         >
+
+          {fleetConn === 'stale' && !staleDismissed && lastUpdatedAt > 0 && ['dashboard', 'inventory', 'inspect'].includes(currentPage) && (
+            <div className="stale-banner" role="status">
+              <span>Connection lost. Showing the last data received; retrying automatically.</span>
+              <button type="button" className="action-btn" onClick={() => void fetchAll()}>Retry now</button>
+              <button type="button" className="stale-banner-close" aria-label="Dismiss connection warning" onClick={() => setStaleDismissed(true)}>×</button>
+            </div>
+          )}
 
           {/* Page header */}
           <div className="page-header">
@@ -1646,6 +1749,9 @@ export default function Home() {
                 <button type="button" className="btn" onClick={() => void fetchWeeklyReport()} disabled={weeklyReportLoading}>
                   {weeklyReportLoading ? 'Loading...' : 'Refresh'}
                 </button>
+                {reportDatesDirty && !weeklyReportLoading && (
+                  <span className="date-dirty-hint" role="status">Dates changed — refresh to update</span>
+                )}
               </div>
             )}
             {currentPage === 'settings' && (
@@ -1763,6 +1869,7 @@ export default function Home() {
                   key={opt.key}
                   type="button"
                   className={`filter-tab tab-${opt.key} ${statusFilter === opt.key ? 'active' : ''}`}
+                  aria-pressed={statusFilter === opt.key}
                   onClick={() => setStatusFilter(opt.key)}
                 >
                   {opt.label}
@@ -1775,7 +1882,7 @@ export default function Home() {
           {/* Content */}
           {currentPage === 'access' && !canManageUsers ? (
             <div className="empty-state">
-              <span className="empty-icon">🔒</span>
+              <span className="empty-icon" aria-hidden="true"><IconLock /></span>
               <div className="empty-title">Admin access required</div>
               <div className="empty-sub">User management is available to dashboard admins only.</div>
             </div>
@@ -1848,7 +1955,7 @@ export default function Home() {
                   {passwordResetStatus && <span className="save-state" role="status">{passwordResetStatus}</span>}
                   {roleUpdateStatus && <span className="save-state" role="status">{roleUpdateStatus}</span>}
                 </div>
-                <div className="table-wrap">
+                <div className="table-wrap" role="region" tabIndex={0} aria-label="Dashboard users, scrollable table">
                   <table className="data-table">
                     <thead>
                       <tr>
@@ -2240,7 +2347,7 @@ export default function Home() {
               </section>
             </div>
           ) : currentPage === 'reports' ? (
-            <div className="reports-layout">
+            <div className="reports-layout" aria-busy={weeklyReportLoading} data-refreshing={weeklyReportLoading && !!weeklyReport ? 'true' : undefined}>
               {weeklyReportError && <div className="auth-error" role="alert">{weeklyReportError}</div>}
               {weeklyReportLoading && !weeklyReport ? (
                 <div className="loading" role="status">Building weekly report...</div>
@@ -2377,8 +2484,9 @@ export default function Home() {
                             <p>Devices sorted by total app usage in this report window.</p>
                           </div>
                         </div>
-                        <div className="table-wrap">
+                        <div className="table-wrap" role="region" tabIndex={0} aria-label="Highest usage devices, scrollable table">
                           <table className="data-table report-table">
+                            <caption className="sr-only">Highest usage devices in the report window</caption>
                             <thead>
                               <tr>
                                 <th scope="col">Device</th>
@@ -2389,7 +2497,7 @@ export default function Home() {
                               </tr>
                             </thead>
                             <tbody>
-                              {weeklyDevices.map(device => (
+                              {visibleWeeklyDevices.map(device => (
                                 <tr key={device.device_id} className={`row-${device.state}`}>
                                   <td>
                                     <div className="device-cell-text">
@@ -2411,6 +2519,7 @@ export default function Home() {
                             </tbody>
                           </table>
                         </div>
+                        {reportShowMore}
                       </section>
                     </>
                   )}
@@ -2446,8 +2555,9 @@ export default function Home() {
                             <p>Per-device app usage coverage and session volume.</p>
                           </div>
                         </div>
-                        <div className="table-wrap">
+                        <div className="table-wrap" role="region" tabIndex={0} aria-label="Device usage, scrollable table">
                           <table className="data-table report-table">
+                            <caption className="sr-only">Per-device app usage in the report window</caption>
                             <thead>
                               <tr>
                                 <th scope="col">Device</th>
@@ -2458,7 +2568,7 @@ export default function Home() {
                               </tr>
                             </thead>
                             <tbody>
-                              {weeklyDevices.map(device => (
+                              {visibleWeeklyDevices.map(device => (
                                 <tr key={device.device_id} className={`row-${device.state}`}>
                                   <td>
                                     <div className="device-cell-text">
@@ -2475,6 +2585,7 @@ export default function Home() {
                             </tbody>
                           </table>
                         </div>
+                        {reportShowMore}
                       </section>
                     </>
                   )}
@@ -2503,8 +2614,9 @@ export default function Home() {
                             <p>Sorted by usage, with current CPU, memory, disk and pending updates.</p>
                           </div>
                         </div>
-                        <div className="table-wrap">
+                        <div className="table-wrap" role="region" tabIndex={0} aria-label="Device health breakdown, scrollable table">
                           <table className="data-table report-table">
+                            <caption className="sr-only">Device health breakdown</caption>
                             <thead>
                               <tr>
                                 <th scope="col">Device</th>
@@ -2517,7 +2629,7 @@ export default function Home() {
                               </tr>
                             </thead>
                             <tbody>
-                              {weeklyDevices.map(device => (
+                              {visibleWeeklyDevices.map(device => (
                                 <tr key={device.device_id} className={`row-${device.state}`}>
                                   <td>
                                     <div className="device-cell-text">
@@ -2541,21 +2653,30 @@ export default function Home() {
                             </tbody>
                           </table>
                         </div>
+                        {reportShowMore}
                       </section>
                     </>
                   )}
                 </>
               ) : (
                 <div className="empty-state">
-                  <span className="empty-icon">📄</span>
+                  <span className="empty-icon" aria-hidden="true"><IconReport /></span>
                   <div className="empty-title">No report loaded</div>
                   <div className="empty-sub">Choose a date window and refresh.</div>
                 </div>
               )}
             </div>
           ) : loading ? (
-            <div className="loading" role="status" aria-label="Loading">
-              Connecting to telemetry stream…
+            <div className="skeleton-list" role="status" aria-label="Loading devices" aria-busy="true">
+              {[0, 1, 2, 3, 4].map(i => <div key={i} className="skeleton-row" aria-hidden="true" />)}
+              <span className="sr-only">Connecting to telemetry stream…</span>
+            </div>
+          ) : fetchError && devices.length === 0 ? (
+            <div className="empty-state">
+              <span className="empty-icon" aria-hidden="true"><IconWarning /></span>
+              <div className="empty-title">Could not load devices</div>
+              <div className="empty-sub" role="alert">{fetchError}. Check the API connection and try again.</div>
+              <button type="button" className="action-btn primary" style={{ marginTop: '1rem' }} onClick={() => void fetchAll()}>Retry</button>
             </div>
           ) : currentPage === 'dashboard' ? null : currentPage === 'inspect' ? (
             selectedDevice ? (
@@ -2584,20 +2705,20 @@ export default function Home() {
               </div>
             ) : (
               <div className="empty-state">
-                <span className="empty-icon">🔍</span>
+                <span className="empty-icon" aria-hidden="true"><IconSearch /></span>
                 <div className="empty-title">Device not found</div>
                 <div className="empty-sub">Return to inventory and choose a device.</div>
               </div>
             )
           ) : devices.length === 0 ? (
             <div className="empty-state">
-              <span className="empty-icon">📡</span>
+              <span className="empty-icon" aria-hidden="true"><IconSignal /></span>
               <div className="empty-title">No devices connected</div>
               <div className="empty-sub">Start the DevicePulse agent on a machine to begin.</div>
             </div>
           ) : filteredDevices.length === 0 ? (
             <div className="empty-state">
-              <span className="empty-icon">🔍</span>
+              <span className="empty-icon" aria-hidden="true"><IconSearch /></span>
               <div className="empty-title">No matching devices</div>
               <div className="empty-sub">Adjust your search or status filter.</div>
             </div>
@@ -2605,7 +2726,7 @@ export default function Home() {
             /* ── Inventory table ── */
             <div>
               <div className="inventory-mobile-list">
-                {filteredDevices.map(device => {
+                {sortedDevices.map(device => {
                   const sys = device.data?.SystemInfo;
                   const state = getDeviceState(device);
                   const name = deviceDisplayName(device);
@@ -2620,7 +2741,6 @@ export default function Home() {
                         <span className="mobile-resource-row"><span>CPU <strong>{cpu === undefined ? 'Unavailable' : `${cpu.toFixed(0)}%`}</strong></span><span>Memory <strong>{ram === undefined ? 'Unavailable' : `${ram.toFixed(0)}%`}</strong></span></span>
                       </button>
                       <div className="mobile-device-actions">
-                        <button type="button" className="action-btn primary" onClick={() => viewDeviceDetails(device.device_id)}>Inspect</button>
                         {canDeleteDevices && <button type="button" className="action-btn" onClick={() => openRenameDevice(device)}>Rename</button>}
                         {canDeleteDevices && <button type="button" className="action-btn danger" onClick={() => openDeleteConfirm(device.device_id, name)}>Remove</button>}
                       </div>
@@ -2628,20 +2748,21 @@ export default function Home() {
                   );
                 })}
               </div>
-              <div className="table-wrap">
+              <div className="table-wrap" role="region" tabIndex={0} aria-label="Device inventory, scrollable table">
                 <table className="data-table">
+                  <caption className="sr-only">Device inventory</caption>
                   <thead>
                     <tr>
                       <th scope="col">Device</th>
-                      <th scope="col">Status</th>
+                      {sortHeader('status', 'Status')}
                       <th scope="col">Resources</th>
                       <th scope="col">Platform</th>
-                      <th scope="col">Last Seen</th>
+                      {sortHeader('lastSeen', 'Last Seen')}
                       <th scope="col" style={{ textAlign: 'right' }}>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredDevices.map(device => {
+                    {sortedDevices.map(device => {
                       const sys    = device.data?.SystemInfo;
                       const state  = getDeviceState(device);
                       const online = isOnline(device.last_seen);
@@ -2796,15 +2917,16 @@ export default function Home() {
         open={!!confirmTarget}
         title="Remove device"
         message={`Remove ${confirmTarget?.name || confirmTarget?.deviceId || 'this device'} (${confirmTarget?.deviceId ?? ''})?\n\nIts stored telemetry is deleted and future agent uploads are revoked.`}
-        confirmLabel="Remove device"
+        confirmLabel={confirmBusy ? 'Removing…' : 'Remove device'}
         cancelLabel="Cancel"
         danger
+        busy={confirmBusy}
+        error={confirmError}
         onConfirm={() => {
           const id = confirmTarget?.deviceId;
-          setConfirmTarget(null);
           if (id) void performDeleteDevice(id);
         }}
-        onCancel={() => setConfirmTarget(null)}
+        onCancel={() => { if (!confirmBusy) setConfirmTarget(null); }}
       />
 
     </motion.div>

@@ -164,7 +164,7 @@ export default function DeviceCard({
             </span>
           )}
           {onDelete && (
-            <button className="delete-btn" title="Remove device" onClick={onDelete} aria-label="Remove device">
+            <button className="delete-btn" title="Remove device" onClick={onDelete} aria-label={`Remove ${hostname}`}>
               <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
                 <path d="M2 4h12M5 4V2h6v2M6 7v5M10 7v5M3 4l1 10h8l1-10"/>
               </svg>
@@ -187,7 +187,6 @@ export default function DeviceCard({
             className={`tab-btn ${tab === t.key ? 'active' : ''}`}
             onClick={() => onTabChange(t.key)}
             onKeyDown={handleTabKeyDown}
-            whileHover={{ y: -1 }}
             whileTap={{ scale: 0.98 }}
           >
             {t.icon}
@@ -203,7 +202,6 @@ export default function DeviceCard({
         role="tabpanel"
         aria-labelledby={`device-tab-${tab}`}
         tabIndex={0}
-        layout
       >
         <AnimatePresence mode="wait">
           <motion.div

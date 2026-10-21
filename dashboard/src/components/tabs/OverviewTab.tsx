@@ -41,7 +41,7 @@ export default function OverviewTab({ data, cachedFocus, dailyAppUsage }: Props)
                 {cpu?.usage_percent === undefined ? 'Unavailable' : `${cpu.usage_percent.toFixed(1)}%`}
               </span>
             </div>
-            <GaugeBar value={cpu?.usage_percent ?? 0} color={metricColor(cpu?.usage_percent ?? 0)} />
+            <GaugeBar label="CPU usage" value={cpu?.usage_percent ?? 0} color={metricColor(cpu?.usage_percent ?? 0)} />
             <div className="rc-sub">{cpu?.core_count ?? '?'} cores</div>
           </div>
 
@@ -52,7 +52,7 @@ export default function OverviewTab({ data, cachedFocus, dailyAppUsage }: Props)
                 {ram?.used_percent === undefined ? 'Unavailable' : `${ram.used_percent.toFixed(1)}%`}
               </span>
             </div>
-            <GaugeBar value={ram?.used_percent ?? 0} color={metricColor(ram?.used_percent ?? 0)} />
+            <GaugeBar label="Memory usage" value={ram?.used_percent ?? 0} color={metricColor(ram?.used_percent ?? 0)} />
             <div className="rc-sub">{ram ? `${ram.used_gb.toFixed(1)} / ${ram.total_gb.toFixed(1)} GB` : 'Telemetry unavailable'}</div>
           </div>
 
@@ -63,7 +63,7 @@ export default function OverviewTab({ data, cachedFocus, dailyAppUsage }: Props)
                 {disk?.used_percent === undefined ? 'Unavailable' : `${disk.used_percent.toFixed(1)}%`}
               </span>
             </div>
-            <GaugeBar value={disk?.used_percent ?? 0} color={metricColor(disk?.used_percent ?? 0)} />
+            <GaugeBar label="Disk usage" value={disk?.used_percent ?? 0} color={metricColor(disk?.used_percent ?? 0)} />
             <div className="rc-sub">{disk ? `${disk.used_gb.toFixed(1)} / ${disk.total_gb.toFixed(1)} GB` : 'Telemetry unavailable'}</div>
           </div>
 
@@ -91,6 +91,7 @@ export default function OverviewTab({ data, cachedFocus, dailyAppUsage }: Props)
                 </span>
               </div>
               <GaugeBar
+                label="Battery level"
                 value={battery.percent}
                 color={battery.state === 'charging' || battery.state === 'full' ? 'var(--green)' : battery.percent <= 20 ? 'var(--red)' : 'var(--yellow)'}
               />
