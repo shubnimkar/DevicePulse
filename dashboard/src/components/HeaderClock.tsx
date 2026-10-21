@@ -2,21 +2,14 @@
 
 import { useEffect, useState } from 'react';
 
-function formatHeaderTime(date: Date): string {
-  return date.toLocaleString(undefined, {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-}
+const FULL: Intl.DateTimeFormatOptions = { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
+const COMPACT: Intl.DateTimeFormatOptions = { hour: '2-digit', minute: '2-digit' };
 
 /**
- * Isolated header clock. Ticks every second but only re-renders itself,
- * not the entire page tree.
+ * Isolated clock. Ticks every second but only re-renders itself,
+ * not the entire page tree. `compact` shows HH:MM with the full date as title.
  */
-export default function HeaderClock() {
+export default function HeaderClock({ compact = false, className = 'header-time' }: { compact?: boolean; className?: string }) {
   const [now, setNow] = useState<Date>(() => new Date());
 
   useEffect(() => {
@@ -24,5 +17,9 @@ export default function HeaderClock() {
     return () => window.clearInterval(id);
   }, []);
 
-  return <span className="header-time">{formatHeaderTime(now)}</span>;
+  return (
+    <time className={className} dateTime={now.toISOString()} title={compact ? now.toLocaleString(undefined, FULL) : undefined}>
+      {now.toLocaleString(undefined, compact ? COMPACT : FULL)}
+    </time>
+  );
 }

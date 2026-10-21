@@ -9,10 +9,11 @@ import type { FormEvent } from 'react';
 import { Device, AppFocusSummary, FocusCacheData, DeviceTab, EnterprisePolicy, DashboardUser, UserRole, HistoryEntry, BrowserHistoryArchiveData, DailyAppUsageData, DailyPresenceData, AgentRelease, AgentBuildJob, AgentRolloutResponse, WeeklyReport } from '@/types';
 import { API, readHeaders, adminHeaders, isOnline, timeAgo, primaryDisk, deviceDisplayName, formatDuration } from '@/lib/utils';
 import DeviceCard from '@/components/DeviceCard';
-import HeaderClock from '@/components/HeaderClock';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import AuthMissionPanel from '@/components/AuthMissionPanel';
 import LogoMark from '@/components/LogoMark';
+import AppShell from '@/components/shell/AppShell';
+import { IconReport } from '@/components/shell/nav';
 import StatusPill, { StatusIcon } from '@/components/ui/StatusPill';
 import type { BrowserHistoryRange } from '@/components/tabs/BrowserTab';
 
@@ -155,18 +156,6 @@ async function readApiError(res: Response): Promise<string> {
 }
 
 // ── SVG icons ────────────────────────────────────────────────────────────────
-const IconGrid = () => (
-  <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
-    <rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/>
-    <rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/>
-  </svg>
-);
-const IconList = () => (
-  <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
-    <rect x="1" y="2" width="14" height="2.5" rx="1"/><rect x="1" y="6.75" width="14" height="2.5" rx="1"/>
-    <rect x="1" y="11.5" width="14" height="2.5" rx="1"/>
-  </svg>
-);
 const IconSearch = () => (
   <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
     <circle cx="6.5" cy="6.5" r="5"/><path d="M10.5 10.5L14 14"/>
@@ -213,19 +202,6 @@ const IconWarning = () => (
   <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
     <path d="M8 2l6.5 11.5h-13L8 2z"/>
     <path d="M8 6.5v3M8 11.6v.1"/>
-  </svg>
-);
-const IconSettings = () => (
-  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-    <circle cx="8" cy="8" r="2.25"/>
-    <path d="M13 8a5.3 5.3 0 00-.07-.86l1.42-1.08-1.35-2.33-1.66.68a5.1 5.1 0 00-1.48-.86L9.62 1.8H6.38l-.24 1.75a5.1 5.1 0 00-1.48.86L3 3.73 1.65 6.06l1.42 1.08A5.3 5.3 0 003 8c0 .3.02.58.07.86L1.65 9.94 3 12.27l1.66-.68c.44.37.94.66 1.48.86l.24 1.75h3.24l.24-1.75c.54-.2 1.04-.49 1.48-.86l1.66.68 1.35-2.33-1.42-1.08c.05-.28.07-.57.07-.86z"/>
-  </svg>
-);
-const IconReport = () => (
-  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M3 2.5h10v11H3z"/>
-    <path d="M5.5 6.5h5M5.5 9h5M5.5 11.5h2.5"/>
-    <path d="M11 2.5v3h2"/>
   </svg>
 );
 
@@ -282,7 +258,6 @@ export default function Home() {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [currentPage, setCurrentPage] = useState<PageView>('dashboard');
-  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
   const [fleetConn, setFleetConn] = useState<'connecting' | 'live' | 'stale'>('connecting');
   const [inventorySort, setInventorySort] = useState<{ key: 'status' | 'lastSeen'; dir: 'asc' | 'desc' } | null>(null);
@@ -300,9 +275,7 @@ export default function Home() {
   const [renameSaving, setRenameSaving] = useState(false);
   const [agentPingStatus, setAgentPingStatus] = useState<AgentPingStatus>({});
   const [deviceActionError, setDeviceActionError] = useState('');
-  const mobileNavButtonRef = useRef<HTMLButtonElement>(null);
   const appMainRef = useRef<HTMLElement>(null);
-  const userMenuRef = useRef<HTMLDetailsElement>(null);
 
   const canManagePolicy = authUser?.role === 'admin' || authUser?.role === 'manager';
   const canManageUsers = authUser?.role === 'admin';
@@ -395,23 +368,6 @@ export default function Home() {
     const t = window.setTimeout(() => { void loadCurrentUser(); }, 0);
     return () => window.clearTimeout(t);
   }, [loadCurrentUser]);
-
-  useEffect(() => {
-    if (!mobileNavOpen) return;
-    const trigger = mobileNavButtonRef.current;
-    document.body.style.overflow = 'hidden';
-    const firstItem = document.querySelector<HTMLElement>('.app-sidebar.mobile-open .nav-item');
-    firstItem?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setMobileNavOpen(false);
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => {
-      window.removeEventListener('keydown', onKeyDown);
-      document.body.style.overflow = '';
-      trigger?.focus();
-    };
-  }, [mobileNavOpen]);
 
   useEffect(() => {
     const id = window.setTimeout(applyNavigationState, 0);
@@ -616,21 +572,6 @@ export default function Home() {
     const id = setInterval(() => setNowTick(Date.now()), 1000);
     return () => clearInterval(id);
   }, [fleetConn]);
-
-  // User menu: close on Escape or outside click.
-  useEffect(() => {
-    const menu = userMenuRef.current;
-    if (!menu) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && menu.open) { menu.open = false; menu.querySelector('summary')?.focus(); }
-    };
-    const onDown = (e: MouseEvent) => {
-      if (menu.open && e.target instanceof Node && !menu.contains(e.target)) menu.open = false;
-    };
-    document.addEventListener('keydown', onKey);
-    document.addEventListener('mousedown', onDown);
-    return () => { document.removeEventListener('keydown', onKey); document.removeEventListener('mousedown', onDown); };
-  }, [authUser]);
 
   useEffect(() => {
     if (currentPage !== 'access') return;
@@ -1521,125 +1462,18 @@ export default function Home() {
 
   return (
     <MotionConfig reducedMotion="user" transition={{ duration: 0.18, ease: 'easeOut' }}>
-    <motion.div
-      className="app-shell"
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
+    <AppShell
+      currentPage={currentPage}
+      onNavigate={page => goToPage(page)}
+      canManageUsers={canManageUsers}
+      fleetConn={fleetConn}
+      loading={loading}
+      staleSeconds={fleetConn === 'stale' && lastUpdatedAt > 0 ? Math.max(0, Math.round((nowTick - lastUpdatedAt) / 1000)) : null}
+      onlineCount={onlineCount}
+      totalCount={devices.length}
+      user={{ name: authUser.name, email: authUser.email, roleText: roleLabel[authUser.role] }}
+      onSignOut={() => { void logout(); }}
     >
-
-      {/* ── Top header bar ── */}
-      <header className="app-header">
-        <button
-          ref={mobileNavButtonRef}
-          type="button"
-          className="mobile-nav-toggle"
-          aria-label={mobileNavOpen ? 'Close navigation' : 'Open navigation'}
-          aria-expanded={mobileNavOpen}
-          onClick={() => setMobileNavOpen(open => !open)}
-        >
-          <span /><span /><span />
-        </button>
-        <div className="header-brand">
-          <div className="header-logo"><LogoMark /></div>
-          <span className="brand-lockup">
-            <span className="brand-name">DevicePulse</span>
-            <span className="brand-mode">Fleet operations</span>
-          </span>
-        </div>
-
-        <div className="header-right">
-          <div className="header-status">
-            <HeaderClock />
-            {!loading && fleetConn === 'live' && (
-              <StatusPill status="online" label="Live" />
-            )}
-            {fleetConn === 'stale' && (
-              <span role="status"><StatusPill status="warning" label="Reconnecting…" /></span>
-            )}
-            {fleetConn === 'stale' && lastUpdatedAt > 0 && (
-              <span className="last-updated">
-                Last updated {Math.max(0, Math.round((nowTick - lastUpdatedAt) / 1000))}s ago
-              </span>
-            )}
-          </div>
-          <details className="user-menu" ref={userMenuRef}>
-            <summary className="user-chip" aria-label={`User menu, ${authUser.name || authUser.email}, ${roleLabel[authUser.role]}`}>
-              <span className="user-avatar">{(authUser.name || authUser.email || 'U').charAt(0).toUpperCase()}</span>
-              <span className="user-copy">
-                <span className="user-name">{authUser.name || authUser.email}</span>
-                <span className="user-role">{roleLabel[authUser.role]}</span>
-              </span>
-              <span className="user-caret" aria-hidden="true" />
-            </summary>
-            <div className="user-menu-panel">
-              <button type="button" onClick={() => { if (userMenuRef.current) userMenuRef.current.open = false; void logout(); }}>Sign out</button>
-            </div>
-          </details>
-        </div>
-      </header>
-
-      {/* ── Sidebar ── */}
-      <aside className={`app-sidebar ${mobileNavOpen ? 'mobile-open' : ''}`} aria-label="Primary navigation">
-        <div className="sidebar-section">
-          <div className="sidebar-label">Navigation</div>
-          <nav className="sidebar-nav" aria-label="Dashboard pages">
-            <button
-              type="button"
-              className={`nav-item ${currentPage === 'dashboard' ? 'active' : ''}`}
-              onClick={() => { goToPage('dashboard'); setMobileNavOpen(false); }}
-              aria-current={currentPage === 'dashboard' ? 'page' : undefined}
-            >
-              <IconGrid />
-              Overview
-            </button>
-            <button
-              type="button"
-              className={`nav-item ${currentPage === 'inventory' ? 'active' : ''}`}
-              onClick={() => { goToPage('inventory'); setMobileNavOpen(false); }}
-              aria-current={currentPage === 'inventory' ? 'page' : undefined}
-            >
-              <IconList />
-              Devices
-            </button>
-            <button
-              type="button"
-              className={`nav-item ${currentPage === 'reports' ? 'active' : ''}`}
-              onClick={() => { goToPage('reports'); setMobileNavOpen(false); }}
-              aria-current={currentPage === 'reports' ? 'page' : undefined}
-            >
-              <IconReport />
-              Reports
-            </button>
-            <button
-              type="button"
-              className={`nav-item ${currentPage === 'settings' ? 'active' : ''}`}
-              onClick={() => { goToPage('settings'); setMobileNavOpen(false); }}
-              aria-current={currentPage === 'settings' ? 'page' : undefined}
-            >
-              <IconSettings />
-              Settings
-            </button>
-            {canManageUsers && (
-              <button
-                type="button"
-                className={`nav-item ${currentPage === 'access' ? 'active' : ''}`}
-                onClick={() => { goToPage('access'); setMobileNavOpen(false); }}
-                aria-current={currentPage === 'access' ? 'page' : undefined}
-              >
-                <IconSettings />
-                Access
-              </button>
-            )}
-          </nav>
-        </div>
-
-        <div className="sidebar-status" aria-label="Fleet connection status">
-          <span className={`status-indicator ${fleetConn === 'live' ? 'is-live' : ''}`} />
-          <div><strong>{fleetConn === 'live' ? 'Fleet connected' : 'Updating fleet'}</strong><span>{onlineCount} of {devices.length} online now</span></div>
-        </div>
-
-      </aside>
-      {mobileNavOpen && <button type="button" className="mobile-nav-backdrop" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)} />}
 
       {/* ── Main content ── */}
       <main ref={appMainRef} className="app-main">
@@ -2907,7 +2741,7 @@ export default function Home() {
         onCancel={() => { if (!confirmBusy) setConfirmTarget(null); }}
       />
 
-    </motion.div>
+    </AppShell>
     </MotionConfig>
   );
 }
