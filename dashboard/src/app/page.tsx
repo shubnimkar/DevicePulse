@@ -7,22 +7,20 @@ import { AnimatePresence, MotionConfig, motion } from 'motion/react';
 import Link from 'next/link';
 import type { FormEvent } from 'react';
 import { Device, AppFocusSummary, FocusCacheData, DeviceTab, EnterprisePolicy, DashboardUser, UserRole, HistoryEntry, BrowserHistoryArchiveData, DailyAppUsageData, DailyPresenceData, AgentRelease, AgentBuildJob, AgentRolloutResponse, WeeklyReport } from '@/types';
-import { API, readHeaders, adminHeaders, isOnline, timeAgo, primaryDisk, deviceDisplayName, formatDuration } from '@/lib/utils';
+import { API, readHeaders, adminHeaders, isOnline, primaryDisk, deviceDisplayName, formatDuration } from '@/lib/utils';
 import DeviceCard from '@/components/DeviceCard';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import AuthMissionPanel from '@/components/AuthMissionPanel';
 import LogoMark from '@/components/LogoMark';
 import AppShell from '@/components/shell/AppShell';
 import { IconReport } from '@/components/shell/nav';
-import StatusPill from '@/components/ui/StatusPill';
-import DataTable, { type Column } from '@/components/ui/DataTable';
 import EmptyState from '@/components/ui/EmptyState';
 import ErrorState from '@/components/ui/ErrorState';
 import OverviewView from '@/components/views/OverviewView';
+import DevicesView, { parseInventoryParams, setInventoryParams, type DeviceSort, type InventoryState } from '@/components/views/DevicesView';
 import type { BrowserHistoryRange } from '@/components/tabs/BrowserTab';
 
 type PageView = 'dashboard' | 'inventory' | 'reports' | 'inspect' | 'settings' | 'access';
-type StatusFilter = 'all' | 'online' | 'critical' | 'warning' | 'offline';
 type AuthMode = 'login' | 'register';
 type OnDemandReportType = 'executive' | 'app_usage' | 'device_health';
 type BrowserHistoryCache = Record<string, Partial<Record<BrowserHistoryRange, HistoryEntry[]>>>;
@@ -139,6 +137,7 @@ function readNavigationState() {
     view: view === 'inspect' && !deviceId ? 'inventory' : view,
     deviceId,
     tab,
+    inventory: parseInventoryParams(params),
   };
 }
 
@@ -194,12 +193,6 @@ const IconShield = () => (
   <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
     <path d="M8 1.75l5 1.9v4.1c0 3.1-2.1 5.4-5 6.5-2.9-1.1-5-3.4-5-6.5v-4.1z"/>
     <path d="M5.9 8l1.5 1.5 2.7-2.9"/>
-  </svg>
-);
-const IconSignal = () => (
-  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
-    <circle cx="8" cy="8" r="1.4"/>
-    <path d="M5.2 5.2a4 4 0 000 5.6M10.8 5.2a4 4 0 010 5.6M3 3a7 7 0 000 10M13 3a7 7 0 010 10"/>
   </svg>
 );
 const IconWarning = () => (
@@ -259,8 +252,9 @@ export default function Home() {
   const [onDemandReportType, setOnDemandReportType] = useState<OnDemandReportType>('executive');
   const [onDemandReportText, setOnDemandReportText] = useState('');
   const [onDemandReportName, setOnDemandReportName] = useState('');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [inventory, setInventory] = useState<InventoryState>({ status: 'all', q: '', sort: null });
+  const inventoryRef = useRef(inventory); // latest value for URL writes outside render
+  const searchTimerRef = useRef<number | undefined>(undefined);
   const [currentPage, setCurrentPage] = useState<PageView>('dashboard');
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
   const [fleetConn, setFleetConn] = useState<'connecting' | 'live' | 'stale'>('connecting');
@@ -296,7 +290,9 @@ export default function Home() {
   }, []);
 
   const applyNavigationState = useCallback(() => {
-    const { view, deviceId, tab } = readNavigationState();
+    const { view, deviceId, tab, inventory: inv } = readNavigationState();
+    window.clearTimeout(searchTimerRef.current);
+    if (view === 'inventory') { inventoryRef.current = inv; setInventory(inv); }
     setCurrentPage(view);
     setSelectedDeviceId(view === 'inspect' ? deviceId : '');
     if (view === 'inspect' && deviceId) {
@@ -306,10 +302,11 @@ export default function Home() {
 
   const writeNavigationState = useCallback((
     view: PageView,
-    options: { deviceId?: string; tab?: DeviceTab; replace?: boolean } = {}
+    options: { deviceId?: string; tab?: DeviceTab; replace?: boolean; inventory?: InventoryState } = {}
   ) => {
     const params = new URLSearchParams();
     if (view !== 'dashboard') params.set('view', view);
+    if (view === 'inventory') setInventoryParams(params, options.inventory ?? inventoryRef.current);
     if (view === 'inspect' && options.deviceId) {
       params.set('device', options.deviceId);
       if (options.tab && options.tab !== 'overview') params.set('tab', options.tab);
@@ -321,8 +318,10 @@ export default function Home() {
 
   const goToPage = useCallback((
     view: PageView,
-    options: { deviceId?: string; tab?: DeviceTab; replace?: boolean } = {}
+    options: { deviceId?: string; tab?: DeviceTab; replace?: boolean; inventory?: InventoryState } = {}
   ) => {
+    window.clearTimeout(searchTimerRef.current);
+    if (options.inventory) { inventoryRef.current = options.inventory; setInventory(options.inventory); }
     const deviceId = options.deviceId ?? '';
     const tab = options.tab ?? 'overview';
     setCurrentPage(view);
@@ -335,6 +334,22 @@ export default function Home() {
       window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
       appMainRef.current?.scrollTo({ top: 0, left: 0, behavior: 'auto' });
     });
+  }, [writeNavigationState]);
+
+  // Filter and sort changes push/replace the URL; search typing is debounced and always replaces.
+  const updateInventory = useCallback((patch: Partial<InventoryState>, replace: boolean) => {
+    const next = { ...inventoryRef.current, ...patch };
+    inventoryRef.current = next;
+    setInventory(next);
+    window.clearTimeout(searchTimerRef.current);
+    writeNavigationState('inventory', { inventory: next, replace });
+  }, [writeNavigationState]);
+
+  const updateInventorySearch = useCallback((q: string) => {
+    inventoryRef.current = { ...inventoryRef.current, q };
+    setInventory(inventoryRef.current);
+    window.clearTimeout(searchTimerRef.current);
+    searchTimerRef.current = window.setTimeout(() => writeNavigationState('inventory', { replace: true }), 300);
   }, [writeNavigationState]);
 
   const loadCurrentUser = useCallback(async () => {
@@ -1210,75 +1225,6 @@ export default function Home() {
   const avgDisk = devices.length > 0
     ? devices.reduce((sum, d) => sum + (primaryDisk(d.data?.HardwareStats?.disks)?.used_percent ?? 0), 0) / devices.length
     : 0;
-  const normalizedQuery = searchQuery.trim().toLowerCase();
-  const filteredDevices = devices.filter(device => {
-    const state = getDeviceState(device);
-    if (statusFilter === 'online' && !isOnline(device.last_seen)) return false;
-    if (statusFilter !== 'all' && statusFilter !== 'online' && state !== statusFilter) return false;
-    if (!normalizedQuery) return true;
-    const sys = device.data?.SystemInfo;
-    return [device.device_id, device.display_name, device.hostname, sys?.hostname, sys?.os, sys?.platform, sys?.platform_version]
-      .filter(Boolean).join(' ').toLowerCase().includes(normalizedQuery);
-  });
-
-  const sevOrder = { critical: 0, warning: 1, online: 2, offline: 3 };
-  const inventoryColumns: Column<Device>[] = [
-    { key: 'device', header: 'Device', render: device => {
-      const sys = device.data?.SystemInfo;
-      return (
-        <div className="device-cell">
-          <div className="device-cell-text">
-            <button type="button" onClick={() => viewDeviceDetails(device.device_id)}>{deviceDisplayName(device)}</button>
-            <span>{sys?.hostname || device.hostname || device.device_id}</span>
-          </div>
-        </div>
-      );
-    } },
-    { key: 'status', header: 'Status', sortable: true, sortValue: d => sevOrder[getDeviceState(d)], render: d => <StatusPill status={getDeviceState(d)} /> },
-    { key: 'resources', header: 'Resources', render: device => {
-      const hw = device.data?.HardwareStats;
-      const cpu = hw?.cpu?.usage_percent;
-      const ram = hw?.ram?.used_percent;
-      return (
-        <div className="resource-pair">
-          <div><span>CPU</span><i><b style={{ width: `${Math.min(100, cpu ?? 0)}%` }} /></i><strong>{cpu === undefined ? '—' : `${cpu.toFixed(0)}%`}</strong></div>
-          <div><span>MEM</span><i><b style={{ width: `${Math.min(100, ram ?? 0)}%` }} /></i><strong>{ram === undefined ? '—' : `${ram.toFixed(0)}%`}</strong></div>
-        </div>
-      );
-    } },
-    { key: 'platform', header: 'Platform', render: device => {
-      const sys = device.data?.SystemInfo;
-      const platform = sys?.platform ? `${sys.platform}${sys.architecture ? `, ${sys.architecture}` : ''}` : '—';
-      return (
-        <div className="cell-stack">
-          <strong>{platform}</strong>
-          <span>{device.agent_version ? `Agent ${device.agent_version}` : 'Agent version unavailable'}</span>
-        </div>
-      );
-    } },
-    { key: 'lastSeen', header: 'Last Seen', sortable: true, sortValue: d => Date.parse(d.last_seen ?? '') || 0, render: device => (
-      <div className="cell-stack"><strong>{timeAgo(device.last_seen)}</strong><span>{isOnline(device.last_seen) ? 'Receiving telemetry' : 'Last known state'}</span></div>
-    ) },
-    { key: 'actions', header: 'Actions', align: 'right', sticky: 'right', render: device => {
-      const name = deviceDisplayName(device);
-      return (
-        <div className="row-actions">
-          <button type="button" className="action-btn" onClick={() => viewDeviceDetails(device.device_id)}>Inspect</button>
-          {canDeleteDevices && <button type="button" className="action-btn" onClick={() => openRenameDevice(device)}>Rename</button>}
-          {canDeleteDevices && <button type="button" className="action-btn danger" onClick={() => openDeleteConfirm(device.device_id, name)} aria-label={`Remove ${name}`}>×</button>}
-        </div>
-      );
-    } },
-  ];
-
-  const filterOptions: { key: StatusFilter; label: string; count: number }[] = [
-    { key: 'all',      label: 'All Devices', count: devices.length },
-    { key: 'online',   label: 'Online',      count: onlineCount },
-    { key: 'critical', label: 'Critical',    count: criticalCount },
-    { key: 'warning',  label: 'Warning',     count: warningCount },
-    { key: 'offline',  label: 'Offline',     count: offlineCount },
-  ];
-
   const viewDeviceDetails = (deviceId: string) => {
     goToPage('inspect', { deviceId, tab: 'overview' });
   };
@@ -1566,19 +1512,7 @@ export default function Home() {
                   ‹ Back to Inventory
                 </button>
               </div>
-            ) : currentPage === 'inventory' && (
-              <div className="toolbar">
-                <div className="search-box">
-                  <IconSearch />
-                  <input
-                    value={searchQuery}
-                    onChange={e => setSearchQuery(e.target.value)}
-                    placeholder="Search by ID, name or OS…"
-                    aria-label="Search devices"
-                  />
-                </div>
-              </div>
-            )}
+            ) : null}
             {currentPage === 'reports' && (
               <div className="toolbar report-toolbar">
                 <label>
@@ -1638,40 +1572,10 @@ export default function Home() {
                 avgRam={avgRam}
                 avgDisk={avgDisk}
                 fleetUptimePercent={fleetUptimePercent}
-                onOpenDevices={filter => { setStatusFilter(filter); goToPage('inventory'); }}
+                onOpenDevices={filter => goToPage('inventory', { inventory: { ...inventoryRef.current, status: filter, q: '' } })}
                 onInspect={viewDeviceDetails}
               />
             </>
-          )}
-
-          {/* Status filter tabs */}
-          {currentPage === 'inventory' && (
-            <div className="filter-tabs" role="group" aria-label="Filter by status">
-              {filterOptions.map(opt => opt.key === 'all' ? (
-                <button
-                  key={opt.key}
-                  type="button"
-                  className={`filter-tab tab-${opt.key} ${statusFilter === opt.key ? 'active' : ''}`}
-                  aria-pressed={statusFilter === opt.key}
-                  onClick={() => setStatusFilter(opt.key)}
-                >
-                  {opt.label}
-                  <span className="tab-count">{opt.count.toLocaleString()}</span>
-                </button>
-              ) : (
-                <StatusPill
-                  key={opt.key}
-                  as="button"
-                  status={opt.key}
-                  label={opt.label}
-                  className="filter-tab"
-                  pressed={statusFilter === opt.key}
-                  onClick={() => setStatusFilter(opt.key)}
-                >
-                  <span className="tab-count">{opt.count.toLocaleString()}</span>
-                </StatusPill>
-              ))}
-            </div>
           )}
 
           {/* Content */}
@@ -2492,52 +2396,20 @@ export default function Home() {
             ) : (
               <EmptyState icon={<IconSearch />} title="Device not found" description="Return to inventory and choose a device." />
             )
-          ) : devices.length === 0 ? (
-            <EmptyState icon={<IconSignal />} title="No devices connected" description="Start the DevicePulse agent on a machine to begin." />
-          ) : filteredDevices.length === 0 ? (
-            <EmptyState icon={<IconSearch />} title="No matching devices" description="Adjust your search or status filter." />
           ) : currentPage === 'inventory' ? (
-            /* ── Inventory table ── */
-            <div>
-              <div className="inventory-mobile-list">
-                {filteredDevices.map(device => {
-                  const sys = device.data?.SystemInfo;
-                  const state = getDeviceState(device);
-                  const name = deviceDisplayName(device);
-                  const cpu = device.data?.HardwareStats?.cpu?.usage_percent;
-                  const ram = device.data?.HardwareStats?.ram?.used_percent;
-                  return (
-                    <article key={device.device_id} className={`inventory-mobile-card state-${state}`}>
-                      <button type="button" className="mobile-device-main" onClick={() => viewDeviceDetails(device.device_id)}>
-                        <span className="mobile-device-title"><strong>{name}</strong><StatusPill status={state} /></span>
-                        <span className="mobile-device-meta">{sys?.hostname || device.hostname || device.device_id}</span>
-                        <span className="mobile-device-meta">{sys?.platform || device.agent_os || 'Platform unavailable'} · {timeAgo(device.last_seen)}</span>
-                        <span className="mobile-resource-row"><span>CPU <strong>{cpu === undefined ? 'Unavailable' : `${cpu.toFixed(0)}%`}</strong></span><span>Memory <strong>{ram === undefined ? 'Unavailable' : `${ram.toFixed(0)}%`}</strong></span></span>
-                      </button>
-                      <div className="mobile-device-actions">
-                        {canDeleteDevices && <button type="button" className="action-btn" onClick={() => openRenameDevice(device)}>Rename</button>}
-                        {canDeleteDevices && <button type="button" className="action-btn danger" onClick={() => openDeleteConfirm(device.device_id, name)}>Remove</button>}
-                      </div>
-                    </article>
-                  );
-                })}
-              </div>
-              <DataTable
-                columns={inventoryColumns}
-                rows={filteredDevices}
-                getRowKey={d => d.device_id}
-                caption="Device inventory"
-                ariaLabel="Device inventory, scrollable table"
-                rowClassName={d => `row-${getDeviceState(d)}`}
-                footer={
-                  <div className="table-footer">
-                    <span>
-                      Showing {filteredDevices.length ? '1' : '0'}–{filteredDevices.length} of {devices.length.toLocaleString()} devices
-                    </span>
-                  </div>
-                }
-              />
-            </div>
+            <DevicesView
+              devices={devices}
+              counts={{ all: devices.length, online: onlineCount, warning: warningCount, critical: criticalCount, offline: offlineCount }}
+              state={inventory}
+              getState={getDeviceState}
+              onStatusChange={status => updateInventory({ status }, false)}
+              onQueryChange={updateInventorySearch}
+              onSortChange={(sort: DeviceSort) => updateInventory({ sort }, true)}
+              onClearFilters={() => { updateInventory({ status: 'all', q: '' }, false); }}
+              onInspect={viewDeviceDetails}
+              onRename={canDeleteDevices ? openRenameDevice : undefined}
+              onRemove={canDeleteDevices ? openDeleteConfirm : undefined}
+            />
           ) : null}
 
         </motion.div>

@@ -12,7 +12,10 @@ export interface Column<T> {
   align?: 'left' | 'right' | 'center';
   className?: string;
   sticky?: 'right'; // only the last column is sticky (global .data-table rule)
+  hideBelow?: 'lg'; // hides th+td at <=1024px
 }
+
+export type SortState = { key: string; dir: 'asc' | 'desc' };
 
 interface Props<T> {
   columns: Column<T>[];
@@ -20,7 +23,9 @@ interface Props<T> {
   getRowKey: (row: T, index: number) => string;
   caption: string; // sr-only
   ariaLabel: string; // labels the scroll region
-  initialSort?: { key: string; dir: 'asc' | 'desc' };
+  initialSort?: SortState;
+  sort?: SortState | null; // controlled mode: pass together with onSortChange
+  onSortChange?: (sort: SortState) => void;
   onRowClick?: (row: T) => void;
   rowClassName?: (row: T) => string;
   emptyState?: ReactNode;
@@ -30,10 +35,11 @@ interface Props<T> {
 }
 
 export default function DataTable<T>({
-  columns, rows, getRowKey, caption, ariaLabel, initialSort, onRowClick, rowClassName,
+  columns, rows, getRowKey, caption, ariaLabel, initialSort, sort: controlledSort, onSortChange, onRowClick, rowClassName,
   emptyState, pageSize, density = 'comfortable', footer,
 }: Props<T>) {
-  const [sort, setSort] = useState(initialSort ?? null);
+  const [innerSort, setInnerSort] = useState(initialSort ?? null);
+  const sort = onSortChange ? controlledSort ?? null : innerSort;
   const [limit, setLimit] = useState(pageSize ?? Infinity);
 
   const sorted = useMemo(() => {
@@ -51,8 +57,12 @@ export default function DataTable<T>({
 
   const visible = sorted.slice(0, limit);
   const lastSticky = columns[columns.length - 1]?.sticky === 'right';
-  const toggle = (key: string) =>
-    setSort(prev => (prev?.key === key ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' }));
+  const toggle = (key: string) => {
+    const next: SortState = sort?.key === key ? { key, dir: sort.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' };
+    setInnerSort(next);
+    onSortChange?.(next);
+  };
+  const hide = (c: Column<T>) => (c.hideBelow ? `dt-hide-${c.hideBelow}` : undefined);
   const style = (c: Column<T>) => (c.align ? { textAlign: c.align } : undefined);
 
   return (
@@ -68,6 +78,7 @@ export default function DataTable<T>({
                   <th
                     key={c.key}
                     scope="col"
+                    className={hide(c)}
                     style={style(c)}
                     aria-sort={c.sortable ? (active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none') : undefined}
                   >
@@ -92,7 +103,7 @@ export default function DataTable<T>({
                   if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onRowClick(row); }
                 })}
               >
-                {columns.map(c => <td key={c.key} className={c.className} style={style(c)}>{c.render(row)}</td>)}
+                {columns.map(c => <td key={c.key} className={[c.className, hide(c)].filter(Boolean).join(' ') || undefined} style={style(c)}>{c.render(row)}</td>)}
               </tr>
             ))}
           </tbody>

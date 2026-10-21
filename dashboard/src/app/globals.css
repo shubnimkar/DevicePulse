@@ -5267,3 +5267,36 @@ body:has(.app-shell)::before { display: none; }
   .overview-workspace { margin-bottom: var(--space-3); }
   .overview-fleet { padding-bottom: var(--space-4); }
 }
+
+/* ── Console redesign (phase 6): Devices (components/views/DevicesView.tsx) ── */
+.devices-controls { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-3); margin-bottom: var(--space-2); }
+.devices-controls .filter-tabs { margin-bottom: 0; }
+.devices-controls .search-box { min-width: 260px; height: 36px; }
+.results-count { margin: 0 0 var(--space-2); color: var(--text-2); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.device-cell-text .dc-plat { display: none; }
+/* Compact inventory rows (~44-48px) */
+.data-table.dt-compact td { padding-inline: var(--space-3); }
+.data-table.dt-compact .resource-pair { gap: 2px; min-width: 140px; }
+.data-table.dt-compact .device-cell-text button { line-height: 1.25; }
+.data-table.dt-compact .row-actions .action-btn { min-height: 32px; }
+.data-table.dt-compact .empty-state { padding-block: var(--space-6); }
+@media (max-width: 1024px) {
+  .dt-hide-lg { display: none; }
+  .device-cell-text .dc-plat { display: inline; margin-top: 0; }
+  .data-table.dt-compact { min-width: 0; }
+  .data-table.dt-compact .device-cell-text button { max-width: 180px; }
+  .data-table.dt-compact .resource-pair { min-width: 120px; }
+}
+/* Mobile cards: status pill, mini bars, >=44px tap targets */
+.mini-bars { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin-top: var(--space-1); }
+.mini-bar { display: grid; grid-template-columns: 32px minmax(0, 1fr) 36px; align-items: center; gap: var(--space-2); color: var(--text-3); font-size: var(--text-xs); }
+.mini-bar i { height: 5px; overflow: hidden; background: var(--surface-3); border-radius: 99px; }
+.mini-bar b { display: block; height: 100%; background: var(--accent); border-radius: inherit; }
+.mini-bar strong { color: var(--text-1); text-align: right; font-variant-numeric: tabular-nums; }
+@media (max-width: 760px) {
+  .devices-controls { align-items: stretch; flex-direction: column; }
+  .devices-controls .search-box { width: 100%; min-width: 0; height: 44px; }
+  .devices-controls .search-box input { width: 100%; }
+  .mobile-device-main { min-height: 44px; padding: var(--space-3) var(--space-4); }
+  .mobile-device-actions .action-btn { min-height: 44px; padding-inline: var(--space-4); }
+}
