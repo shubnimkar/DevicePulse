@@ -3488,17 +3488,6 @@ button { -webkit-tap-highlight-color: transparent; }
 .attention-copy small, .attention-seen { color: var(--text-3); font-size: .75rem; }
 .attention-seen { text-align: right; }
 .row-chevron { color: var(--text-3); font-size: 1.25rem; }
-.healthy-empty {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  min-height: 190px;
-  justify-content: center;
-  color: var(--text-2);
-}
-.healthy-empty > span { display: grid; place-items: center; width: 42px; height: 42px; color: var(--green); background: var(--green-dim); border: 1px solid var(--green-border); border-radius: 50%; }
-.healthy-empty strong { color: var(--text-1); font-size: .9375rem; }
-.healthy-empty p { margin-top: .2rem; font-size: .8125rem; }
 
 .fleet-snapshot { display: flex; flex-direction: column; }
 .snapshot-metric { display: grid; gap: .5rem; margin-bottom: 1rem; }
@@ -5254,3 +5243,27 @@ body:has(.app-shell)::before { display: none; }
 .data-table.dt-compact td { height: 40px; padding-block: var(--space-1); }
 .data-table tbody tr.dt-clickable { cursor: pointer; }
 .data-table tbody tr.dt-clickable:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+
+/* ── Console redesign (phase 5): Overview (components/views/OverviewView.tsx) ──
+   KPI strip stays 5-up down to 481px (no 3+2 orphan); at <=480px Total spans
+   the full row and the four statuses go 2x2. */
+@media (max-width: 1080px) {
+  .kpi-tiles { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+}
+@media (max-width: 760px) {
+  .kpi-tile { padding: var(--space-2) var(--space-3); }
+  .kpi-label { font-size: var(--text-xs); }
+}
+@media (max-width: 480px) {
+  .kpi-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .kpi-tile:first-child { grid-column: 1 / -1; }
+}
+.overview-workspace { margin-bottom: var(--space-3); }
+.attention-more { display: block; margin-top: var(--space-3); min-height: 32px; font-size: var(--text-sm); text-align: left; }
+.overview-fleet .section-heading { margin-bottom: var(--space-2); }
+.data-table td.num { font-variant-numeric: tabular-nums; }
+.attention-panel .empty-state, .overview-fleet .empty-state { padding-block: var(--space-6); }
+@media (max-width: 480px) {
+  .overview-workspace { margin-bottom: var(--space-3); }
+  .overview-fleet { padding-bottom: var(--space-4); }
+}

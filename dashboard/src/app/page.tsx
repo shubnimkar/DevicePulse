@@ -14,10 +14,11 @@ import AuthMissionPanel from '@/components/AuthMissionPanel';
 import LogoMark from '@/components/LogoMark';
 import AppShell from '@/components/shell/AppShell';
 import { IconReport } from '@/components/shell/nav';
-import StatusPill, { StatusIcon } from '@/components/ui/StatusPill';
+import StatusPill from '@/components/ui/StatusPill';
 import DataTable, { type Column } from '@/components/ui/DataTable';
 import EmptyState from '@/components/ui/EmptyState';
 import ErrorState from '@/components/ui/ErrorState';
+import OverviewView from '@/components/views/OverviewView';
 import type { BrowserHistoryRange } from '@/components/tabs/BrowserTab';
 
 type PageView = 'dashboard' | 'inventory' | 'reports' | 'inspect' | 'settings' | 'access';
@@ -1627,79 +1628,19 @@ export default function Home() {
 
           {currentPage === 'dashboard' && (
             <>
-              <section className="kpi-tiles" aria-label="Fleet summary">
-                {([
-                  ['all', 'Total', devices.length],
-                  ['online', 'Online', onlineCount],
-                  ['warning', 'Warning', warningCount],
-                  ['critical', 'Critical', criticalCount],
-                  ['offline', 'Offline', offlineCount],
-                ] as const).map(([key, label, count]) => (
-                  <button
-                    key={key}
-                    type="button"
-                    className={`kpi-tile kpi-${key}`}
-                    aria-label={`${label}: ${count.toLocaleString()} devices. Show in Devices`}
-                    onClick={() => {
-                      setStatusFilter(key);
-                      goToPage('inventory');
-                    }}
-                  >
-                    <span className="kpi-label">
-                      {key !== 'all' && <StatusIcon status={key} />}
-                      {label}
-                    </span>
-                    <strong>{count.toLocaleString()}</strong>
-                  </button>
-                ))}
-              </section>
-
-              <section className="overview-workspace">
-                <div className="attention-panel">
-                  <div className="section-heading">
-                    <div><h2>Needs attention</h2></div>
-                    <button type="button" className="text-button" onClick={() => goToPage('inventory')}>View all devices</button>
-                  </div>
-                  {attentionDevices.length ? (
-                    <div className="attention-list">
-                      {attentionDevices.slice(0, 6).map(device => {
-                        const state = getDeviceState(device);
-                        const risk = deviceRisk(device);
-                        const reason = state === 'offline' ? 'Device is no longer checking in' : `${risk.toFixed(0)}% peak resource usage`;
-                        return (
-                          <button key={device.device_id} type="button" className="attention-row" onClick={() => viewDeviceDetails(device.device_id)}>
-                            <span className={`attention-icon state-${state}`} aria-hidden="true">{state === 'critical' ? '!' : state === 'warning' ? '↑' : '–'}</span>
-                            <span className="attention-copy"><strong>{deviceDisplayName(device)}</strong><small>{reason}</small></span>
-                            <StatusPill status={state} className="attention-status" />
-                            <span className="attention-seen">{timeAgo(device.last_seen)}</span>
-                            <span className="row-chevron" aria-hidden="true">›</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <div className="healthy-empty"><span>✓</span><div><strong>Fleet looks healthy</strong><p>All connected devices are within the current resource thresholds.</p></div></div>
-                  )}
-                </div>
-
-                <aside className="fleet-snapshot" aria-label="Fleet resource snapshot">
-                  <div className="section-heading"><div><h2>Fleet resources</h2></div></div>
-                  <div className="snapshot-metrics">
-                  {[
-                    ['CPU', avgCpu, 'blue'],
-                    ['Memory', avgRam, 'cyan'],
-                    ['Disk', avgDisk, 'violet'],
-                    ['Connected', fleetUptimePercent, 'green'],
-                  ].map(([label, value, tone]) => (
-                    <div className="snapshot-metric" key={String(label)}>
-                      <div><span>{label}</span><strong>{Number(value).toFixed(0)}%</strong></div>
-                      <div className="snapshot-track"><i className={`tone-${tone}`} style={{ width: `${Math.min(100, Number(value))}%` }} /></div>
-                    </div>
-                  ))}
-                  </div>
-                  <p>Current fleet averages from the latest device check-ins.</p>
-                </aside>
-              </section>
+              <OverviewView
+                devices={devices}
+                counts={{ all: devices.length, online: onlineCount, warning: warningCount, critical: criticalCount, offline: offlineCount }}
+                attentionDevices={attentionDevices}
+                getState={getDeviceState}
+                getRisk={deviceRisk}
+                avgCpu={avgCpu}
+                avgRam={avgRam}
+                avgDisk={avgDisk}
+                fleetUptimePercent={fleetUptimePercent}
+                onOpenDevices={filter => { setStatusFilter(filter); goToPage('inventory'); }}
+                onInspect={viewDeviceDetails}
+              />
             </>
           )}
 
