@@ -5246,3 +5246,11 @@ body:has(.app-shell)::before { display: none; }
 @media (forced-colors: active) {
   .rail-item.active, .tab-item.active { outline: 2px solid Highlight; }
 }
+
+/* ── Phase 4: shared DataTable (components/ui/DataTable.tsx) ── */
+/* Sticky last column is opt-in via sticky:'right'; tables without it release the global rule. */
+.data-table.dt-no-sticky th:last-child, .data-table.dt-no-sticky td:last-child { position: static; }
+.data-table.dt-compact { min-width: 600px; }
+.data-table.dt-compact td { height: 40px; padding-block: var(--space-1); }
+.data-table tbody tr.dt-clickable { cursor: pointer; }
+.data-table tbody tr.dt-clickable:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }

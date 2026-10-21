@@ -1,10 +1,21 @@
 'use client';
 
 import { PortEntry } from '@/types';
+import DataTable, { type Column } from '@/components/ui/DataTable';
 
 interface Props {
   data?: { open_ports: PortEntry[] | null; source?: string };
 }
+
+const columns: Column<PortEntry>[] = [
+  { key: 'protocol', header: 'Protocol', render: p => (
+    <span className={`proto-badge proto-${p.protocol.replace('4','').replace('6','')}`}>{p.protocol.toUpperCase()}</span>
+  ) },
+  { key: 'address', header: 'Address', render: p => <span className="mono">{p.local_addr}</span> },
+  { key: 'state', header: 'State', render: p => <span className="port-state">{p.state ?? '—'}</span> },
+  { key: 'process', header: 'Process', render: p => <span className="port-proc">{p.process ?? '—'}</span> },
+  { key: 'pid', header: 'PID', render: p => <span className="mono" style={{ color: 'var(--text-3)' }}>{p.pid ?? '—'}</span> },
+];
 
 export default function PortsTab({ data }: Props) {
   const ports = data?.open_ports ?? [];
@@ -16,32 +27,14 @@ export default function PortsTab({ data }: Props) {
         <span className="pill pill-green">{ports.length} open ports</span>
         {data?.source && <span className="pill pill-blue mono">{data.source}</span>}
       </div>
-      <div className="responsive-table"><table className="ports-table">
-        <thead>
-          <tr>
-            <th scope="col">Protocol</th>
-            <th scope="col">Address</th>
-            <th scope="col">State</th>
-            <th scope="col">Process</th>
-            <th scope="col">PID</th>
-          </tr>
-        </thead>
-        <tbody>
-          {ports.map((p, i) => (
-            <tr key={`${p.protocol}:${p.local_addr}:${p.state ?? ''}:${p.process ?? ''}:${i}`}>
-              <td>
-                <span className={`proto-badge proto-${p.protocol.replace('4','').replace('6','')}`}>
-                  {p.protocol.toUpperCase()}
-                </span>
-              </td>
-              <td><span className="mono">{p.local_addr}</span></td>
-              <td><span className="port-state">{p.state ?? '—'}</span></td>
-              <td><span className="port-proc">{p.process ?? '—'}</span></td>
-              <td><span className="mono" style={{ color: 'var(--text-3)' }}>{p.pid ?? '—'}</span></td>
-            </tr>
-          ))}
-        </tbody>
-      </table></div>
+      <DataTable
+        columns={columns}
+        rows={ports}
+        getRowKey={(p, i) => `${p.protocol}:${p.local_addr}:${p.state ?? ''}:${p.process ?? ''}:${i}`}
+        caption="Open ports"
+        ariaLabel="Open ports, scrollable table"
+        density="compact"
+      />
     </div>
   );
 }

@@ -15,6 +15,9 @@ import LogoMark from '@/components/LogoMark';
 import AppShell from '@/components/shell/AppShell';
 import { IconReport } from '@/components/shell/nav';
 import StatusPill, { StatusIcon } from '@/components/ui/StatusPill';
+import DataTable, { type Column } from '@/components/ui/DataTable';
+import EmptyState from '@/components/ui/EmptyState';
+import ErrorState from '@/components/ui/ErrorState';
 import type { BrowserHistoryRange } from '@/components/tabs/BrowserTab';
 
 type PageView = 'dashboard' | 'inventory' | 'reports' | 'inspect' | 'settings' | 'access';
@@ -260,7 +263,6 @@ export default function Home() {
   const [currentPage, setCurrentPage] = useState<PageView>('dashboard');
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
   const [fleetConn, setFleetConn] = useState<'connecting' | 'live' | 'stale'>('connecting');
-  const [inventorySort, setInventorySort] = useState<{ key: 'status' | 'lastSeen'; dir: 'asc' | 'desc' } | null>(null);
   const [reportRowLimit, setReportRowLimit] = useState(25);
   const [lastUpdatedAt, setLastUpdatedAt] = useState(0);
   const [nowTick, setNowTick] = useState(0);
@@ -1218,22 +1220,55 @@ export default function Home() {
       .filter(Boolean).join(' ').toLowerCase().includes(normalizedQuery);
   });
 
-  const sortedDevices = !inventorySort ? filteredDevices : [...filteredDevices].sort((a, b) => {
-    const sev = { critical: 0, warning: 1, online: 2, offline: 3 };
-    const diff = inventorySort.key === 'status'
-      ? sev[getDeviceState(a)] - sev[getDeviceState(b)]
-      : (Date.parse(a.last_seen ?? '') || 0) - (Date.parse(b.last_seen ?? '') || 0);
-    return inventorySort.dir === 'asc' ? diff : -diff;
-  });
-  const toggleInventorySort = (key: 'status' | 'lastSeen') =>
-    setInventorySort(prev => (prev?.key === key ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' }));
-  const sortHeader = (key: 'status' | 'lastSeen', label: string) => (
-    <th scope="col" aria-sort={inventorySort?.key === key ? (inventorySort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
-      <button type="button" className="th-sort" onClick={() => toggleInventorySort(key)}>
-        {label}<span aria-hidden="true">{inventorySort?.key === key ? (inventorySort.dir === 'asc' ? ' ▲' : ' ▼') : ' ↕'}</span>
-      </button>
-    </th>
-  );
+  const sevOrder = { critical: 0, warning: 1, online: 2, offline: 3 };
+  const inventoryColumns: Column<Device>[] = [
+    { key: 'device', header: 'Device', render: device => {
+      const sys = device.data?.SystemInfo;
+      return (
+        <div className="device-cell">
+          <div className="device-cell-text">
+            <button type="button" onClick={() => viewDeviceDetails(device.device_id)}>{deviceDisplayName(device)}</button>
+            <span>{sys?.hostname || device.hostname || device.device_id}</span>
+          </div>
+        </div>
+      );
+    } },
+    { key: 'status', header: 'Status', sortable: true, sortValue: d => sevOrder[getDeviceState(d)], render: d => <StatusPill status={getDeviceState(d)} /> },
+    { key: 'resources', header: 'Resources', render: device => {
+      const hw = device.data?.HardwareStats;
+      const cpu = hw?.cpu?.usage_percent;
+      const ram = hw?.ram?.used_percent;
+      return (
+        <div className="resource-pair">
+          <div><span>CPU</span><i><b style={{ width: `${Math.min(100, cpu ?? 0)}%` }} /></i><strong>{cpu === undefined ? '—' : `${cpu.toFixed(0)}%`}</strong></div>
+          <div><span>MEM</span><i><b style={{ width: `${Math.min(100, ram ?? 0)}%` }} /></i><strong>{ram === undefined ? '—' : `${ram.toFixed(0)}%`}</strong></div>
+        </div>
+      );
+    } },
+    { key: 'platform', header: 'Platform', render: device => {
+      const sys = device.data?.SystemInfo;
+      const platform = sys?.platform ? `${sys.platform}${sys.architecture ? `, ${sys.architecture}` : ''}` : '—';
+      return (
+        <div className="cell-stack">
+          <strong>{platform}</strong>
+          <span>{device.agent_version ? `Agent ${device.agent_version}` : 'Agent version unavailable'}</span>
+        </div>
+      );
+    } },
+    { key: 'lastSeen', header: 'Last Seen', sortable: true, sortValue: d => Date.parse(d.last_seen ?? '') || 0, render: device => (
+      <div className="cell-stack"><strong>{timeAgo(device.last_seen)}</strong><span>{isOnline(device.last_seen) ? 'Receiving telemetry' : 'Last known state'}</span></div>
+    ) },
+    { key: 'actions', header: 'Actions', align: 'right', sticky: 'right', render: device => {
+      const name = deviceDisplayName(device);
+      return (
+        <div className="row-actions">
+          <button type="button" className="action-btn" onClick={() => viewDeviceDetails(device.device_id)}>Inspect</button>
+          {canDeleteDevices && <button type="button" className="action-btn" onClick={() => openRenameDevice(device)}>Rename</button>}
+          {canDeleteDevices && <button type="button" className="action-btn danger" onClick={() => openDeleteConfirm(device.device_id, name)} aria-label={`Remove ${name}`}>×</button>}
+        </div>
+      );
+    } },
+  ];
 
   const filterOptions: { key: StatusFilter; label: string; count: number }[] = [
     { key: 'all',      label: 'All Devices', count: devices.length },
@@ -2478,11 +2513,7 @@ export default function Home() {
                   )}
                 </>
               ) : (
-                <div className="empty-state">
-                  <span className="empty-icon" aria-hidden="true"><IconReport /></span>
-                  <div className="empty-title">No report loaded</div>
-                  <div className="empty-sub">Choose a date window and refresh.</div>
-                </div>
+                <EmptyState icon={<IconReport />} title="No report loaded" description="Choose a date window and refresh." />
               )}
             </div>
           ) : loading ? (
@@ -2491,12 +2522,7 @@ export default function Home() {
               <span className="sr-only">Connecting to telemetry stream…</span>
             </div>
           ) : fetchError && devices.length === 0 ? (
-            <div className="empty-state">
-              <span className="empty-icon" aria-hidden="true"><IconWarning /></span>
-              <div className="empty-title">Could not load devices</div>
-              <div className="empty-sub" role="alert">{fetchError}. Check the API connection and try again.</div>
-              <button type="button" className="action-btn primary" style={{ marginTop: '1rem' }} onClick={() => void fetchAll()}>Retry</button>
-            </div>
+            <ErrorState icon={<IconWarning />} title="Could not load devices" message={`${fetchError}. Check the API connection and try again.`} onRetry={() => void fetchAll()} />
           ) : currentPage === 'dashboard' ? null : currentPage === 'inspect' ? (
             selectedDevice ? (
               <div className="inspect-device">
@@ -2523,29 +2549,17 @@ export default function Home() {
                 />
               </div>
             ) : (
-              <div className="empty-state">
-                <span className="empty-icon" aria-hidden="true"><IconSearch /></span>
-                <div className="empty-title">Device not found</div>
-                <div className="empty-sub">Return to inventory and choose a device.</div>
-              </div>
+              <EmptyState icon={<IconSearch />} title="Device not found" description="Return to inventory and choose a device." />
             )
           ) : devices.length === 0 ? (
-            <div className="empty-state">
-              <span className="empty-icon" aria-hidden="true"><IconSignal /></span>
-              <div className="empty-title">No devices connected</div>
-              <div className="empty-sub">Start the DevicePulse agent on a machine to begin.</div>
-            </div>
+            <EmptyState icon={<IconSignal />} title="No devices connected" description="Start the DevicePulse agent on a machine to begin." />
           ) : filteredDevices.length === 0 ? (
-            <div className="empty-state">
-              <span className="empty-icon" aria-hidden="true"><IconSearch /></span>
-              <div className="empty-title">No matching devices</div>
-              <div className="empty-sub">Adjust your search or status filter.</div>
-            </div>
+            <EmptyState icon={<IconSearch />} title="No matching devices" description="Adjust your search or status filter." />
           ) : currentPage === 'inventory' ? (
             /* ── Inventory table ── */
             <div>
               <div className="inventory-mobile-list">
-                {sortedDevices.map(device => {
+                {filteredDevices.map(device => {
                   const sys = device.data?.SystemInfo;
                   const state = getDeviceState(device);
                   const name = deviceDisplayName(device);
@@ -2567,102 +2581,21 @@ export default function Home() {
                   );
                 })}
               </div>
-              <div className="table-wrap" role="region" tabIndex={0} aria-label="Device inventory, scrollable table">
-                <table className="data-table">
-                  <caption className="sr-only">Device inventory</caption>
-                  <thead>
-                    <tr>
-                      <th scope="col">Device</th>
-                      {sortHeader('status', 'Status')}
-                      <th scope="col">Resources</th>
-                      <th scope="col">Platform</th>
-                      {sortHeader('lastSeen', 'Last Seen')}
-                      <th scope="col" style={{ textAlign: 'right' }}>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sortedDevices.map(device => {
-                      const sys    = device.data?.SystemInfo;
-                      const state  = getDeviceState(device);
-                      const online = isOnline(device.last_seen);
-                      const name   = deviceDisplayName(device);
-                      const hw     = device.data?.HardwareStats;
-                      const cpu    = hw?.cpu?.usage_percent;
-                      const ram    = hw?.ram?.used_percent;
-
-                      const platform = sys?.platform
-                        ? `${sys.platform}${sys.architecture ? `, ${sys.architecture}` : ''}`
-                        : '—';
-
-                      return (
-                        <tr key={device.device_id} className={`row-${state}`}>
-                          <td>
-                            <div className="device-cell">
-                              <div className="device-cell-text">
-                                <button type="button" onClick={() => viewDeviceDetails(device.device_id)}>{name}</button>
-                                <span>{sys?.hostname || device.hostname || device.device_id}</span>
-                              </div>
-                            </div>
-                          </td>
-                          <td>
-                            <StatusPill status={state} />
-                          </td>
-                          <td>
-                            <div className="resource-pair">
-                              <div><span>CPU</span><i><b style={{ width: `${Math.min(100, cpu ?? 0)}%` }} /></i><strong>{cpu === undefined ? '—' : `${cpu.toFixed(0)}%`}</strong></div>
-                              <div><span>MEM</span><i><b style={{ width: `${Math.min(100, ram ?? 0)}%` }} /></i><strong>{ram === undefined ? '—' : `${ram.toFixed(0)}%`}</strong></div>
-                            </div>
-                          </td>
-                          <td>
-                            <div className="cell-stack">
-                              <strong>{platform}</strong>
-                              <span>{device.agent_version ? `Agent ${device.agent_version}` : 'Agent version unavailable'}</span>
-                            </div>
-                          </td>
-                          <td>
-                            <div className="cell-stack"><strong>{timeAgo(device.last_seen)}</strong><span>{online ? 'Receiving telemetry' : 'Last known state'}</span></div>
-                          </td>
-                          <td>
-                            <div className="row-actions">
-                              <button
-                                type="button"
-                                className="action-btn"
-                                onClick={() => viewDeviceDetails(device.device_id)}
-                              >
-                                Inspect
-                              </button>
-                              {canDeleteDevices && (
-                                <button
-                                  type="button"
-                                  className="action-btn"
-                                  onClick={() => openRenameDevice(device)}
-                                >
-                                  Rename
-                                </button>
-                              )}
-                              {canDeleteDevices && (
-                                <button
-                                  type="button"
-                                  className="action-btn danger"
-                                  onClick={() => openDeleteConfirm(device.device_id, name)}
-                                  aria-label={`Remove ${name}`}
-                                >
-                                  ×
-                                </button>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-                <div className="table-footer">
-                  <span>
-                    Showing {filteredDevices.length ? '1' : '0'}–{filteredDevices.length} of {devices.length.toLocaleString()} devices
-                  </span>
-                </div>
-              </div>
+              <DataTable
+                columns={inventoryColumns}
+                rows={filteredDevices}
+                getRowKey={d => d.device_id}
+                caption="Device inventory"
+                ariaLabel="Device inventory, scrollable table"
+                rowClassName={d => `row-${getDeviceState(d)}`}
+                footer={
+                  <div className="table-footer">
+                    <span>
+                      Showing {filteredDevices.length ? '1' : '0'}–{filteredDevices.length} of {devices.length.toLocaleString()} devices
+                    </span>
+                  </div>
+                }
+              />
             </div>
           ) : null}
 
