@@ -27,6 +27,11 @@ export const IconReport = () => (
     <path d="M11 2.5v3h2"/>
   </svg>
 );
+export const IconShield = () => (
+  <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" aria-hidden="true" focusable="false">
+    <path d="M8 1.5l5.5 2v4.2c0 3.2-2.3 5.6-5.5 6.8-3.2-1.2-5.5-3.6-5.5-6.8V3.5z"/>
+  </svg>
+);
 export const IconMore = () => (
   <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false">
     <circle cx="3" cy="8" r="1.4"/><circle cx="8" cy="8" r="1.4"/><circle cx="13" cy="8" r="1.4"/>
@@ -45,7 +50,7 @@ export function getNavItems(canManageUsers: boolean): { primary: NavItem[]; more
     ],
     more: [
       { page: 'settings', label: 'Settings', icon: <IconSettings /> },
-      ...(canManageUsers ? [{ page: 'access' as const, label: 'Access', icon: <IconSettings /> }] : []),
+      ...(canManageUsers ? [{ page: 'access' as const, label: 'Access', icon: <IconShield /> }] : []),
     ],
   };
 }

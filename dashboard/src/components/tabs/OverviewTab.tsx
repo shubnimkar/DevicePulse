@@ -122,9 +122,9 @@ export default function OverviewTab({ data, cachedFocus, dailyAppUsage }: Props)
             <span>USB</span>
           </div>
           {osUpd && (
-            <div className={`stat-chip ${osUpd.pending_count > 0 ? 'warn' : ''}`}>
+            <div className={`stat-chip ${osUpd.pending_count > 0 ? 'warn' : ''}`} title="Pending OS updates">
               <strong>{osUpd.pending_count}</strong>
-              <span>Updates</span>
+              <span>Updates pending</span>
             </div>
           )}
         </div>

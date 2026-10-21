@@ -1,7 +1,7 @@
 'use client';
 
 import type { Device } from '@/types';
-import { timeAgo, deviceDisplayName } from '@/lib/utils';
+import { timeAgo, deviceDisplayName, primaryDisk } from '@/lib/utils';
 import StatusPill, { StatusIcon, type Status } from '@/components/ui/StatusPill';
 import DataTable, { type Column } from '@/components/ui/DataTable';
 import EmptyState from '@/components/ui/EmptyState';
@@ -11,18 +11,11 @@ type StatusFilter = 'all' | Status;
 interface Props {
   devices: Device[];
   counts: Record<StatusFilter, number>;
-  attentionDevices: Device[]; // already sorted by severity
   getState: (d: Device) => Status;
-  getRisk: (d: Device) => number;
-  avgCpu: number;
-  avgRam: number;
-  avgDisk: number;
-  fleetUptimePercent: number;
   onOpenDevices: (filter: StatusFilter) => void;
   onInspect: (deviceId: string) => void;
 }
 
-const ATTENTION_CAP = 8;
 const SEV: Record<Status, number> = { critical: 0, warning: 1, online: 2, offline: 3 };
 const KPIS: [StatusFilter, string][] = [
   ['all', 'Total'], ['online', 'Online'], ['warning', 'Warning'], ['critical', 'Critical'], ['offline', 'Offline'],
@@ -30,12 +23,25 @@ const KPIS: [StatusFilter, string][] = [
 
 const pct = (v?: number) => (v === undefined ? '—' : `${v.toFixed(0)}%`);
 
+// Cause shown for non-healthy devices; mirrors deviceRisk() in page.tsx (max of CPU, RAM, primary disk).
+function issueText(d: Device, state: Exclude<Status, 'online'>): string {
+  if (state === 'offline') {
+    const m = d.last_seen ? Math.max(0, Math.floor((Date.now() - Date.parse(d.last_seen)) / 60_000)) : NaN;
+    if (Number.isNaN(m)) return 'Offline';
+    if (m < 60) return `Offline ${m}m`;
+    if (m < 1440) return `Offline ${Math.floor(m / 60)}h ${m % 60}m`;
+    return `Offline ${Math.floor(m / 1440)}d`;
+  }
+  const hw = d.data?.HardwareStats;
+  const top = ([['CPU', hw?.cpu?.usage_percent], ['Memory', hw?.ram?.used_percent], ['Disk', primaryDisk(hw?.disks)?.used_percent]] as const)
+    .reduce((a, b) => ((b[1] ?? 0) > (a[1] ?? 0) ? b : a));
+  return `${top[0]} ${pct(top[1] ?? 0)}`;
+}
+
 export default function OverviewView({
-  devices, counts, attentionDevices, getState, getRisk, avgCpu, avgRam, avgDisk,
-  fleetUptimePercent, onOpenDevices, onInspect,
+  devices, counts, getState, onOpenDevices, onInspect,
 }: Props) {
   const noDevices = devices.length === 0;
-  const hiddenAttention = attentionDevices.length - ATTENTION_CAP;
 
   const columns: Column<Device>[] = [
     { key: 'device', header: 'Device', render: d => (
@@ -47,6 +53,10 @@ export default function OverviewView({
     { key: 'status', header: 'Status', sortable: true, sortValue: d => SEV[getState(d)], render: d => <StatusPill status={getState(d)} /> },
     { key: 'cpu', header: 'CPU', align: 'right', className: 'num', render: d => pct(d.data?.HardwareStats?.cpu?.usage_percent) },
     { key: 'mem', header: 'Memory', align: 'right', className: 'num', render: d => pct(d.data?.HardwareStats?.ram?.used_percent) },
+    { key: 'issue', header: 'Issue', hideBelow: 'lg', render: d => {
+      const st = getState(d);
+      return st === 'online' ? <span style={{ color: 'var(--text-3)' }}>—</span> : issueText(d, st);
+    } },
     { key: 'lastSeen', header: 'Last Seen', sortable: true, sortValue: d => Date.parse(d.last_seen ?? '') || 0, render: d => timeAgo(d.last_seen) },
   ];
 
@@ -73,65 +83,17 @@ export default function OverviewView({
         })}
       </section>
 
-      <section className="overview-workspace">
-        <div className="attention-panel">
-          <div className="section-heading">
-            <div><h2>Needs attention</h2></div>
-            <button type="button" className="text-button" onClick={() => onOpenDevices('all')}>View all devices</button>
-          </div>
-          {attentionDevices.length ? (
-            <>
-              <div className="attention-list">
-                {attentionDevices.slice(0, ATTENTION_CAP).map(device => {
-                  const state = getState(device);
-                  const reason = state === 'offline' ? 'Device is no longer checking in' : `${getRisk(device).toFixed(0)}% peak resource usage`;
-                  return (
-                    <button key={device.device_id} type="button" className="attention-row" onClick={() => onInspect(device.device_id)}>
-                      <span className={`attention-icon state-${state}`} aria-hidden="true">{state === 'critical' ? '!' : state === 'warning' ? '↑' : '–'}</span>
-                      <span className="attention-copy"><strong>{deviceDisplayName(device)}</strong><small>{reason}</small></span>
-                      <StatusPill status={state} className="attention-status" />
-                      <span className="attention-seen">{timeAgo(device.last_seen)}</span>
-                      <span className="row-chevron" aria-hidden="true">›</span>
-                    </button>
-                  );
-                })}
-              </div>
-              {hiddenAttention > 0 && (
-                <button type="button" className="text-button attention-more" onClick={() => onOpenDevices('all')}>
-                  {hiddenAttention} more need attention — view all devices
-                </button>
-              )}
-            </>
-          ) : noDevices ? (
-            <EmptyState icon={<StatusIcon status="offline" />} title="No devices connected" description="Start the DevicePulse agent on a machine to begin." />
-          ) : (
-            <EmptyState icon={<StatusIcon status="online" />} title="All devices healthy" description="Every connected device is within the current resource thresholds." />
-          )}
-        </div>
-
-        <aside className="fleet-snapshot" aria-label="Fleet resource snapshot">
-          <div className="section-heading"><div><h2>Fleet resources</h2></div></div>
-          <div className="snapshot-metrics">
-            {([['CPU', avgCpu], ['Memory', avgRam], ['Disk', avgDisk], ['Connected', fleetUptimePercent]] as const).map(([label, value]) => (
-              <div className="snapshot-metric" key={label}>
-                <div><span>{label}</span><strong>{value.toFixed(0)}%</strong></div>
-                <div className="snapshot-track"><i style={{ width: `${Math.min(100, value)}%` }} /></div>
-              </div>
-            ))}
-          </div>
-          <p>Current fleet averages from the latest device check-ins.</p>
-        </aside>
-      </section>
-
-      {!noDevices && <section className="overview-fleet" aria-labelledby="overview-fleet-heading">
+      {noDevices ? (
+        <EmptyState icon={<StatusIcon status="offline" />} title="No devices connected" description="Start the DevicePulse agent on a machine to begin." />
+      ) : <section className="overview-fleet" aria-labelledby="overview-fleet-heading">
         <div className="section-heading">
-          <div><h2 id="overview-fleet-heading">Fleet</h2></div>
+          <div><h2 id="overview-fleet-heading">Fleet</h2><span>{devices.length.toLocaleString()} device{devices.length === 1 ? '' : 's'}</span></div>
         </div>
         <DataTable
           columns={columns}
           rows={devices}
           getRowKey={d => d.device_id}
-          caption="Fleet devices with status, CPU, memory and last seen time"
+          caption="Fleet devices with status, CPU, memory, last seen time and issue"
           ariaLabel="Fleet devices table"
           initialSort={{ key: 'status', dir: 'asc' }}
           density="compact"

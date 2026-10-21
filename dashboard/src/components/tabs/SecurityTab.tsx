@@ -132,8 +132,14 @@ export default function SecurityTab({ usb, osUpd, deviceId, userRole, deviceOnli
         {!deviceOnline && (
           <div className="ra-offline-note">Device offline — commands queue until it reconnects.</div>
         )}
+        {[
+          { key: 'safe', title: null, items: visibleActions.filter(a => !a.danger && a.type !== 'quarantine_release') },
+          { key: 'danger', title: 'Danger zone', items: visibleActions.filter(a => a.danger || a.type === 'quarantine_release') },
+        ].map(group => (
+        <div key={group.key} className={`ra-group${group.key === 'danger' ? ' ra-group-danger' : ''}`}>
+        {group.title && <div className="ra-group-title">{group.title}</div>}
         <div className="ra-grid">
-          {visibleActions.map(a => {
+          {group.items.map(a => {
             const allowed = ROLE_RANK[userRole] >= ROLE_RANK[a.minRole];
             const busy = busyType === a.type;
             return (
@@ -158,6 +164,8 @@ export default function SecurityTab({ usb, osUpd, deviceId, userRole, deviceOnli
             );
           })}
         </div>
+        </div>
+        ))}
         {notice && (
           <div role={notice.kind === 'err' ? 'alert' : 'status'} className={`ra-notice ${notice.kind === 'ok' ? 'ra-notice-ok' : 'ra-notice-err'}`}>{notice.msg}</div>
         )}
@@ -261,7 +269,7 @@ export default function SecurityTab({ usb, osUpd, deviceId, userRole, deviceOnli
       <ConfirmDialog
         open={!!pendingAction}
         title={pendingAction?.label ?? ''}
-        message={pendingAction?.confirm ?? ''}
+        message={pendingAction ? `${pendingAction.confirm}\n\nDevice: ${deviceId}` : ''}
         confirmLabel={pendingAction?.label ?? 'Confirm'}
         danger={pendingAction?.danger}
         onConfirm={() => {

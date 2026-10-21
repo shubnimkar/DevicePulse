@@ -177,11 +177,11 @@
   box-shadow: 0 12px 34px rgba(75,228,212,.15);
 }
 .primaryAction:hover { filter: brightness(1.08); transform: translateY(-1px); }
-.secondaryAction { color: var(--muted); border: 1px solid var(--line); background: rgba(255,255,255,.018); }
+.secondaryAction { color: var(--ink); border: 1px solid var(--line); background: rgba(255,255,255,.018); }
 .secondaryAction:hover { color: var(--ink); border-color: rgba(143,168,196,.32); }
 
 .platformStrip { display: flex; flex-wrap: wrap; gap: .7rem 1.15rem; margin-top: 2.1rem; list-style: none; }
-.platformStrip li { display: inline-flex; align-items: center; gap: .42rem; color: var(--quiet); font-family: var(--font-mono); font-size: .64rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.platformStrip li { display: inline-flex; align-items: center; gap: .42rem; color: var(--muted); font-family: var(--font-mono); font-size: .72rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
 .platformStrip i { width: 4px; height: 4px; border-radius: 50%; background: var(--blue); }
 
 .visualStage { position: relative; z-index: 2; width: 112%; margin-left: -2%; will-change: transform; }

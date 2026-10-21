@@ -61,7 +61,8 @@ interface Props {
 export default function DevicesView({
   devices, counts, state, getState, onStatusChange, onQueryChange, onSortChange, onClearFilters, onInspect, onRename, onRemove,
 }: Props) {
-  const { status, q, sort } = state;
+  const { status, q } = state;
+  const sort: DeviceSort = state.sort ?? { key: 'status', dir: 'asc' }; // severity first by default, like Overview
   const query = q.trim().toLowerCase();
   const filtered = useMemo(() => devices.filter(d => {
     if (status === 'online' ? !isOnline(d.last_seen) : status !== 'all' && getState(d) !== status) return false;
@@ -81,7 +82,6 @@ export default function DevicesView({
     : `${filtered.length.toLocaleString()} of ${total.toLocaleString()} device${total !== 1 ? 's' : ''}`;
   // Same ordering as DataTable's sort so the mobile cards follow the table.
   const sortedCards = (() => {
-    if (!sort) return filtered;
     const val = (d: Device) => (sort.key === 'status' ? SEV[getState(d)] : Date.parse(d.last_seen ?? '') || 0);
     const sign = sort.dir === 'asc' ? 1 : -1;
     return [...filtered].sort((a, b) => sign * (val(a) - val(b)));
@@ -93,7 +93,7 @@ export default function DevicesView({
       return (
         <div className="device-cell">
           <div className="device-cell-text">
-            <button type="button" onClick={() => onInspect(d.device_id)}>{deviceDisplayName(d)}</button>
+            <button type="button" onClick={e => { e.stopPropagation(); onInspect(d.device_id); }}>{deviceDisplayName(d)}</button>
             <span>{sys?.hostname || d.hostname || d.device_id}{sys?.platform && <span className="dc-plat"> · {sys.platform}</span>}</span>
           </div>
         </div>
@@ -126,10 +126,17 @@ export default function DevicesView({
     { key: 'actions', header: 'Actions', align: 'right', sticky: 'right', render: d => {
       const name = deviceDisplayName(d);
       return (
-        <div className="row-actions">
-          <button type="button" className="action-btn" onClick={() => onInspect(d.device_id)}>Inspect</button>
-          {onRename && <button type="button" className="action-btn" onClick={() => onRename(d)}>Rename</button>}
-          {onRemove && <button type="button" className="action-btn danger" onClick={() => onRemove(d.device_id, name)} aria-label={`Remove ${name}`}>×</button>}
+        <div className="row-actions" onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
+          {onRename && (
+            <button type="button" className="action-btn icon-only" onClick={() => onRename(d)} aria-label={`Rename ${name}`} title="Rename">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" aria-hidden="true"><path d="M2 14l1-3.5L11.5 2 14 4.5 5.5 13z"/></svg>
+            </button>
+          )}
+          {onRemove && (
+            <button type="button" className="action-btn danger icon-only" onClick={() => onRemove(d.device_id, name)} aria-label={`Remove ${name}`} title="Remove device">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true"><path d="M2 4h12M5 4V2h6v2M6 7v5M10 7v5M3 4l1 10h8l1-10"/></svg>
+            </button>
+          )}
         </div>
       );
     } },
@@ -175,13 +182,9 @@ export default function DevicesView({
               return (
                 <article key={d.device_id} className={`inventory-mobile-card state-${st}`}>
                   <button type="button" className="mobile-device-main" onClick={() => onInspect(d.device_id)}>
-                    <span className="mobile-device-title"><strong>{name}</strong><StatusPill status={st} /></span>
+                    <span className="mobile-device-title"><strong>{name}</strong><StatusPill status={st} /><span className="mobile-device-chevron" aria-hidden="true">›</span></span>
                     <span className="mobile-device-meta">{sys?.hostname || d.hostname || d.device_id} · {sys?.platform || d.agent_os || 'Platform unavailable'} · {timeAgo(d.last_seen)}</span>
-                    <span className="mini-bars">
-                      {bars.map(([label, v]) => (
-                        <span key={label} className="mini-bar"><span>{label}</span><i><b style={{ width: `${Math.min(100, v ?? 0)}%` }} /></i><strong>{pct(v)}</strong></span>
-                      ))}
-                    </span>
+                    <span className="mobile-device-stats">{bars.map(([label, v]) => `${label} ${pct(v)}`).join(' · ')}</span>
                   </button>
                   {(onRename || onRemove) && (
                     <div className="mobile-device-actions">
@@ -201,6 +204,7 @@ export default function DevicesView({
             ariaLabel="Device inventory, scrollable table"
             density="compact"
             rowClassName={d => `row-${getState(d)}`}
+            onRowClick={d => onInspect(d.device_id)}
             sort={sort}
             onSortChange={s => onSortChange(s as DeviceSort)}
           />

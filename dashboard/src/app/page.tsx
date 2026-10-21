@@ -228,6 +228,7 @@ export default function Home() {
   const [isUpdating, setIsUpdating]   = useState(false);
   const [policy, setPolicy]           = useState<EnterprisePolicy>(DEFAULT_POLICY);
   const [policySavedAt, setPolicySavedAt] = useState<string>('');
+  const [policyResult, setPolicyResult] = useState<{ section: string; ok: boolean } | null>(null);
   const [agentReleases, setAgentReleases] = useState<AgentRelease[]>([]);
   const [allAgentReleases, setAllAgentReleases] = useState<AgentRelease[]>([]);
   const [agentBuildJobs, setAgentBuildJobs] = useState<AgentBuildJob[]>([]);
@@ -263,6 +264,7 @@ export default function Home() {
   const [nowTick, setNowTick] = useState(0);
   const [staleDismissed, setStaleDismissed] = useState(false);
   const [fetchError, setFetchError] = useState('');
+  const [roleChange, setRoleChange] = useState<{ user: DashboardUser; role: UserRole } | null>(null);
   const [confirmTarget, setConfirmTarget] = useState<{ deviceId: string; name: string } | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
   const [confirmError, setConfirmError] = useState('');
@@ -803,7 +805,7 @@ export default function Home() {
     }
   };
 
-  const savePolicy = async (nextPolicy: EnterprisePolicy) => {
+  const savePolicy = async (nextPolicy: EnterprisePolicy, section = '') => {
     if (!canManagePolicy) return;
     setIsUpdating(true);
     setPolicy(nextPolicy);
@@ -814,7 +816,10 @@ export default function Home() {
         body: JSON.stringify(nextPolicy),
       });
       if (res.ok) setPolicySavedAt(new Date().toLocaleTimeString());
-    } catch {} finally { setIsUpdating(false); }
+      setPolicyResult({ section, ok: res.ok });
+    } catch {
+      setPolicyResult({ section, ok: false });
+    } finally { setIsUpdating(false); }
   };
 
   const clampSyncInterval = (value: number) => Math.min(3600, Math.max(10, value || 10));
@@ -827,8 +832,15 @@ export default function Home() {
     if (key === 'browser_history_mode') {
       nextPolicy.collect_browser_history = nextValue !== 'disabled';
     }
-    void savePolicy(nextPolicy);
+    const section = key === 'telemetry_retention_days' || key === 'sync_interval_seconds' ? 'retention'
+      : key === 'delta_upload_enabled' || key === 'cache_unchanged_collector_data' ? 'caching'
+      : key === 'browser_history_mode' || key === 'browser_history_limit' ? 'browser' : 'collection';
+    void savePolicy(nextPolicy, section);
   };
+
+  const policyBadge = (section: string) => policyResult?.section === section && (
+    <span className={`save-state${policyResult.ok ? '' : ' error'}`} role="status">{policyResult.ok ? 'Saved' : 'Not saved — try again'}</span>
+  );
 
   const startAgentBuild = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -1161,7 +1173,6 @@ export default function Home() {
 
   const onlineCount  = devices.filter(d => isOnline(d.last_seen)).length;
   const offlineCount = devices.length - onlineCount;
-  const fleetUptimePercent = devices.length > 0 ? (onlineCount / devices.length) * 100 : 0;
   const selectedDevice = devices.find(d => d.device_id === selectedDeviceId);
   const selectedDeviceName = selectedDevice ? deviceDisplayName(selectedDevice) : selectedDeviceId;
   const selectedBrowserHistory = selectedDevice
@@ -1204,27 +1215,6 @@ export default function Home() {
 
   const criticalCount = devices.filter(d => getDeviceState(d) === 'critical').length;
   const warningCount  = devices.filter(d => getDeviceState(d) === 'warning').length;
-  const attentionDevices = [...devices]
-    .filter(d => getDeviceState(d) !== 'online')
-    .sort((a, b) => {
-      const stateWeight = (device: Device) => {
-        const state = getDeviceState(device);
-        if (state === 'critical') return 400;
-        if (state === 'offline') return 300;
-        if (state === 'warning') return 200;
-        return 0;
-      };
-      return stateWeight(b) + deviceRisk(b) - (stateWeight(a) + deviceRisk(a));
-    });
-  const avgCpu = devices.length > 0
-    ? devices.reduce((sum, d) => sum + (d.data?.HardwareStats?.cpu?.usage_percent ?? 0), 0) / devices.length
-    : 0;
-  const avgRam = devices.length > 0
-    ? devices.reduce((sum, d) => sum + (d.data?.HardwareStats?.ram?.used_percent ?? 0), 0) / devices.length
-    : 0;
-  const avgDisk = devices.length > 0
-    ? devices.reduce((sum, d) => sum + (primaryDisk(d.data?.HardwareStats?.disks)?.used_percent ?? 0), 0) / devices.length
-    : 0;
   const viewDeviceDetails = (deviceId: string) => {
     goToPage('inspect', { deviceId, tab: 'overview' });
   };
@@ -1466,6 +1456,7 @@ export default function Home() {
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: -8 }}
+          transition={{ duration: 0.12 }}
         >
 
           {fleetConn === 'stale' && !staleDismissed && lastUpdatedAt > 0 && ['dashboard', 'inventory', 'inspect'].includes(currentPage) && (
@@ -1500,7 +1491,7 @@ export default function Home() {
                   ? 'Seven-day fleet activity and coverage'
                   : currentPage === 'inventory'
                   ? `${devices.length.toLocaleString()} registered endpoint${devices.length !== 1 ? 's' : ''}`
-                  : 'Current fleet health and devices that need attention'}
+                  : 'Current fleet health'}
               </p>
             </div>
             {currentPage === 'reports' && (
@@ -1556,13 +1547,7 @@ export default function Home() {
               <OverviewView
                 devices={devices}
                 counts={{ all: devices.length, online: onlineCount, warning: warningCount, critical: criticalCount, offline: offlineCount }}
-                attentionDevices={attentionDevices}
                 getState={getDeviceState}
-                getRisk={deviceRisk}
-                avgCpu={avgCpu}
-                avgRam={avgRam}
-                avgDisk={avgDisk}
-                fleetUptimePercent={fleetUptimePercent}
                 onOpenDevices={filter => goToPage('inventory', { inventory: { ...inventoryRef.current, status: filter, q: '' } })}
                 onInspect={viewDeviceDetails}
               />
@@ -1582,6 +1567,95 @@ export default function Home() {
                 <div><span>Viewer</span><strong>Read telemetry</strong><p>Can inspect devices, reports, and current policy.</p></div>
                 <div><span>Manager</span><strong>Manage policy</strong><p>Viewer access plus collection and retention settings.</p></div>
                 <div><span>Admin</span><strong>Full control</strong><p>Can manage users, devices, releases, and fleet policy.</p></div>
+              </section>
+              <section className="settings-panel">
+                <div className="settings-panel-header">
+                  <div>
+                    <h2>Dashboard Users</h2>
+                    <p>Accounts with active access to this dashboard.</p>
+                  </div>
+                  {passwordResetStatus && <span className="save-state" role="status">{passwordResetStatus}</span>}
+                  {roleUpdateStatus && <span className="save-state" role="status">{roleUpdateStatus}</span>}
+                </div>
+                <div className="table-wrap" role="region" tabIndex={0} aria-label="Dashboard users, scrollable table">
+                  <table className="data-table dt-no-sticky">
+                    <thead>
+                      <tr>
+                        <th scope="col">User</th>
+                        <th scope="col">Role</th>
+                        <th scope="col">Status</th>
+                        <th scope="col">Created</th>
+                        <th scope="col" style={{ textAlign: 'right' }}>Password</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {users.map(user => (
+                        <tr key={user.id}>
+                          <td>
+                            <div className="device-cell-text">
+                              <strong>{user.name || user.email}</strong>
+                              <span>{user.email}</span>
+                            </div>
+                          </td>
+                          <td>
+                            <select
+                              className="role-select"
+                              value={user.role}
+                              onChange={e => setRoleChange({ user, role: e.target.value as UserRole })}
+                              aria-label={`Change role for ${user.email}`}
+                            >
+                              <option value="viewer">Viewer</option>
+                              <option value="manager">Manager</option>
+                              <option value="admin">Admin</option>
+                            </select>
+                          </td>
+                          <td>{user.status ?? 'active'}</td>
+                          <td>{user.created_at ? new Date(user.created_at).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '—'}</td>
+                          <td>
+                            {passwordResetFor === user.id ? (
+                              <form className="reset-password-form" onSubmit={e => resetUserPassword(e, user)}>
+                                <input
+                                  type="password"
+                                  value={passwordResetValue}
+                                  onChange={e => setPasswordResetValue(e.target.value)}
+                                  placeholder="New password"
+                                  minLength={8}
+                                  autoComplete="new-password"
+                                  required
+                                />
+                                <button type="submit" className="action-btn">Save</button>
+                                <button
+                                  type="button"
+                                  className="action-btn"
+                                  onClick={() => {
+                                    setPasswordResetFor('');
+                                    setPasswordResetValue('');
+                                  }}
+                                >
+                                  Cancel
+                                </button>
+                              </form>
+                            ) : (
+                              <div className="row-actions">
+                                <button
+                                  type="button"
+                                  className="action-btn"
+                                  onClick={() => {
+                                    setPasswordResetStatus('');
+                                    setPasswordResetFor(user.id);
+                                    setPasswordResetValue('');
+                                  }}
+                                >
+                                  Reset password
+                                </button>
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </section>
               <section className="settings-panel">
                 <div className="settings-panel-header">
@@ -1636,95 +1710,6 @@ export default function Home() {
                 </form>
               </section>
 
-              <section className="settings-panel">
-                <div className="settings-panel-header">
-                  <div>
-                    <h2>Dashboard Users</h2>
-                    <p>Accounts with active access to this dashboard.</p>
-                  </div>
-                  {passwordResetStatus && <span className="save-state" role="status">{passwordResetStatus}</span>}
-                  {roleUpdateStatus && <span className="save-state" role="status">{roleUpdateStatus}</span>}
-                </div>
-                <div className="table-wrap" role="region" tabIndex={0} aria-label="Dashboard users, scrollable table">
-                  <table className="data-table">
-                    <thead>
-                      <tr>
-                        <th scope="col">User</th>
-                        <th scope="col">Role</th>
-                        <th scope="col">Status</th>
-                        <th scope="col">Created</th>
-                        <th scope="col" style={{ textAlign: 'right' }}>Password</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {users.map(user => (
-                        <tr key={user.id}>
-                          <td>
-                            <div className="device-cell-text">
-                              <strong>{user.name || user.email}</strong>
-                              <span>{user.email}</span>
-                            </div>
-                          </td>
-                          <td>
-                            <select
-                              className="role-select"
-                              value={user.role}
-                              onChange={e => updateUserRole(user, e.target.value as UserRole)}
-                              aria-label={`Change role for ${user.email}`}
-                            >
-                              <option value="viewer">Viewer</option>
-                              <option value="manager">Manager</option>
-                              <option value="admin">Admin</option>
-                            </select>
-                          </td>
-                          <td>{user.status ?? 'active'}</td>
-                          <td>{user.created_at ? new Date(user.created_at).toLocaleDateString() : '—'}</td>
-                          <td>
-                            {passwordResetFor === user.id ? (
-                              <form className="reset-password-form" onSubmit={e => resetUserPassword(e, user)}>
-                                <input
-                                  type="password"
-                                  value={passwordResetValue}
-                                  onChange={e => setPasswordResetValue(e.target.value)}
-                                  placeholder="New password"
-                                  minLength={8}
-                                  autoComplete="new-password"
-                                  required
-                                />
-                                <button type="submit" className="action-btn">Save</button>
-                                <button
-                                  type="button"
-                                  className="action-btn"
-                                  onClick={() => {
-                                    setPasswordResetFor('');
-                                    setPasswordResetValue('');
-                                  }}
-                                >
-                                  Cancel
-                                </button>
-                              </form>
-                            ) : (
-                              <div className="row-actions">
-                                <button
-                                  type="button"
-                                  className="action-btn"
-                                  onClick={() => {
-                                    setPasswordResetStatus('');
-                                    setPasswordResetFor(user.id);
-                                    setPasswordResetValue('');
-                                  }}
-                                >
-                                  Reset
-                                </button>
-                              </div>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </section>
             </div>
           ) : currentPage === 'settings' ? (
             <div className="settings-layout">
@@ -1734,6 +1719,7 @@ export default function Home() {
                     <h2>Retention</h2>
                     <p>Controls how long new server telemetry remains queryable.</p>
                   </div>
+                  {policyBadge('retention')}
                 </div>
                 <div className="settings-grid two-col">
                   <label className="setting-field">
@@ -1778,6 +1764,7 @@ export default function Home() {
                     <h2>Data Caching</h2>
                     <p>Reduces repeated uploads by sending only data that changed or has not been sent before.</p>
                   </div>
+                  {policyBadge('caching')}
                 </div>
                 <div className="toggle-list">
                   <label className="toggle-row">
@@ -1813,6 +1800,7 @@ export default function Home() {
                     <h2>Browser History</h2>
                     <p>Choose how much URL detail is retained for browser history reporting.</p>
                   </div>
+                  {policyBadge('browser')}
                 </div>
                 <div className="segmented-control" role="group" aria-label="Browser history mode">
                   {([
@@ -2479,6 +2467,15 @@ export default function Home() {
         onCancel={() => { if (!confirmBusy) setConfirmTarget(null); }}
       />
 
+      <ConfirmDialog
+        open={!!roleChange}
+        title="Change role"
+        message={`Change ${roleChange?.user.email ?? ''} from ${roleChange?.user.role ?? ''} to ${roleChange?.role ?? ''}?`}
+        confirmLabel="Change role"
+        danger={roleChange?.user.role === 'admin' || roleChange?.role === 'admin'}
+        onConfirm={() => { if (roleChange) void updateUserRole(roleChange.user, roleChange.role); setRoleChange(null); }}
+        onCancel={() => setRoleChange(null)}
+      />
     </AppShell>
     </MotionConfig>
   );

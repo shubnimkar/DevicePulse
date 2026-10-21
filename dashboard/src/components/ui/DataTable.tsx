@@ -62,6 +62,9 @@ export default function DataTable<T>({
     setInnerSort(next);
     onSortChange?.(next);
   };
+  const glyph = (active: boolean, dir?: 'asc' | 'desc') => (
+    <span className={`sort-ind${active ? ' is-active' : ''}`} aria-hidden="true">{active ? (dir === 'asc' ? '▲' : '▼') : '↕'}</span>
+  );
   const hide = (c: Column<T>) => (c.hideBelow ? `dt-hide-${c.hideBelow}` : undefined);
   const style = (c: Column<T>) => (c.align ? { textAlign: c.align } : undefined);
 
@@ -84,7 +87,7 @@ export default function DataTable<T>({
                   >
                     {c.sortable ? (
                       <button type="button" className="th-sort" onClick={() => toggle(c.key)}>
-                        {c.header}<span aria-hidden="true">{active ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : ' ↕'}</span>
+                        {c.align === 'right' && glyph(active, sort?.dir)}{c.header}{c.align !== 'right' && glyph(active, sort?.dir)}
                       </button>
                     ) : c.header}
                   </th>

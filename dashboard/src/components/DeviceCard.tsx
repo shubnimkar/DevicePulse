@@ -152,7 +152,7 @@ export default function DeviceCard({
       <header className={`dd-header state-${state}`}>
         {onBack && (
           <button type="button" className="dd-back" onClick={onBack}>
-            <span aria-hidden="true">‹ </span>Back to Inventory
+            <span aria-hidden="true">‹ </span>Back to Devices
           </button>
         )}
         <div className="dd-main">
@@ -163,8 +163,8 @@ export default function DeviceCard({
               <span className="dd-seen">{timeAgo(device.last_seen)}</span>
             </div>
             <div className="dd-meta">
-              {sys?.platform_version && <span>{sys.os} {sys.platform_version}</span>}
-              {online && <span>{device.agent_version ? `Agent ${device.agent_version}` : 'Agent version pending'}</span>}
+              {sys?.platform_version && <span className="dd-meta-extra">{sys.os} {sys.platform_version}</span>}
+              {online && <span className="dd-meta-extra">{device.agent_version ? `Agent ${device.agent_version}` : 'Agent version pending'}</span>}
               <button type="button" className="dd-copy" onClick={copyId} title={device.device_id} aria-label={`Copy device ID ${device.device_id}`}>
                 <span className="mono">{device.device_id.slice(0, 12)}…</span>
                 <span className="dd-copy-state" role="status">{copied ? 'Copied' : ''}</span>

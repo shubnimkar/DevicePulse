@@ -28,6 +28,7 @@ export default function GaugeBar({ value, color, height = 4, label }: GaugeBarPr
         transition={{ type: 'spring', stiffness: 260, damping: 30 }}
         style={{
           background: color ?? 'var(--blue)',
+          minWidth: pct > 0 ? 4 : 0, // keep tiny values visible as a bar, not a dot
         }}
       />
     </div>
