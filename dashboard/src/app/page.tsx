@@ -6,6 +6,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { AnimatePresence, MotionConfig, motion } from 'motion/react';
 import Link from 'next/link';
 import type { FormEvent } from 'react';
+import SettingsView from '@/components/views/SettingsView';
 import { Device, AppFocusSummary, FocusCacheData, DeviceTab, EnterprisePolicy, DashboardUser, UserRole, HistoryEntry, BrowserHistoryArchiveData, DailyAppUsageData, DailyPresenceData, AgentRelease, AgentBuildJob, AgentRolloutResponse, WeeklyReport } from '@/types';
 import { API, readHeaders, adminHeaders, isOnline, primaryDisk, deviceDisplayName, formatDuration } from '@/lib/utils';
 import DeviceCard from '@/components/DeviceCard';
@@ -228,7 +229,7 @@ export default function Home() {
   const [isUpdating, setIsUpdating]   = useState(false);
   const [policy, setPolicy]           = useState<EnterprisePolicy>(DEFAULT_POLICY);
   const [policySavedAt, setPolicySavedAt] = useState<string>('');
-  const [policyResult, setPolicyResult] = useState<{ section: string; ok: boolean } | null>(null);
+  const [policyResult, setPolicyResult] = useState<{ ok: boolean } | null>(null);
   const [agentReleases, setAgentReleases] = useState<AgentRelease[]>([]);
   const [allAgentReleases, setAllAgentReleases] = useState<AgentRelease[]>([]);
   const [agentBuildJobs, setAgentBuildJobs] = useState<AgentBuildJob[]>([]);
@@ -805,42 +806,26 @@ export default function Home() {
     }
   };
 
-  const savePolicy = async (nextPolicy: EnterprisePolicy, section = '') => {
-    if (!canManagePolicy) return;
+  const savePolicy = async (nextPolicy: EnterprisePolicy): Promise<boolean> => {
+    if (!canManagePolicy) return false;
     setIsUpdating(true);
-    setPolicy(nextPolicy);
     try {
       const res = await apiFetch('/policy', {
         method: 'POST',
         headers: adminHeaders(),
         body: JSON.stringify(nextPolicy),
       });
-      if (res.ok) setPolicySavedAt(new Date().toLocaleTimeString());
-      setPolicyResult({ section, ok: res.ok });
+      if (res.ok) {
+        setPolicy(nextPolicy);
+        setPolicySavedAt(new Date().toLocaleTimeString());
+      }
+      setPolicyResult({ ok: res.ok });
+      return res.ok;
     } catch {
-      setPolicyResult({ section, ok: false });
+      setPolicyResult({ ok: false });
+      return false;
     } finally { setIsUpdating(false); }
   };
-
-  const clampSyncInterval = (value: number) => Math.min(3600, Math.max(10, value || 10));
-
-  const updatePolicyField = <K extends keyof EnterprisePolicy>(key: K, value: EnterprisePolicy[K]) => {
-    const nextValue = key === 'sync_interval_seconds'
-      ? clampSyncInterval(Number(value)) as EnterprisePolicy[K]
-      : value;
-    const nextPolicy = { ...policy, [key]: nextValue };
-    if (key === 'browser_history_mode') {
-      nextPolicy.collect_browser_history = nextValue !== 'disabled';
-    }
-    const section = key === 'telemetry_retention_days' || key === 'sync_interval_seconds' ? 'retention'
-      : key === 'delta_upload_enabled' || key === 'cache_unchanged_collector_data' ? 'caching'
-      : key === 'browser_history_mode' || key === 'browser_history_limit' ? 'browser' : 'collection';
-    void savePolicy(nextPolicy, section);
-  };
-
-  const policyBadge = (section: string) => policyResult?.section === section && (
-    <span className={`save-state${policyResult.ok ? '' : ' error'}`} role="status">{policyResult.ok ? 'Saved' : 'Not saved — try again'}</span>
-  );
 
   const startAgentBuild = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -1528,15 +1513,6 @@ export default function Home() {
                 )}
               </div>
             )}
-            {currentPage === 'settings' && (
-              <div className="page-save-status" aria-live="polite">
-                <span className={`status-indicator ${isUpdating ? 'is-saving' : policySavedAt ? 'is-saved' : ''}`} />
-                <div>
-                  <strong>{!canManagePolicy ? 'Read-only access' : isUpdating ? 'Saving changes' : policySavedAt ? 'Policy saved' : 'Changes save automatically'}</strong>
-                  <small>{!canManagePolicy ? 'A manager or admin can change fleet policy.' : policySavedAt ? `Last saved ${policySavedAt}` : 'Updates apply to the global fleet policy.'}</small>
-                </div>
-              </div>
-            )}
           </div>
           )}
 
@@ -1712,130 +1688,15 @@ export default function Home() {
 
             </div>
           ) : currentPage === 'settings' ? (
-            <div className="settings-layout">
-              <section className="settings-panel">
-                <div className="settings-panel-header">
-                  <div>
-                    <h2>Retention</h2>
-                    <p>Controls how long new server telemetry remains queryable.</p>
-                  </div>
-                  {policyBadge('retention')}
-                </div>
-                <div className="settings-grid two-col">
-                  <label className="setting-field">
-                    <span>Telemetry Retention</span>
-                    <div className="number-control">
-                      <input
-                        type="number"
-                        min="1"
-                        max="3650"
-                        value={policy.telemetry_retention_days}
-                        disabled={!canManagePolicy}
-                        onChange={e => setPolicy(p => ({ ...p, telemetry_retention_days: Number(e.target.value) }))}
-                        onBlur={e => updatePolicyField('telemetry_retention_days', Number(e.target.value))}
-                      />
-                      <span>days</span>
-                    </div>
-                  </label>
-                  <label className="setting-field">
-                    <span>Sync Interval</span>
-                    <div className="number-control">
-                      <input
-                        type="number"
-                        min="10"
-                        max="3600"
-                        value={policy.sync_interval_seconds}
-                        disabled={!canManagePolicy}
-                        onChange={e => {
-                          const next = Number(e.target.value);
-                          setPolicy(p => ({ ...p, sync_interval_seconds: next }));
-                        }}
-                        onBlur={e => updatePolicyField('sync_interval_seconds', Number(e.target.value))}
-                      />
-                      <span>seconds</span>
-                    </div>
-                  </label>
-                </div>
-              </section>
-
-              <section className="settings-panel">
-                <div className="settings-panel-header">
-                  <div>
-                    <h2>Data Caching</h2>
-                    <p>Reduces repeated uploads by sending only data that changed or has not been sent before.</p>
-                  </div>
-                  {policyBadge('caching')}
-                </div>
-                <div className="toggle-list">
-                  <label className="toggle-row">
-                    <span>
-                      <strong>Delta upload</strong>
-                      <small>Upload changed collector payloads instead of full repeated snapshots.</small>
-                    </span>
-                    <input
-                      type="checkbox"
-                      checked={policy.delta_upload_enabled}
-                      disabled={!canManagePolicy}
-                      onChange={e => updatePolicyField('delta_upload_enabled', e.target.checked)}
-                    />
-                  </label>
-                  <label className="toggle-row">
-                    <span>
-                      <strong>Cache unchanged collector data</strong>
-                      <small>Keep local fingerprints so unchanged apps, services, ports and browser entries are skipped.</small>
-                    </span>
-                    <input
-                      type="checkbox"
-                      checked={policy.cache_unchanged_collector_data}
-                      disabled={!canManagePolicy}
-                      onChange={e => updatePolicyField('cache_unchanged_collector_data', e.target.checked)}
-                    />
-                  </label>
-                </div>
-              </section>
-
-              <section className="settings-panel">
-                <div className="settings-panel-header">
-                  <div>
-                    <h2>Browser History</h2>
-                    <p>Choose how much URL detail is retained for browser history reporting.</p>
-                  </div>
-                  {policyBadge('browser')}
-                </div>
-                <div className="segmented-control" role="group" aria-label="Browser history mode">
-                  {([
-                    ['domain_only', 'Domain only'],
-                    ['full_url', 'Full URL'],
-                  ] as const).map(([value, label]) => (
-                    <button
-                      key={value}
-                      type="button"
-                      className={policy.browser_history_mode === value ? 'active' : ''}
-                      disabled={!canManagePolicy}
-                      onClick={() => updatePolicyField('browser_history_mode', value)}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-                <label className="setting-field compact-field">
-                  <span>Browser Entry Limit</span>
-                  <div className="number-control">
-                    <input
-                      type="number"
-                      min="0"
-                      max="1000"
-                      value={policy.browser_history_limit}
-                      disabled={!canManagePolicy}
-                      onChange={e => setPolicy(p => ({ ...p, browser_history_limit: Number(e.target.value) }))}
-                      onBlur={e => updatePolicyField('browser_history_limit', Number(e.target.value))}
-                    />
-                    <span>entries</span>
-                  </div>
-                </label>
-              </section>
-
-              {canManageReleases && (
+            <SettingsView
+              policy={policy}
+              canManage={canManagePolicy}
+              collectors={collectorControls}
+              onSave={savePolicy}
+              saving={isUpdating}
+              savedAt={policySavedAt}
+              saveFailed={policyResult?.ok === false}
+              releases={canManageReleases ? (
                 <section className="settings-panel">
                   <div className="settings-panel-header">
                     <div>
@@ -1857,94 +1718,99 @@ export default function Home() {
                     </div>
                   </div>
 
-                  <div className="release-grid">
+                  <div className="rel-grid">
                     {releasesByOS.map(target => (
-                      <div key={target.os} className="release-card">
-                        <div className="release-card-head">
+                      <section key={target.os} className={`rel-card${target.releases.length ? '' : ' is-empty'}`} aria-label={`${target.label} releases`}>
+                        <header className="rel-head">
                           <strong>{target.label}</strong>
-                          <span>{target.releases.length ? `${target.releases.length} build${target.releases.length !== 1 ? 's' : ''}` : 'No release'}</span>
-                        </div>
+                          <span className={`rel-status${target.releases.length ? ' is-live' : ''}`}>{target.releases.length ? 'Published' : 'Not released'}</span>
+                        </header>
                         {target.releases.length ? (
-                          <div className="release-builds">
+                          <ul className="rel-list">
                             {target.releases.map(rel => (
-                              <div key={`${rel.os}-${rel.arch}`} className="release-build">
-                                <span className="pill pill-blue mono">{rel.arch}</span>
-                                <strong>{rel.version}</strong>
-                                <small>{rel.published_at ? new Date(rel.published_at).toLocaleString() : 'Published'}</small>
-                                <select
-                                  value={rel.version}
-                                  onChange={e => {
-                                    const selected = releaseOptionsFor(rel.os, rel.arch).find(item => item.version === e.target.value);
-                                    if (selected) void activateAgentRelease(selected);
-                                  }}
-                                  aria-label={`Activate ${target.label} ${rel.arch} release`}
-                                >
-                                  {releaseOptionsFor(rel.os, rel.arch).map(option => (
-                                    <option key={`${option.os}-${option.arch}-${option.version}`} value={option.version}>
-                                      {option.version}
-                                    </option>
-                                  ))}
-                                </select>
-                              </div>
+                              <li key={`${rel.os}-${rel.arch}`} className="rel-item">
+                                <div className="rel-item-top">
+                                  <span className="rel-arch">{rel.arch}</span>
+                                  <strong className="rel-version">v{rel.version.replace(/^v/i, '')}</strong>
+                                  <span className="rel-active">Active</span>
+                                </div>
+                                <small>{rel.published_at ? new Date(rel.published_at).toLocaleString(undefined, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Published'}</small>
+                                <label className="rel-switch">
+                                  <span>Active version</span>
+                                  <select
+                                    value={rel.version}
+                                    onChange={e => {
+                                      const selected = releaseOptionsFor(rel.os, rel.arch).find(item => item.version === e.target.value);
+                                      if (selected) void activateAgentRelease(selected);
+                                    }}
+                                    aria-label={`Activate ${target.label} ${rel.arch} release`}
+                                  >
+                                    {releaseOptionsFor(rel.os, rel.arch).map(option => (
+                                      <option key={`${option.os}-${option.arch}-${option.version}`} value={option.version}>
+                                        {option.version}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                              </li>
                             ))}
-                          </div>
+                          </ul>
                         ) : (
-                          <div className="release-empty">No binary published yet.</div>
+                          <p className="rel-empty">No binary published yet. Build a version below to publish one.</p>
                         )}
-                      </div>
+                      </section>
                     ))}
                   </div>
 
-                  <form className="release-form build-form" onSubmit={startAgentBuild}>
-                    <label className="setting-field">
-                      <span>Version</span>
-                      <input
-                        value={buildForm.version}
-                        onChange={e => setBuildForm(form => ({ ...form, version: e.target.value }))}
-                        placeholder="1.0.1"
-                        required
-                      />
-                    </label>
-                    <label className="setting-field">
-                      <span>API URL</span>
-                      <input
-                        value={buildForm.api_url}
-                        onChange={e => setBuildForm(form => ({ ...form, api_url: e.target.value }))}
-                        placeholder={API || 'Auto from hosted API'}
-                        type="url"
-                      />
-                    </label>
-                    <label className="setting-field release-choice-field">
-                      <span>Platforms</span>
-                      <div className="choice-row">
-                        {RELEASE_TARGETS.map(target => (
-                          <label key={target.os}>
-                            <input
-                              type="checkbox"
-                              checked={buildForm.platforms.includes(target.os)}
-                              onChange={e => toggleBuildPlatform(target.os, e.target.checked)}
-                            />
-                            {target.label}
-                          </label>
-                        ))}
-                      </div>
-                    </label>
-                    <label className="setting-field release-choice-field">
-                      <span>Architectures</span>
-                      <div className="choice-row">
-                        {['amd64', 'arm64'].map(arch => (
-                          <label key={arch}>
-                            <input
-                              type="checkbox"
-                              checked={buildForm.archs.includes(arch)}
-                              onChange={e => toggleBuildArch(arch, e.target.checked)}
-                            />
-                            {arch}
-                          </label>
-                        ))}
-                      </div>
-                    </label>
-                    <button type="submit" className="action-btn release-submit">Build New Version</button>
+                  <form className="build-form" onSubmit={startAgentBuild} aria-label="Build a new agent version">
+                    <div className="build-fields">
+                      <label className="build-field">
+                        <span>Version</span>
+                        <input
+                          value={buildForm.version}
+                          onChange={e => setBuildForm(form => ({ ...form, version: e.target.value }))}
+                          placeholder="1.0.1"
+                          required
+                        />
+                      </label>
+                      <label className="build-field">
+                        <span>API URL</span>
+                        <input
+                          value={buildForm.api_url}
+                          onChange={e => setBuildForm(form => ({ ...form, api_url: e.target.value }))}
+                          placeholder={API || 'Auto from hosted API'}
+                          type="url"
+                        />
+                      </label>
+                    </div>
+                    <div className="build-choices">
+                      <fieldset className="build-choice">
+                        <legend>Platforms</legend>
+                        <div>
+                          {RELEASE_TARGETS.map(target => (
+                            <label key={target.os} className="chip-check">
+                              <input type="checkbox" checked={buildForm.platforms.includes(target.os)} onChange={e => toggleBuildPlatform(target.os, e.target.checked)} />
+                              <span>{target.label}</span>
+                            </label>
+                          ))}
+                        </div>
+                      </fieldset>
+                      <fieldset className="build-choice">
+                        <legend>Architectures</legend>
+                        <div>
+                          {['amd64', 'arm64'].map(arch => (
+                            <label key={arch} className="chip-check">
+                              <input type="checkbox" checked={buildForm.archs.includes(arch)} onChange={e => toggleBuildArch(arch, e.target.checked)} />
+                              <span>{arch}</span>
+                            </label>
+                          ))}
+                        </div>
+                      </fieldset>
+                    </div>
+                    <div className="build-footer">
+                      <p>{buildForm.platforms.length * buildForm.archs.length} target{buildForm.platforms.length * buildForm.archs.length === 1 ? '' : 's'} will be built{buildForm.version.trim() ? ` as v${buildForm.version.trim().replace(/^v/i, '')}` : ''}.</p>
+                      <button type="submit" className="action-btn primary" disabled={buildForm.platforms.length === 0 || buildForm.archs.length === 0}>Build version</button>
+                    </div>
                   </form>
                   {releaseStatus && <div className="form-status" role="status">{releaseStatus}</div>}
 
@@ -1997,33 +1863,8 @@ export default function Home() {
                     </div>
                   )}
                 </section>
-              )}
-
-              <section className="settings-panel">
-                <div className="settings-panel-header">
-                  <div>
-                    <h2>Collectors</h2>
-                    <p>Enable only the telemetry categories required by your environment.</p>
-                  </div>
-                </div>
-                <div className="collector-grid">
-                  {collectorControls.map(item => (
-                    <label key={item.key} className="collector-toggle">
-                      <span>
-                        <strong>{item.label}</strong>
-                        <small>{item.meta}</small>
-                      </span>
-                      <input
-                        type="checkbox"
-                        checked={Boolean(policy[item.key])}
-                        disabled={!canManagePolicy}
-                        onChange={e => updatePolicyField(item.key, e.target.checked)}
-                      />
-                    </label>
-                  ))}
-                </div>
-              </section>
-            </div>
+              ) : null}
+            />
           ) : currentPage === 'reports' ? (
             <div className="reports-layout" aria-busy={weeklyReportLoading} data-refreshing={weeklyReportLoading && !!weeklyReport ? 'true' : undefined}>
               {weeklyReportError && <div className="auth-error" role="alert">{weeklyReportError}</div>}
