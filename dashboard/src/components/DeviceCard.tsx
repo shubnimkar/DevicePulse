@@ -2,6 +2,7 @@
 
 import { AnimatePresence, motion } from 'motion/react';
 import { AppFocusSummary, DailyAppUsageData, DailyPresenceData, Device, DeviceTab, HistoryEntry, UserRole } from '@/types';
+import StatusPill from '@/components/ui/StatusPill';
 import { isOnline, timeAgo, metricColor, primaryDisk, deviceDisplayName } from '@/lib/utils';
 import OverviewTab from '@/components/tabs/OverviewTab';
 import HardwareTab from '@/components/tabs/HardwareTab';
@@ -114,12 +115,8 @@ export default function DeviceCard({
       <div className="device-header">
         <div className="device-header-left">
           <div className="device-name-row">
-            <span className={`online-dot ${online ? 'on' : 'off'}`} />
             <span className="device-hostname">{hostname}</span>
-            <span className={`status-badge badge-${online ? (state === 'critical' ? 'critical' : state === 'warning' ? 'warning' : 'online') : 'offline'}`}>
-              <span className="dot" />
-              {online ? (state === 'critical' ? 'Critical' : state === 'warning' ? 'Warning' : 'Online') : 'Offline'}
-            </span>
+            <StatusPill status={state} />
           </div>
           <div className="device-meta-row">
             <span className="device-meta-item">{timeAgo(device.last_seen)}</span>

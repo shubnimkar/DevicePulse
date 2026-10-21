@@ -12,9 +12,8 @@ import DeviceCard from '@/components/DeviceCard';
 import HeaderClock from '@/components/HeaderClock';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import AuthMissionPanel from '@/components/AuthMissionPanel';
-import FleetTelemetryOrb from '@/components/FleetTelemetryOrb';
 import LogoMark from '@/components/LogoMark';
-import MissionMetricTile from '@/components/MissionMetricTile';
+import StatusPill, { StatusIcon } from '@/components/ui/StatusPill';
 import type { BrowserHistoryRange } from '@/components/tabs/BrowserTab';
 
 type PageView = 'dashboard' | 'inventory' | 'reports' | 'inspect' | 'settings' | 'access';
@@ -1258,7 +1257,6 @@ export default function Home() {
       };
       return stateWeight(b) + deviceRisk(b) - (stateWeight(a) + deviceRisk(a));
     });
-  const needsAttentionCount = attentionDevices.length;
   const avgCpu = devices.length > 0
     ? devices.reduce((sum, d) => sum + (d.data?.HardwareStats?.cpu?.usage_percent ?? 0), 0) / devices.length
     : 0;
@@ -1553,16 +1551,10 @@ export default function Home() {
           <div className="header-status">
             <HeaderClock />
             {!loading && fleetConn === 'live' && (
-              <span className="live-badge">
-                <span className="dot" />
-                Live
-              </span>
+              <StatusPill status="online" label="Live" />
             )}
             {fleetConn === 'stale' && (
-              <span className="live-badge is-stale" role="status">
-                <span className="dot" />
-                Reconnecting…
-              </span>
+              <span role="status"><StatusPill status="warning" label="Reconnecting…" /></span>
             )}
             {fleetConn === 'stale' && lastUpdatedAt > 0 && (
               <span className="last-updated">
@@ -1671,9 +1663,6 @@ export default function Home() {
           {/* Page header */}
           <div className="page-header">
             <div className="page-heading-copy">
-              {currentPage === 'dashboard' && (
-                <div className="page-kicker"><span aria-hidden="true" /> Live command layer</div>
-              )}
               <h1>
                 {currentPage === 'settings'
                   ? 'Settings'
@@ -1769,52 +1758,37 @@ export default function Home() {
 
           {currentPage === 'dashboard' && (
             <>
-              <section className="dashboard-tiles" aria-label="Fleet summary">
-                <MissionMetricTile
-                  label="Total devices"
-                  value={devices.length.toLocaleString()}
-                  detail="Registered endpoints"
-                  onClick={() => {
-                    setStatusFilter('all');
-                    goToPage('inventory');
-                  }}
-                />
-                <MissionMetricTile
-                  label="Online now"
-                  value={onlineCount.toLocaleString()}
-                  detail={`${fleetUptimePercent.toFixed(0)}% of fleet`}
-                  tone="online"
-                  onClick={() => {
-                    setStatusFilter('online');
-                    goToPage('inventory');
-                  }}
-                />
-                <MissionMetricTile
-                  label="Offline"
-                  value={offlineCount.toLocaleString()}
-                  detail="Missed recent check-in"
-                  tone="offline"
-                  onClick={() => {
-                    setStatusFilter('offline');
-                    goToPage('inventory');
-                  }}
-                />
-                <MissionMetricTile
-                  label="Needs attention"
-                  value={needsAttentionCount.toLocaleString()}
-                  detail={`${criticalCount} critical · ${warningCount} warning`}
-                  tone="attention"
-                  onClick={() => {
-                    setStatusFilter(criticalCount > 0 ? 'critical' : warningCount > 0 ? 'warning' : offlineCount > 0 ? 'offline' : 'all');
-                    goToPage('inventory');
-                  }}
-                />
+              <section className="kpi-tiles" aria-label="Fleet summary">
+                {([
+                  ['all', 'Total', devices.length],
+                  ['online', 'Online', onlineCount],
+                  ['warning', 'Warning', warningCount],
+                  ['critical', 'Critical', criticalCount],
+                  ['offline', 'Offline', offlineCount],
+                ] as const).map(([key, label, count]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    className={`kpi-tile kpi-${key}`}
+                    aria-label={`${label}: ${count.toLocaleString()} devices. Show in Devices`}
+                    onClick={() => {
+                      setStatusFilter(key);
+                      goToPage('inventory');
+                    }}
+                  >
+                    <span className="kpi-label">
+                      {key !== 'all' && <StatusIcon status={key} />}
+                      {label}
+                    </span>
+                    <strong>{count.toLocaleString()}</strong>
+                  </button>
+                ))}
               </section>
 
               <section className="overview-workspace">
                 <div className="attention-panel">
                   <div className="section-heading">
-                    <div><span>Priority queue</span><h2>Needs attention</h2></div>
+                    <div><h2>Needs attention</h2></div>
                     <button type="button" className="text-button" onClick={() => goToPage('inventory')}>View all devices</button>
                   </div>
                   {attentionDevices.length ? (
@@ -1827,7 +1801,7 @@ export default function Home() {
                           <button key={device.device_id} type="button" className="attention-row" onClick={() => viewDeviceDetails(device.device_id)}>
                             <span className={`attention-icon state-${state}`} aria-hidden="true">{state === 'critical' ? '!' : state === 'warning' ? '↑' : '–'}</span>
                             <span className="attention-copy"><strong>{deviceDisplayName(device)}</strong><small>{reason}</small></span>
-                            <span className={`status-badge badge-${state}`}><span className="dot" />{state === 'offline' ? 'Offline' : state}</span>
+                            <StatusPill status={state} className="attention-status" />
                             <span className="attention-seen">{timeAgo(device.last_seen)}</span>
                             <span className="row-chevron" aria-hidden="true">›</span>
                           </button>
@@ -1840,8 +1814,7 @@ export default function Home() {
                 </div>
 
                 <aside className="fleet-snapshot" aria-label="Fleet resource snapshot">
-                  <div className="section-heading"><div><span>Current snapshot</span><h2>Fleet resources</h2></div></div>
-                  <FleetTelemetryOrb connectedPercent={fleetUptimePercent} online={onlineCount} total={devices.length} />
+                  <div className="section-heading"><div><h2>Fleet resources</h2></div></div>
                   <div className="snapshot-metrics">
                   {[
                     ['CPU', avgCpu, 'blue'],
@@ -1864,7 +1837,7 @@ export default function Home() {
           {/* Status filter tabs */}
           {currentPage === 'inventory' && (
             <div className="filter-tabs" role="group" aria-label="Filter by status">
-              {filterOptions.map(opt => (
+              {filterOptions.map(opt => opt.key === 'all' ? (
                 <button
                   key={opt.key}
                   type="button"
@@ -1875,6 +1848,18 @@ export default function Home() {
                   {opt.label}
                   <span className="tab-count">{opt.count.toLocaleString()}</span>
                 </button>
+              ) : (
+                <StatusPill
+                  key={opt.key}
+                  as="button"
+                  status={opt.key}
+                  label={opt.label}
+                  className="filter-tab"
+                  pressed={statusFilter === opt.key}
+                  onClick={() => setStatusFilter(opt.key)}
+                >
+                  <span className="tab-count">{opt.count.toLocaleString()}</span>
+                </StatusPill>
               ))}
             </div>
           )}
@@ -2735,7 +2720,7 @@ export default function Home() {
                   return (
                     <article key={device.device_id} className={`inventory-mobile-card state-${state}`}>
                       <button type="button" className="mobile-device-main" onClick={() => viewDeviceDetails(device.device_id)}>
-                        <span className="mobile-device-title"><strong>{name}</strong><span className={`status-badge badge-${state}`}><span className="dot" />{state === 'online' ? 'Online' : state}</span></span>
+                        <span className="mobile-device-title"><strong>{name}</strong><StatusPill status={state} /></span>
                         <span className="mobile-device-meta">{sys?.hostname || device.hostname || device.device_id}</span>
                         <span className="mobile-device-meta">{sys?.platform || device.agent_os || 'Platform unavailable'} · {timeAgo(device.last_seen)}</span>
                         <span className="mobile-resource-row"><span>CPU <strong>{cpu === undefined ? 'Unavailable' : `${cpu.toFixed(0)}%`}</strong></span><span>Memory <strong>{ram === undefined ? 'Unavailable' : `${ram.toFixed(0)}%`}</strong></span></span>
@@ -2771,10 +2756,6 @@ export default function Home() {
                       const cpu    = hw?.cpu?.usage_percent;
                       const ram    = hw?.ram?.used_percent;
 
-                      const stateLabel = state === 'critical' ? 'Critical'
-                        : state === 'warning' ? 'Warning'
-                        : online ? 'Online' : 'Offline';
-
                       const platform = sys?.platform
                         ? `${sys.platform}${sys.architecture ? `, ${sys.architecture}` : ''}`
                         : '—';
@@ -2790,10 +2771,7 @@ export default function Home() {
                             </div>
                           </td>
                           <td>
-                            <span className={`status-badge badge-${state}`}>
-                              <span className="dot" />
-                              {stateLabel}
-                            </span>
+                            <StatusPill status={state} />
                           </td>
                           <td>
                             <div className="resource-pair">
