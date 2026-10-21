@@ -1476,7 +1476,8 @@ export default function Home() {
             </div>
           )}
 
-          {/* Page header */}
+          {/* Page header (the device detail view renders its own compact header) */}
+          {currentPage !== 'inspect' && (
           <div className="page-header">
             <div className="page-heading-copy">
               <h1>
@@ -1484,8 +1485,6 @@ export default function Home() {
                   ? 'Settings'
                   : currentPage === 'access'
                     ? 'Access Control'
-                  : currentPage === 'inspect'
-                    ? selectedDeviceName || 'Inspect Device'
                   : currentPage === 'reports'
                     ? 'Weekly Report'
                   : currentPage === 'inventory'
@@ -1497,8 +1496,6 @@ export default function Home() {
                   ? 'Enterprise data collection, retention and upload controls'
                   : currentPage === 'access'
                   ? 'Create dashboard users and assign roles'
-                  : currentPage === 'inspect'
-                  ? selectedDevice?.device_id || 'Device telemetry details'
                   : currentPage === 'reports'
                   ? 'Seven-day fleet activity and coverage'
                   : currentPage === 'inventory'
@@ -1506,13 +1503,6 @@ export default function Home() {
                   : 'Current fleet health and devices that need attention'}
               </p>
             </div>
-            {currentPage === 'inspect' ? (
-              <div className="toolbar">
-                <button type="button" className="btn" onClick={() => goToPage('inventory')}>
-                  ‹ Back to Inventory
-                </button>
-              </div>
-            ) : null}
             {currentPage === 'reports' && (
               <div className="toolbar report-toolbar">
                 <label>
@@ -1557,6 +1547,7 @@ export default function Home() {
               </div>
             )}
           </div>
+          )}
 
           {deviceActionError && <div className="auth-error" role="alert">{deviceActionError}</div>}
 
@@ -2377,6 +2368,7 @@ export default function Home() {
                   onTabChange={tab => setTab(selectedDevice.device_id, tab)}
                   onDelete={canDeleteDevices ? () => openDeleteConfirm(selectedDevice.device_id, deviceDisplayName(selectedDevice)) : undefined}
                   onPing={canPingAgents ? () => pingAgent(selectedDevice.device_id) : undefined}
+                  onBack={() => goToPage('inventory')}
                   pingStatus={agentPingStatus[selectedDevice.device_id]}
                   cachedFocus={focusCache[selectedDevice.device_id] ?? []}
                   dailyAppUsage={selectedDailyAppUsage}

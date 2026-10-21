@@ -195,9 +195,9 @@ export function browserClass(browser: string): string {
 }
 
 export function metricColor(pct: number): string {
-  if (pct > 85) return 'var(--red)';
-  if (pct > 65) return 'var(--yellow)';
-  return 'var(--green)';
+  if (pct > 85) return 'var(--status-crit-fg)';
+  if (pct > 65) return 'var(--status-warn-fg)';
+  return 'var(--status-ok-fg)';
 }
 
 export function isSystemDiskMount(mount?: string): boolean {

@@ -76,7 +76,7 @@ export default function FocusTab({ data, cachedSummaries, dailyUsage, dailyPrese
                 <GaugeBar
                   label={`${app.app_name} share of app usage time`}
                   value={pct}
-                  color={isActive ? 'var(--green)' : 'var(--blue)'}
+                  color={isActive ? 'var(--status-ok-fg)' : 'var(--accent)'}
                   height={3}
                 />
                 <div className="focus-pct">{pct.toFixed(1)}% of app usage time</div>

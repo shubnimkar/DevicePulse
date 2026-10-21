@@ -1,9 +1,10 @@
 'use client';
 
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { AppFocusSummary, DailyAppUsageData, DailyPresenceData, Device, DeviceTab, HistoryEntry, UserRole } from '@/types';
 import StatusPill from '@/components/ui/StatusPill';
-import { isOnline, timeAgo, metricColor, primaryDisk, deviceDisplayName } from '@/lib/utils';
+import { isOnline, timeAgo, primaryDisk, deviceDisplayName } from '@/lib/utils';
 import OverviewTab from '@/components/tabs/OverviewTab';
 import HardwareTab from '@/components/tabs/HardwareTab';
 import ProcessesTab from '@/components/tabs/ProcessesTab';
@@ -22,6 +23,7 @@ interface Props {
   onTabChange: (tab: DeviceTab) => void;
   onDelete?: () => void;
   onPing?: () => void;
+  onBack?: () => void;
   pingStatus?: { state: 'idle' | 'checking' | 'online' | 'offline' | 'error'; message?: string };
   cachedFocus: AppFocusSummary[];
   dailyAppUsage?: DailyAppUsageData;
@@ -57,6 +59,7 @@ export default function DeviceCard({
   onTabChange,
   onDelete,
   onPing,
+  onBack,
   pingStatus,
   cachedFocus,
   dailyAppUsage,
@@ -89,9 +92,9 @@ export default function DeviceCard({
   const risk = Math.max(cpuPct ?? 0, ramPct ?? 0, diskPct ?? 0);
   const state = !online ? 'offline' : risk >= 90 ? 'critical' : risk >= 70 ? 'warning' : 'online';
 
-  // Roving-tabindex arrow-key navigation for the tabs pattern.
-  const handleTabKeyDown = (e: React.KeyboardEvent) => {
-    const idx = TABS.findIndex(t => t.key === tab);
+  // Roving-tabindex arrow-key navigation for the tabs pattern. Index comes from the focused tab so it stays correct if focus and selection ever diverge.
+  const handleTabKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>) => {
+    const idx = TABS.findIndex(t => `device-tab-${t.key}` === e.currentTarget.id);
     let next = -1;
     if (e.key === 'ArrowRight') next = (idx + 1) % TABS.length;
     else if (e.key === 'ArrowLeft') next = (idx - 1 + TABS.length) % TABS.length;
@@ -103,98 +106,124 @@ export default function DeviceCard({
     document.getElementById(`device-tab-${TABS[next].key}`)?.focus();
   };
 
+  // Scrolling tab bar: centre the active tab and toggle edge fades (data attrs, no re-render).
+  const barRef = useRef<HTMLDivElement>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const updateFades = useCallback(() => {
+    const bar = barRef.current;
+    const wrap = wrapRef.current;
+    if (!bar || !wrap) return;
+    wrap.dataset.fadeStart = bar.scrollLeft > 4 ? 'true' : 'false';
+    wrap.dataset.fadeEnd = bar.scrollLeft + bar.clientWidth < bar.scrollWidth - 4 ? 'true' : 'false';
+  }, []);
+  useEffect(() => {
+    const bar = barRef.current;
+    const btn = document.getElementById(`device-tab-${tab}`);
+    if (bar && btn) {
+      const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      bar.scrollTo({ left: btn.offsetLeft - (bar.clientWidth - btn.offsetWidth) / 2, behavior: reduce ? 'auto' : 'smooth' });
+    }
+    updateFades();
+  }, [tab, updateFades]);
+  useEffect(() => {
+    window.addEventListener('resize', updateFades);
+    return () => window.removeEventListener('resize', updateFades);
+  }, [updateFades]);
+
+  const [copied, setCopied] = useState(false);
+  const copyId = () => {
+    void navigator.clipboard?.writeText(device.device_id).then(() => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    }).catch(() => {});
+  };
+
+  // Header chips are neutral; they only take warn/crit tones while the device is live (stale values on offline devices stay grey).
+  const chipTone = (pct: number) => !online ? 'off' : pct > 85 ? 'crit' : pct > 65 ? 'warn' : 'ok';
+
   return (
     <motion.div
-      layout
-      className={`device-card state-${state}`}
+      className="device-detail"
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ type: 'spring', stiffness: 260, damping: 30 }}
     >
       {/* Header */}
-      <div className="device-header">
-        <div className="device-header-left">
-          <div className="device-name-row">
-            <span className="device-hostname">{hostname}</span>
-            <StatusPill status={state} />
+      <header className={`dd-header state-${state}`}>
+        {onBack && (
+          <button type="button" className="dd-back" onClick={onBack}>
+            <span aria-hidden="true">‹ </span>Back to Inventory
+          </button>
+        )}
+        <div className="dd-main">
+          <div className="dd-id">
+            <div className="dd-title-row">
+              <h1 className="dd-name" title={hostname}>{hostname}</h1>
+              <StatusPill status={state} />
+              <span className="dd-seen">{timeAgo(device.last_seen)}</span>
+            </div>
+            <div className="dd-meta">
+              {sys?.platform_version && <span>{sys.os} {sys.platform_version}</span>}
+              {online && <span>{device.agent_version ? `Agent ${device.agent_version}` : 'Agent version pending'}</span>}
+              <button type="button" className="dd-copy" onClick={copyId} title={device.device_id} aria-label={`Copy device ID ${device.device_id}`}>
+                <span className="mono">{device.device_id.slice(0, 12)}…</span>
+                <span className="dd-copy-state" role="status">{copied ? 'Copied' : ''}</span>
+              </button>
+            </div>
           </div>
-          <div className="device-meta-row">
-            <span className="device-meta-item">{timeAgo(device.last_seen)}</span>
-            {online && (
-              <span className="device-badge">
-                {device.agent_version ? `Agent ${device.agent_version}` : 'Agent version pending'}
-              </span>
-            )}
-            {sys?.platform_version && (
-              <span className="device-badge">{sys.os} {sys.platform_version}</span>
-            )}
-            <span className="device-badge">{device.device_id.slice(0, 20)}…</span>
-          </div>
-        </div>
 
-        <div className="device-header-right">
-          {onPing && (
-            <>
-              {pingStatus?.message && (
-                <span className={`ping-state ping-${pingStatus.state}`}>
-                  {pingStatus.message}
-                </span>
-              )}
-              <button
-                type="button"
-                className="action-btn"
-                onClick={onPing}
-                disabled={pingStatus?.state === 'checking'}
-              >
+          <div className="dd-actions">
+            {onPing && pingStatus?.message && (
+              <span className={`ping-state ping-${pingStatus.state}`}>{pingStatus.message}</span>
+            )}
+            {cpuPct !== undefined && (
+              <span className={`dd-chip tone-${chipTone(cpuPct)}`} title={online ? undefined : 'Last reported value'}>CPU <b>{cpuPct.toFixed(0)}%</b></span>
+            )}
+            {ramPct !== undefined && (
+              <span className={`dd-chip tone-${chipTone(ramPct)}`} title={online ? undefined : 'Last reported value'}>MEM <b>{ramPct.toFixed(0)}%</b></span>
+            )}
+            {onPing && (
+              <button type="button" className="action-btn" onClick={onPing} disabled={pingStatus?.state === 'checking'}>
                 {pingStatus?.state === 'checking' ? 'Pinging...' : 'Ping Agent'}
               </button>
-            </>
-          )}
-          {cpuPct !== undefined && (
-            <span className="resource-pill" style={{ color: metricColor(cpuPct) }}>
-              CPU {cpuPct.toFixed(0)}%
-            </span>
-          )}
-          {ramPct !== undefined && (
-            <span className="resource-pill" style={{ color: metricColor(ramPct) }}>
-              MEM {ramPct.toFixed(0)}%
-            </span>
-          )}
-          {onDelete && (
-            <button className="delete-btn" title="Remove device" onClick={onDelete} aria-label={`Remove ${hostname}`}>
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-                <path d="M2 4h12M5 4V2h6v2M6 7v5M10 7v5M3 4l1 10h8l1-10"/>
-              </svg>
-            </button>
-          )}
+            )}
+            {onDelete && (
+              <button type="button" className="dd-icon-btn" title="Remove device" onClick={onDelete} aria-label={`Remove ${hostname}`}>
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
+                  <path d="M2 4h12M5 4V2h6v2M6 7v5M10 7v5M3 4l1 10h8l1-10"/>
+                </svg>
+              </button>
+            )}
+          </div>
         </div>
-      </div>
+      </header>
 
-      {/* Tab bar */}
-      <div className="tab-bar" role="tablist" aria-label="Device details">
-        {TABS.map(t => (
-          <motion.button
-            key={t.key}
-            type="button"
-            id={`device-tab-${t.key}`}
-            role="tab"
-            aria-selected={tab === t.key}
-            aria-controls="device-tab-panel"
-            tabIndex={tab === t.key ? 0 : -1}
-            className={`tab-btn ${tab === t.key ? 'active' : ''}`}
-            onClick={() => onTabChange(t.key)}
-            onKeyDown={handleTabKeyDown}
-            whileTap={{ scale: 0.98 }}
-          >
-            {t.icon}
-            {t.label}
-          </motion.button>
-        ))}
+      {/* Tab bar: scrolls horizontally on narrow widths (no "More" menu) */}
+      <div className="dd-tabs" ref={wrapRef} data-fade-start="false" data-fade-end="false">
+        <div className="dd-tabbar" role="tablist" aria-label="Device details" ref={barRef} onScroll={updateFades}>
+          {TABS.map(t => (
+            <button
+              key={t.key}
+              type="button"
+              id={`device-tab-${t.key}`}
+              role="tab"
+              aria-selected={tab === t.key}
+              aria-controls="device-tab-panel"
+              tabIndex={tab === t.key ? 0 : -1}
+              className={`dd-tab ${tab === t.key ? 'active' : ''}`}
+              onClick={() => onTabChange(t.key)}
+              onKeyDown={handleTabKeyDown}
+            >
+              {t.icon}
+              {t.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Tab panel */}
       <motion.div
-        className="tab-panel"
+        className="dd-panel"
         id="device-tab-panel"
         role="tabpanel"
         aria-labelledby={`device-tab-${tab}`}

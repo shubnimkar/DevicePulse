@@ -10,7 +10,7 @@ function BatteryCard({ battery }: { battery?: BatteryStat }) {
   const state = battery.state ?? 'unknown';
   const rateW = Number.isFinite(battery.charge_rate_w) ? battery.charge_rate_w : 0;
   const isCharging = state === 'charging' || state === 'full' || state === 'idle';
-  const color = isCharging ? 'var(--green)' : pct <= 20 ? 'var(--red)' : pct <= 40 ? 'var(--yellow)' : 'var(--green)';
+  const color = isCharging ? 'var(--status-ok-fg)' : pct <= 20 ? 'var(--status-crit-fg)' : pct <= 40 ? 'var(--status-warn-fg)' : 'var(--status-ok-fg)';
   const stateLabel: Record<string, string> = { charging: 'Charging', full: 'Full', idle: 'Plugged In', discharging: 'Discharging', empty: 'Empty', unknown: 'Unknown' };
 
   return (
@@ -114,11 +114,11 @@ export default function HardwareTab({ hw }: Props) {
           <div className="hw-label">Network {net?.interface}</div>
           <div className="net-io-pair">
             <div className="net-io-item">
-              <span className="net-io-arrow" style={{ color: 'var(--cyan)' }}>↑</span>
+              <span className="net-io-arrow" style={{ color: 'var(--accent)' }}>↑</span>
               <span className="net-io-val">{net ? formatBytes(net.bytes_sent) : 'Unavailable'}</span>
             </div>
             <div className="net-io-item">
-              <span className="net-io-arrow" style={{ color: 'var(--blue)' }}>↓</span>
+              <span className="net-io-arrow" style={{ color: 'var(--accent)' }}>↓</span>
               <span className="net-io-val">{net ? formatBytes(net.bytes_recv) : 'Unavailable'}</span>
             </div>
           </div>
@@ -187,8 +187,8 @@ export default function HardwareTab({ hw }: Props) {
               {hw.network.map((n, i) => (
                 <tr key={i}>
                   <td><span className="mono">{n.interface}</span></td>
-                  <td><span className="mono" style={{ color: 'var(--cyan)' }}>↑ {formatBytes(n.bytes_sent)}</span></td>
-                  <td><span className="mono" style={{ color: 'var(--blue)' }}>↓ {formatBytes(n.bytes_recv)}</span></td>
+                  <td><span className="mono" style={{ color: 'var(--accent)' }}>↑ {formatBytes(n.bytes_sent)}</span></td>
+                  <td><span className="mono" style={{ color: 'var(--accent)' }}>↓ {formatBytes(n.bytes_recv)}</span></td>
                 </tr>
               ))}
             </tbody>

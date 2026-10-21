@@ -5300,3 +5300,279 @@ body:has(.app-shell)::before { display: none; }
   .mobile-device-main { min-height: 44px; padding: var(--space-3) var(--space-4); }
   .mobile-device-actions .action-btn { min-height: 44px; padding-inline: var(--space-4); }
 }
+
+/* ── Console redesign (phase 7): device detail (components/DeviceCard.tsx) ─────
+   New dd-* classes replace .device-card/.tab-bar/.tab-btn/.tab-panel in DeviceCard
+   (those older rules are now unused by any .tsx and are left in place on purpose).
+   Tab-content restyle is scoped under .dd-panel so it out-ranks the single-class
+   legacy rules for the same elements (checked: no ancestor-qualified legacy rules). */
+/* Sticky tab bar needs a non-clipping ancestor; .app-main never scrolls itself (window scrolls). */
+.shell .app-main { overflow: visible; }
+
+.device-detail { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+
+.dd-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-4) var(--space-3);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--status-ok-fg);
+  border-radius: var(--radius);
+  min-width: 0;
+}
+.dd-header.state-warning  { border-left-color: var(--status-warn-fg); }
+.dd-header.state-critical { border-left-color: var(--status-crit-fg); }
+.dd-header.state-offline  { border-left-color: var(--status-off-fg); }
+
+.dd-back {
+  align-self: flex-start;
+  min-height: 32px;
+  margin-inline: calc(var(--space-2) * -1);
+  padding: 0 var(--space-2);
+  background: none;
+  border: 0;
+  border-radius: var(--radius);
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.dd-back:hover { color: var(--text-1); background: var(--surface-2); }
+
+.dd-main { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3) var(--space-4); flex-wrap: wrap; min-width: 0; }
+.dd-id { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; flex: 1 1 320px; }
+.dd-title-row { display: flex; align-items: center; gap: var(--space-2) var(--space-3); flex-wrap: wrap; min-width: 0; }
+.dd-name {
+  margin: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-1);
+  font-size: var(--text-lg);
+  font-weight: 650;
+  letter-spacing: -.01em;
+  line-height: 1.25;
+}
+.dd-seen { color: var(--text-2); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.dd-meta { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-1) var(--space-3); color: var(--text-2); font-size: var(--text-xs); min-width: 0; }
+.dd-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 24px;
+  padding: 0 var(--space-2);
+  color: var(--text-2);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.dd-copy:hover { color: var(--text-1); border-color: var(--border-2); }
+.dd-copy .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.dd-copy-state { color: var(--accent); }
+.dd-copy-state:empty { display: none; }
+
+.dd-actions { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; min-width: 0; }
+.dd-actions .ping-state { max-width: 240px; font-weight: 500; color: var(--text-2); }
+.dd-actions .ping-online { color: var(--status-ok-fg); }
+.dd-actions .ping-offline, .dd-actions .ping-error { color: var(--status-crit-fg); }
+.dd-actions .ping-checking { color: var(--accent); }
+.dd-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  padding: 2px var(--space-2);
+  color: var(--text-2);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: var(--text-xs);
+}
+.dd-chip b { font-family: var(--font-mono); font-weight: 600; font-variant-numeric: tabular-nums; }
+.dd-chip.tone-ok b   { color: var(--accent); }
+.dd-chip.tone-warn   { border-color: var(--status-warn-border); }
+.dd-chip.tone-warn b { color: var(--status-warn-fg); }
+.dd-chip.tone-crit   { border-color: var(--status-crit-border); }
+.dd-chip.tone-crit b { color: var(--status-crit-fg); }
+.dd-chip.tone-off    { background: var(--status-off-bg); border-color: var(--status-off-border); }
+.dd-chip.tone-off b  { color: var(--status-off-fg); }
+.dd-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  color: var(--text-2);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.dd-icon-btn:hover { color: var(--status-crit-fg); border-color: var(--status-crit-border); background: var(--status-crit-bg); }
+
+/* Sticky segmented tab bar */
+.dd-tabs { position: sticky; top: 48px; z-index: 25; min-width: 0; }
+.dd-tabbar {
+  display: flex;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.dd-tabbar::-webkit-scrollbar { display: none; }
+.dd-tab {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: var(--space-2);
+  min-height: 40px;
+  padding: 0 var(--space-3);
+  color: var(--text-2);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.dd-tab svg { opacity: .7; }
+.dd-tab:hover { color: var(--text-1); background: var(--surface-2); }
+.dd-tab.active { color: var(--text-1); font-weight: 650; background: var(--accent-dim); border-color: var(--accent-border); }
+.dd-tab.active svg { opacity: 1; color: var(--accent); }
+.dd-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* Edge fades signal more tabs off-screen; toggled via data attributes from the scroll handler. */
+.dd-tabs::before, .dd-tabs::after {
+  content: '';
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  width: 28px;
+  z-index: 1;
+  pointer-events: none;
+  opacity: 0;
+  border-radius: var(--radius);
+}
+.dd-tabs::before { left: 1px;  background: linear-gradient(to right, var(--surface), transparent); }
+.dd-tabs::after  { right: 1px; background: linear-gradient(to left,  var(--surface), transparent); }
+.dd-tabs[data-fade-start='true']::before, .dd-tabs[data-fade-end='true']::after { opacity: 1; }
+
+.dd-panel {
+  min-width: 0;
+  min-height: 200px;
+  padding: var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.dd-panel:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Tab content: consistent headings, surfaces, labels (Overview, Hardware, Security, App Usage; others inherit headings) */
+.dd-panel .section-title,
+.dd-panel .sub-section-title,
+.dd-panel .sec-card-title {
+  margin-bottom: var(--space-3);
+  padding-bottom: 0;
+  border-bottom: 0;
+  color: var(--text-1);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.dd-panel .overview-grid { gap: var(--space-5); }
+.dd-panel .sub-section { margin-top: var(--space-5); }
+.dd-panel .resource-row { grid-template-columns: repeat(auto-fill, minmax(min(100%, 160px), 1fr)); gap: var(--space-3); }
+.dd-panel .hw-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: var(--space-3); }
+.dd-panel .security-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: var(--space-3); }
+.dd-panel .resource-card,
+.dd-panel .hw-card,
+.dd-panel .stat-chip,
+.dd-panel .sec-card,
+.dd-panel .focus-item,
+.dd-panel .usb-item,
+.dd-panel .mini-proc-row {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.dd-panel .resource-card, .dd-panel .hw-card, .dd-panel .sec-card { padding: var(--space-4); gap: var(--space-2); }
+.dd-panel .focus-item { padding: var(--space-3) var(--space-4); }
+.dd-panel .focus-item.is-active { background: var(--status-ok-bg); border-color: var(--status-ok-border); }
+.dd-panel .stat-chip { padding: var(--space-3) var(--space-4); min-width: 96px; }
+.dd-panel .stat-chip.warn { background: var(--status-warn-bg); border-color: var(--status-warn-border); }
+.dd-panel .stat-chip.warn strong { color: var(--status-warn-fg); }
+.dd-panel .stat-chip strong { font-size: var(--text-lg); font-variant-numeric: tabular-nums; }
+.dd-panel .rc-label, .dd-panel .hw-label, .dd-panel .stat-chip span, .dd-panel .sec-label,
+.dd-panel .mini-proc-header, .dd-panel .battery-state-label, .dd-panel .ra-history-title, .dd-panel .cmd-status {
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-2);
+}
+.dd-panel .battery-state-label { font-weight: 600; }
+.dd-panel .rc-sub, .dd-panel .hw-sub, .dd-panel .focus-pct, .dd-panel .focus-sessions { font-family: var(--font-sans); font-variant-numeric: tabular-nums; color: var(--text-2); }
+.dd-panel .rc-value, .dd-panel .net-val, .dd-panel .net-io-val, .dd-panel .mini-pct, .dd-panel .mini-focus-dur, .dd-panel .focus-duration { font-variant-numeric: tabular-nums; }
+.dd-panel .hw-value { font-size: var(--text-xl); letter-spacing: 0; font-variant-numeric: tabular-nums; }
+.dd-panel .focus-duration { color: var(--text-1); }
+.dd-panel .pct-cpu, .dd-panel .pct-mem { color: var(--text-2); }
+.dd-panel .mini-focus-name.is-active, .dd-panel .focus-current-app { color: var(--status-ok-fg); }
+.dd-panel .mini-focus-name { min-width: 0; flex: 0 1 140px; }
+.dd-panel .live-dot { background: var(--status-ok-fg); }
+.dd-panel .focus-live-tag, .dd-panel .focus-current { background: var(--status-ok-bg); border-color: var(--status-ok-border); color: var(--status-ok-fg); }
+.dd-panel .focus-current-label { color: var(--text-2); }
+.dd-panel .focus-toolbar { margin-bottom: var(--space-4); }
+.dd-panel .focus-archive-note { color: var(--text-2); font-weight: 500; }
+.dd-panel .focus-app-name { min-width: 0; }
+.dd-panel .disk-table-wrap { border-radius: var(--radius); }
+.dd-panel .sec-value.warn, .dd-panel .cmd-st-pending { color: var(--status-warn-fg); }
+.dd-panel .sec-value.ok, .dd-panel .cmd-st-success { color: var(--status-ok-fg); }
+.dd-panel .cmd-st-delivered { color: var(--accent); }
+.dd-panel .cmd-st-failed { color: var(--status-crit-fg); }
+.dd-panel .pending-item, .dd-panel .ra-offline-note { color: var(--status-warn-fg); background: var(--status-warn-bg); border-color: var(--status-warn-border); border-radius: var(--radius); }
+.dd-panel .pending-item.muted { color: var(--text-2); background: transparent; border-color: var(--border); }
+.dd-panel .ra-notice-ok  { color: var(--status-ok-fg);   background: var(--status-ok-bg);   border-color: var(--status-ok-border); }
+.dd-panel .ra-notice-err { color: var(--status-crit-fg); background: var(--status-crit-bg); border-color: var(--status-crit-border); }
+.dd-panel .ra-btn { min-height: 44px; border-radius: var(--radius); background: var(--surface); }
+.dd-panel .ra-btn:hover:not(:disabled) { background: var(--surface-3); transform: none; }
+.dd-panel .ra-btn-danger { border-color: var(--status-crit-border); }
+.dd-panel .ra-btn-danger:hover:not(:disabled) { background: var(--status-crit-bg); border-color: var(--status-crit-fg); }
+.dd-panel .ra-btn-release { border-color: var(--status-ok-border); }
+.dd-panel .ra-btn-release:hover:not(:disabled) { background: var(--status-ok-bg); border-color: var(--status-ok-fg); }
+.dd-panel .ra-history-title { opacity: 1; }
+.dd-panel .ra-refresh { min-height: 32px; padding: 0 var(--space-2); font-size: var(--text-xs); opacity: 1; color: var(--text-2); }
+.dd-panel .cmd-row { border-color: var(--border); border-radius: var(--radius); }
+.dd-panel .cmd-meta { opacity: 1; color: var(--text-2); }
+.dd-panel .usb-speed { color: var(--accent); background: var(--accent-dim); border-color: var(--accent-border); font-size: var(--text-xs); }
+.dd-panel .usb-meta { color: var(--text-2); }
+
+@media (max-width: 767px) {
+  .dd-header { padding-inline: var(--space-3); }
+  .dd-actions { width: 100%; }
+  .dd-actions .action-btn { min-height: 44px; padding-inline: var(--space-4); }
+  .dd-icon-btn { width: 44px; height: 44px; }
+  .dd-copy { min-height: 32px; }
+  .dd-tab { min-height: 44px; }
+  .dd-panel { padding: var(--space-3); }
+  .dd-panel .mini-focus-name { flex-basis: 96px; }
+}
+@media (max-width: 480px) {
+  .dd-panel .resource-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dd-panel .stat-chip { flex: 1 1 calc(50% - var(--space-2)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dd-panel .live-dot { animation: none; }
+}

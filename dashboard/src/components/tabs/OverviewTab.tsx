@@ -86,14 +86,14 @@ export default function OverviewTab({ data, cachedFocus, dailyAppUsage }: Props)
             <div className="resource-card">
               <div className="rc-header">
                 <span className="rc-label">Battery</span>
-                <span className="rc-value" style={{ color: battery.state === 'charging' || battery.state === 'full' ? 'var(--green)' : battery.percent <= 20 ? 'var(--red)' : 'var(--yellow)' }}>
+                <span className="rc-value" style={{ color: battery.state === 'charging' || battery.state === 'full' ? 'var(--status-ok-fg)' : battery.percent <= 20 ? 'var(--status-crit-fg)' : 'var(--status-warn-fg)' }}>
                   {battery.percent.toFixed(0)}%
                 </span>
               </div>
               <GaugeBar
                 label="Battery level"
                 value={battery.percent}
-                color={battery.state === 'charging' || battery.state === 'full' ? 'var(--green)' : battery.percent <= 20 ? 'var(--red)' : 'var(--yellow)'}
+                color={battery.state === 'charging' || battery.state === 'full' ? 'var(--status-ok-fg)' : battery.percent <= 20 ? 'var(--status-crit-fg)' : 'var(--status-warn-fg)'}
               />
               <div className="rc-sub" style={{ textTransform: 'capitalize' }}>{battery.state}</div>
             </div>
@@ -145,13 +145,13 @@ export default function OverviewTab({ data, cachedFocus, dailyAppUsage }: Props)
                 <span className="mini-proc-name" title={p.name}>{p.name}</span>
                 <div className="mini-metric mini-metric-cpu" aria-label={`CPU ${p.cpu.toFixed(1)}%`}>
                   <div className="mini-bar-track">
-                    <div className="mini-bar-fill" style={{ width: `${Math.min(p.cpu, 100)}%`, background: 'var(--yellow)' }} />
+                    <div className="mini-bar-fill" style={{ width: `${Math.min(p.cpu, 100)}%`, background: 'var(--accent)' }} />
                   </div>
                   <span className="mini-pct pct-cpu">{p.cpu.toFixed(1)}%</span>
                 </div>
                 <div className="mini-metric mini-metric-mem" aria-label={`Memory ${p.memory.toFixed(1)}%`}>
                   <div className="mini-bar-track">
-                    <div className="mini-bar-fill" style={{ width: `${Math.min(p.memory, 100)}%`, background: 'var(--cyan)' }} />
+                    <div className="mini-bar-fill" style={{ width: `${Math.min(p.memory, 100)}%`, background: 'var(--accent)' }} />
                   </div>
                   <span className="mini-pct pct-mem">{p.memory.toFixed(1)}%</span>
                 </div>
@@ -187,7 +187,7 @@ export default function OverviewTab({ data, cachedFocus, dailyAppUsage }: Props)
                     {app.app_name}
                   </span>
                   <div className="mini-bar-track" style={{ flex: 1 }}>
-                    <div className="mini-bar-fill" style={{ width: `${pct}%`, background: isActive ? 'var(--green)' : 'var(--blue)' }} />
+                    <div className="mini-bar-fill" style={{ width: `${pct}%`, background: isActive ? 'var(--status-ok-fg)' : 'var(--accent)' }} />
                   </div>
                   <span className="mini-focus-dur">{formatDuration(app.total_focus_seconds)}</span>
                 </div>
