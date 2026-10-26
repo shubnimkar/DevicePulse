@@ -129,6 +129,24 @@ func linuxGNOMEExtensionActiveWindow() string {
 	return ""
 }
 
+// gnomeExtensionRunning reports whether the DevicePulse GNOME Shell extension
+// currently owns its name on the session bus.
+func gnomeExtensionRunning() bool {
+	conn, err := dbus.SessionBus()
+	if err != nil {
+		return false
+	}
+	var owned bool
+	if err := conn.BusObject().Call("org.freedesktop.DBus.NameHasOwner", 0, "org.devicepulse.Shell").Store(&owned); err != nil {
+		return false
+	}
+	return owned
+}
+
+// GnomeExtensionRunning is the exported form used by the extension installer to
+// tell "installed and active" from "installed, waiting for a new login".
+func GnomeExtensionRunning() bool { return gnomeExtensionRunning() }
+
 // ─── KDE Plasma ───────────────────────────────────────────────────────────────
 
 // linuxWaylandKDEActiveWindow queries KWin via D-Bus.

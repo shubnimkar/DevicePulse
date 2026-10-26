@@ -819,6 +819,14 @@ func runWindowOnlyMode() {
 		log.Fatalf("window_only: ActiveWindowTracker failed to start: %v", err)
 	}
 	defer activeWin.Stop()
+	// On GNOME Wayland the focused window is only available through our Shell
+	// extension; install and enable it, and report while it is not active yet.
+	go maintainFocusExtension(activeWin)
+	// After a self-update the root service re-executes; this per-user process
+	// restarts itself too so it does not keep running the old code until login.
+	if exe, err := os.Executable(); err == nil {
+		go restartWhenBinaryReplaced(exe, time.Minute)
+	}
 
 	// Use the same sync interval as the main service (default 10s).
 	// Policy poller is not started here — the root service handles that.

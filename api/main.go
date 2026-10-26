@@ -104,17 +104,17 @@ func (fc *FocusCache) applyFocusSummaries(deviceID string, summaries []interface
 			continue
 		}
 		name, _ := m["app_name"].(string)
-		name = strings.TrimSpace(name)
+		name = displayAppName(name)
 		if !isVisibleAppUsageName(name) {
 			continue
 		}
 		dur, _ := toFloat(m["total_focus_seconds"])
 		sessions, _ := toFloat(m["session_count"])
 
-		e, ok := apps[name]
+		e, ok := apps[appKey(name)]
 		if !ok {
 			e = &AppFocusEntry{AppName: name}
-			apps[name] = e
+			apps[appKey(name)] = e
 		}
 		e.TotalFocusS += dur
 		e.SessionCount += int(sessions)
@@ -1377,12 +1377,12 @@ func appUsageSummaryValues(raw interface{}) (string, float64, int) {
 		appName, _ := m["app_name"].(string)
 		seconds, _ := toFloat(firstNonNil(m["total_seconds"], m["total_focus_seconds"]))
 		sessions, _ := toFloat(m["session_count"])
-		return strings.TrimSpace(appName), seconds, int(sessions)
+		return displayAppName(appName), seconds, int(sessions)
 	case map[string]interface{}:
 		appName, _ := m["app_name"].(string)
 		seconds, _ := toFloat(firstNonNil(m["total_seconds"], m["total_focus_seconds"]))
 		sessions, _ := toFloat(m["session_count"])
-		return strings.TrimSpace(appName), seconds, int(sessions)
+		return displayAppName(appName), seconds, int(sessions)
 	default:
 		return "", 0, 0
 	}
@@ -1501,7 +1501,7 @@ func extractFocusSessions(payload map[string]interface{}) []interface{} {
 			continue
 		}
 		appName, _ := session["app_name"].(string)
-		appName = strings.TrimSpace(appName)
+		appName = displayAppName(appName)
 		if !isVisibleAppUsageName(appName) {
 			continue
 		}
@@ -1558,7 +1558,7 @@ func normalizeActivitySessions(sessions []interface{}, date string, loc *time.Lo
 			continue
 		}
 		appName, _ := m["app_name"].(string)
-		appName = strings.TrimSpace(appName)
+		appName = displayAppName(appName)
 		if !isVisibleAppUsageName(appName) {
 			continue
 		}
@@ -1576,7 +1576,7 @@ func normalizeActivitySessions(sessions []interface{}, date string, loc *time.Lo
 		if !end.After(start) {
 			continue
 		}
-		key := fmt.Sprintf("%s|%d|%d", appName, start.UnixNano(), end.UnixNano())
+		key := fmt.Sprintf("%s|%d|%d", appKey(appName), start.UnixNano(), end.UnixNano())
 		if _, exists := seen[key]; exists {
 			continue
 		}
@@ -1684,7 +1684,7 @@ func mergeActivitySessions(sessions []interface{}, maxGap time.Duration) []inter
 			continue
 		}
 		appName, _ := m["app_name"].(string)
-		appName = strings.TrimSpace(appName)
+		appName = displayAppName(appName)
 		if !isVisibleAppUsageName(appName) {
 			continue
 		}
@@ -1699,7 +1699,7 @@ func mergeActivitySessions(sessions []interface{}, maxGap time.Duration) []inter
 
 		// Merge into the current span when it is the same app and this
 		// fragment starts within (or overlaps) the tolerated gap.
-		if cur != nil && cur["app_name"] == appName && !start.After(curEnd.Add(maxGap)) {
+		if cur != nil && appKey(cur["app_name"].(string)) == appKey(appName) && !start.After(curEnd.Add(maxGap)) {
 			if end.After(curEnd) {
 				curEnd = end
 				cur["end_time"] = curEnd.Format(time.RFC3339Nano)
@@ -1741,15 +1741,15 @@ func summarizeActivitySessions(sessions []interface{}) ([]interface{}, float64) 
 			continue
 		}
 		appName, _ := m["app_name"].(string)
-		appName = strings.TrimSpace(appName)
+		appName = displayAppName(appName)
 		duration, ok := toFloat(m["duration_seconds"])
 		if !isVisibleAppUsageName(appName) || !ok || duration <= 0 {
 			continue
 		}
-		item, ok := totals[appName]
+		item, ok := totals[appKey(appName)]
 		if !ok {
 			item = &appTotal{AppName: appName}
-			totals[appName] = item
+			totals[appKey(appName)] = item
 		}
 		item.TotalSeconds += duration
 		item.SessionCount++
@@ -1816,7 +1816,7 @@ func clippedActivitySessionsForPresence(sessions []interface{}, windows []activi
 			}
 		}
 		appName, _ := m["app_name"].(string)
-		appName = strings.TrimSpace(appName)
+		appName = displayAppName(appName)
 		if !isVisibleAppUsageName(appName) {
 			continue
 		}
@@ -5033,10 +5033,10 @@ func weeklyReportHandler(w http.ResponseWriter, r *http.Request) {
 			if !isVisibleAppUsageName(appName) || appSeconds <= 0 {
 				continue
 			}
-			total := appTotals[appName]
+			total := appTotals[appKey(appName)]
 			if total == nil {
 				total = &appTotal{AppName: appName, devicePresence: map[string]struct{}{}}
-				appTotals[appName] = total
+				appTotals[appKey(appName)] = total
 			}
 			total.TotalSeconds += appSeconds
 			total.SessionCount += appSessions

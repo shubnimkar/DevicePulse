@@ -31,47 +31,53 @@ import (
 	"strings"
 )
 
-// getForegroundAppLinux is the Linux entry point called from active_window.go.
-func getForegroundAppLinux() string {
+// getForegroundAppLinuxDetailed is the Linux entry point called from active_window.go.
+// It returns the focused app and which backend answered, so the dashboard can say
+// how far to trust the numbers.
+//
+// On a Wayland session only Wayland-native sources are used. The X11 query goes
+// through XWayland there, which reports stale focus whenever a native Wayland
+// window (Firefox, for example) is focused, so it is never mixed in.
+func getForegroundAppLinuxDetailed() (string, string) {
 	hasDisplay := os.Getenv("DISPLAY") != ""
-	hasWayland := os.Getenv("WAYLAND_DISPLAY") != "" || os.Getenv("XDG_SESSION_TYPE") == "wayland"
+	isWayland := os.Getenv("WAYLAND_DISPLAY") != "" || os.Getenv("XDG_SESSION_TYPE") == "wayland"
 
-	// ── Strategy 1: X11 ──────────────────────────────────────────────────────
-	if hasDisplay {
-		if name := getActiveWindowX11(); name != "" {
-			return cleanLinuxForegroundApp(name)
+	if isWayland {
+		if name := linuxGNOMEExtensionActiveWindow(); name != "" {
+			return cleanLinuxForegroundApp(name), "gnome-extension"
 		}
-	}
-
-	// ── Strategy 2-4: Wayland ────────────────────────────────────────────────
-	if hasWayland {
+		if gnomeExtensionRunning() {
+			return "", "gnome-extension" // the extension answers: nothing is focused right now
+		}
 		if name := getActiveWindowWaylandGNOME(); name != "" {
-			return cleanLinuxForegroundApp(name)
+			return cleanLinuxForegroundApp(name), "gnome-eval"
 		}
 		if name := getActiveWindowWaylandKDE(); name != "" {
-			return cleanLinuxForegroundApp(name)
+			return cleanLinuxForegroundApp(name), "kde"
 		}
 		if name := getActiveWindowSway(); name != "" {
-			return cleanLinuxForegroundApp(name)
+			return cleanLinuxForegroundApp(name), "sway"
+		}
+	} else if hasDisplay {
+		if name := getActiveWindowX11(); name != "" {
+			return cleanLinuxForegroundApp(name), "x11"
 		}
 	}
 
-	// ── Strategy 5: Root-service session injection ───────────────────────────
-	// When neither DISPLAY nor WAYLAND_DISPLAY is set (root systemd service),
-	// probe /proc/<pid>/environ of human user processes to find their display
-	// session and attempt X11/Wayland queries on their behalf.
-	if !hasDisplay && !hasWayland {
+	// Root service with no display of its own: look inside the logged-in user's session.
+	if !hasDisplay && !isWayland {
 		if name := getActiveWindowFromUserSessions(); name != "" {
-			return cleanLinuxForegroundApp(name)
+			return cleanLinuxForegroundApp(name), "user-session"
 		}
-		// Still nothing — return empty rather than surfacing a background daemon.
-		return ""
+		return "", sourceNone
 	}
 
-	// ── Strategy 6: /proc fallback ───────────────────────────────────────────
-	// Reaches here only when we have a display env but the display-server
-	// queries all failed (e.g. XAUTHORITY permission error).
-	return cleanLinuxForegroundApp(getActiveWindowProcFallback())
+	// No real source answered. /proc can only guess which app is busy, which is
+	// not the focused window, so this is opt-in.
+	if allowProcGuess() {
+		return cleanLinuxForegroundApp(getActiveWindowProcFallback()), sourceProcGuess
+	}
+	return "", sourceNone
 }
 
 // getActiveWindowFromUserSessions probes /proc/<pid>/environ for all human user
@@ -209,6 +215,10 @@ func getActiveWindowFromUserSessions() string {
 		}
 	}
 
-	// Last resort: /proc-based desktop app scan across all user processes.
-	return getActiveWindowProcFallback()
+	// Last resort: /proc-based desktop app scan across all user processes. It only
+	// guesses, so it is opt-in (see allowProcGuess).
+	if allowProcGuess() {
+		return getActiveWindowProcFallback()
+	}
+	return ""
 }

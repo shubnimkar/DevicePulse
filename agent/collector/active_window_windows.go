@@ -66,8 +66,12 @@ func getForegroundAppWindows() string {
 	hwnd, _, _ := procGetForegroundWindow.Call()
 	if hwnd == 0 {
 		// Running in Session 0 (SYSTEM service) — foreground window is not
-		// accessible. Fall back to finding the active console session's top process.
-		return getForegroundAppFromConsoleSession()
+		// accessible. The console-session fallback only guesses (busiest process),
+		// which is not focus, so it is used only when explicitly allowed.
+		if allowProcGuess() {
+			return getForegroundAppFromConsoleSession()
+		}
+		return ""
 	}
 
 	// Step 2: Get the PID that owns this window.
