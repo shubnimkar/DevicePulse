@@ -234,6 +234,7 @@ export default function Home() {
   const [buildForm, setBuildForm] = useState<AgentBuildForm>(DEFAULT_BUILD_FORM);
   const [releaseStatus, setReleaseStatus] = useState('');
   const [rolloutSaving, setRolloutSaving] = useState(false);
+  const [activationRequired, setActivationRequired] = useState(false);
   const [showAllBuildHistory, setShowAllBuildHistory] = useState(false);
   const [activeTab, setActiveTab]     = useState<Record<string, DeviceTab>>({});
   const [focusCache, setFocusCache]   = useState<Record<string, AppFocusSummary[]>>({});
@@ -571,6 +572,7 @@ export default function Home() {
         const data = await res.json();
         setAgentReleases(data.releases ?? []);
         setAllAgentReleases(data.all_releases ?? []);
+        setActivationRequired(!!data.activation_required);
       }
     } catch {}
   }, [apiFetch, canManageReleases]);
@@ -924,7 +926,10 @@ export default function Home() {
     }
   };
 
-  const rolloutLatestAgents = async () => {
+  // useActive=false pushes the highest published version to every device;
+  // useActive=true pushes the currently ACTIVE version, moving devices on a newer
+  // build back to it (rollback).
+  const rolloutLatestAgents = async (useActive = false) => {
     if (!canManageReleases || rolloutSaving) return;
     setReleaseStatus('');
     setRolloutSaving(true);
@@ -932,6 +937,7 @@ export default function Home() {
       const res = await apiFetch('/update/release/rollout-latest', {
         method: 'POST',
         headers: adminHeaders(),
+        ...(useActive ? { body: JSON.stringify({ use_active: true }) } : {}),
       });
       if (!res.ok) {
         setReleaseStatus(await readApiError(res));
@@ -939,7 +945,7 @@ export default function Home() {
       }
       const data: AgentRolloutResponse = await res.json();
       const targets = data.activated.map(rel => `${rel.os}/${rel.arch} ${rel.version}`).join(', ');
-      setReleaseStatus(`Immediate rollout started for ${targets}. ${data.devices_marked} device${data.devices_marked === 1 ? '' : 's'} will check on their next heartbeat.`);
+      setReleaseStatus(`${useActive ? 'Rollback to the active version' : 'Immediate rollout'} started for ${targets}. ${data.devices_marked} device${data.devices_marked === 1 ? '' : 's'} will check on their next heartbeat.`);
       await fetchAgentReleases();
       await fetchAll();
     } catch {
@@ -1627,12 +1633,24 @@ export default function Home() {
                       >
                         {rolloutSaving ? 'Starting...' : 'Update Agents'}
                       </button>
+                      <button
+                        type="button"
+                        className="action-btn"
+                        title="Move every device to the currently active version, including devices on a newer build"
+                        onClick={() => void rolloutLatestAgents(true)}
+                        disabled={rolloutSaving || allAgentReleases.length === 0}
+                      >
+                        Roll back to active
+                      </button>
                       <button type="button" className="action-btn" onClick={() => { void fetchAgentReleases(); void fetchAgentBuildJobs(); }}>
                         Refresh
                       </button>
                     </div>
                   </header>
 
+                  {activationRequired && (
+                    <p className="rel-empty">New builds are held back until you activate them. Agents keep updating only to the active version.</p>
+                  )}
                   <div className="rel-grid">
                     {releasesByOS.map(target => (
                       <section key={target.os} className={`rel-card${target.releases.length ? '' : ' is-empty'}`} aria-label={`${target.label} releases`}>
@@ -1673,6 +1691,18 @@ export default function Home() {
                         ) : (
                           <p className="rel-empty">No binary published yet. Build a version below to publish one.</p>
                         )}
+                        {allAgentReleases.filter(rel => rel.os === target.os && rel.pending_activation).map(rel => (
+                          <div key={`pending-${rel.os}-${rel.arch}-${rel.version}`} className="rel-item">
+                            <div className="rel-item-top">
+                              <span className="rel-arch">{rel.arch}</span>
+                              <strong className="rel-version">v{rel.version.replace(/^v/i, '')}</strong>
+                              <span className="rel-status">Awaiting activation</span>
+                            </div>
+                            <button type="button" className="action-btn" onClick={() => void activateAgentRelease(rel)}>
+                              Activate
+                            </button>
+                          </div>
+                        ))}
                       </section>
                     ))}
                   </div>
