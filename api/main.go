@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -50,9 +51,13 @@ var (
 	// Optional in-memory request-rate limiters (login / device registration).
 	loginLimiter    *rateLimiter
 	registerLimiter *rateLimiter
-	browserArchive  *BrowserHistoryArchive
-	telemetryStore  *TelemetryArchive
-	activityStore   *DailyActivityArchive
+	// loginFailLimiter counts failed sign-ins per email+IP; deviceRegisterLimiter
+	// throttles unauthenticated agent registration.
+	loginFailLimiter      *rateLimiter
+	deviceRegisterLimiter *rateLimiter
+	browserArchive        *BrowserHistoryArchive
+	telemetryStore        *TelemetryArchive
+	activityStore         *DailyActivityArchive
 )
 
 const activeWindowFreshnessWindow = 5 * time.Minute
@@ -130,16 +135,18 @@ func (fc *FocusCache) snapshot(deviceID string) []AppFocusEntry {
 	return result
 }
 
-// buildFocusCacheFromMongo reads the last 500 telemetry documents per device
-// and reconstructs the focus cache. Called once at startup.
+// buildFocusCacheFromMongo sums the per-cycle app_summaries of every retained
+// telemetry document per device to reconstruct the focus cache. Called once at
+// startup. Each device gets its own timeout so one large device cannot starve
+// the rest; a truncated rebuild is logged instead of silently under-counting.
 func buildFocusCacheFromMongo() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	listCtx, listCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer listCancel()
 
 	coll := mongoClient.Database(dbName).Collection("telemetry")
 
 	// Get distinct device IDs present in telemetry
-	deviceIDs, err := coll.Distinct(ctx, "device_id", bson.M{})
+	deviceIDs, err := coll.Distinct(listCtx, "device_id", bson.M{})
 	if err != nil {
 		log.Printf("FocusCache: failed to list devices: %v", err)
 		return
@@ -159,8 +166,10 @@ func buildFocusCacheFromMongo() {
 				"_id":                                    0,
 			})
 
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		cursor, err := coll.Find(ctx, bson.M{"device_id": deviceID}, opts)
 		if err != nil {
+			cancel()
 			log.Printf("FocusCache: query error for %s: %v", deviceID, err)
 			continue
 		}
@@ -177,7 +186,11 @@ func buildFocusCacheFromMongo() {
 				count++
 			}
 		}
+		if err := cursor.Err(); err != nil {
+			log.Printf("FocusCache: rebuild for %s INCOMPLETE after %d docs: %v", deviceID, count, err)
+		}
 		cursor.Close(ctx)
+		cancel()
 		log.Printf("FocusCache: built from %d telemetry docs for device %s", count, deviceID)
 	}
 }
@@ -770,7 +783,11 @@ func telemetryMetadata(payload map[string]interface{}, archiveResult *TelemetryA
 	return doc
 }
 
-func deviceIdentityFilters(deviceID, hardwareUUID, macAddress, hostname string) bson.A {
+// deviceIdentityFilters matches on stable identity only. Hostnames are not
+// unique ("ubuntu", "localhost"), so matching them let one deleted machine
+// block every future machine with the same name; the hostname argument is kept
+// for call-site symmetry and stored on the record for reference.
+func deviceIdentityFilters(deviceID, hardwareUUID, macAddress, _ string) bson.A {
 	filters := bson.A{}
 	if deviceID != "" {
 		filters = append(filters, bson.M{"device_id": deviceID})
@@ -780,9 +797,6 @@ func deviceIdentityFilters(deviceID, hardwareUUID, macAddress, hostname string) 
 	}
 	if macAddress != "" {
 		filters = append(filters, bson.M{"mac_address": macAddress})
-	}
-	if hostname != "" && hostname != "unknown" {
-		filters = append(filters, bson.M{"hostname": hostname})
 	}
 	return filters
 }
@@ -830,6 +844,34 @@ func createDeviceRevocation(ctx context.Context, device bson.M, reason string) e
 		options.Update().SetUpsert(true),
 	)
 	return err
+}
+
+// DELETE /devices/revocations/{device_id} (admin) lifts the re-registration
+// block that deleting a device creates, so the same hardware can be enrolled again.
+func revocationClearHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	deviceID := strings.TrimPrefix(r.URL.Path, "/devices/revocations/")
+	if deviceID == "" || strings.Contains(deviceID, "/") {
+		http.Error(w, "Invalid URL: missing device_id", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := mongoClient.Database(dbName).Collection("device_revocations").DeleteMany(ctx, bson.M{"device_id": deviceID})
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	if res.DeletedCount == 0 {
+		http.Error(w, "No revocation found for device", http.StatusNotFound)
+		return
+	}
+	recordAudit(r, "device.revocation_cleared", deviceID, "")
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"device_id": deviceID, "cleared": res.DeletedCount})
 }
 
 func focusSummariesFromPayload(payload map[string]interface{}) []interface{} {
@@ -1934,7 +1976,10 @@ func (a *BrowserHistoryArchive) Archive(ctx context.Context, deviceID string, pa
 	if a == nil {
 		return nil, nil
 	}
-	browserPayload, entries := extractBrowserHistoryEntries(payload)
+	// Only entries the agent has not sent before are archived. The agent also
+	// resends a 200-URL "recent" snapshot every cycle; archiving that re-wrote the
+	// same URLs to S3 each sync and inflated entry counts in reports.
+	browserPayload, entries := extractNewBrowserHistoryEntries(payload)
 	if len(entries) == 0 {
 		return nil, nil
 	}
@@ -2197,24 +2242,29 @@ func (a *BrowserHistoryArchive) DeleteDevice(ctx context.Context, deviceID strin
 	return deleted, nil
 }
 
-func extractBrowserHistoryEntries(payload map[string]interface{}) (map[string]interface{}, []interface{}) {
+func extractNewBrowserHistoryEntries(payload map[string]interface{}) (map[string]interface{}, []interface{}) {
 	data, ok := payload["data"].(map[string]interface{})
 	if !ok {
 		return nil, nil
 	}
-	rawBrowser, ok := data["BrowserHistory"]
-	if !ok {
-		return nil, nil
-	}
-	browserPayload, ok := rawBrowser.(map[string]interface{})
+	browserPayload, ok := data["BrowserHistory"].(map[string]interface{})
 	if !ok {
 		return nil, nil
 	}
 	seen := map[string]struct{}{}
 	entries := []interface{}{}
 	appendBrowserHistoryEntries(&entries, seen, browserPayload["new_history_entries"])
-	appendBrowserHistoryEntries(&entries, seen, browserPayload["top_recent_urls"])
 	return browserPayload, entries
+}
+
+// dropBrowserRecentSnapshot removes the repeated recent-URL snapshot from a
+// payload that is not being archived, so it is not stored in every telemetry doc.
+func dropBrowserRecentSnapshot(payload map[string]interface{}) {
+	if data, ok := payload["data"].(map[string]interface{}); ok {
+		if browserPayload, ok := data["BrowserHistory"].(map[string]interface{}); ok {
+			delete(browserPayload, "top_recent_urls")
+		}
+	}
 }
 
 func appendBrowserHistoryEntries(entries *[]interface{}, seen map[string]struct{}, raw interface{}) {
@@ -2272,6 +2322,84 @@ func s3ErrorCode(err error) string {
 		return coded.ErrorCode()
 	}
 	return ""
+}
+
+// sweepS3Prefix deletes (or, when dryRun, only counts) objects under prefix
+// whose LastModified is before cutoff.
+func sweepS3Prefix(ctx context.Context, client *s3.Client, bucket, prefix string, cutoff time.Time, dryRun bool) (scanned, matched int, err error) {
+	paginator := s3.NewListObjectsV2Paginator(client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(bucket),
+		Prefix: aws.String(prefix + "/"),
+	})
+	for paginator.HasMorePages() {
+		page, perr := paginator.NextPage(ctx)
+		if perr != nil {
+			return scanned, matched, perr
+		}
+		for _, obj := range page.Contents {
+			scanned++
+			if obj.Key == nil || obj.LastModified == nil || !obj.LastModified.Before(cutoff) {
+				continue
+			}
+			matched++
+			if dryRun {
+				continue
+			}
+			if _, derr := client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: obj.Key}); derr != nil {
+				return scanned, matched, derr
+			}
+		}
+	}
+	return scanned, matched, nil
+}
+
+// startRetentionSweep enforces telemetry_retention_days on the S3 archives
+// (Mongo already expires its rows by TTL). Destructive, so it is OFF unless
+// S3_RETENTION_SWEEP is "dry-run" (log only) or "true" (delete). Retention
+// below 7 days is never swept as a safety floor.
+func startRetentionSweep() {
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("S3_RETENTION_SWEEP")))
+	if mode != "true" && mode != "dry-run" {
+		return
+	}
+	dryRun := mode == "dry-run"
+	type target struct {
+		name, bucket, prefix string
+		client               *s3.Client
+	}
+	var targets []target
+	if telemetryStore != nil {
+		targets = append(targets, target{"telemetry", telemetryStore.bucket, telemetryStore.prefix, telemetryStore.client})
+	}
+	if browserArchive != nil {
+		targets = append(targets, target{"browser-history", browserArchive.bucket, browserArchive.prefix, browserArchive.client})
+	}
+	if activityStore != nil {
+		targets = append(targets, target{"app-usage", activityStore.bucket, activityStore.prefix, activityStore.client})
+	}
+	if len(targets) == 0 {
+		log.Println("S3 retention sweep enabled but no S3 archive is configured")
+		return
+	}
+	go func() {
+		time.Sleep(10 * time.Minute) // let startup settle
+		for {
+			days := currentRetentionDays()
+			if days < 7 {
+				log.Printf("S3 retention sweep skipped: retention %d days is below the 7-day safety floor", days)
+			} else {
+				cutoff := time.Now().UTC().AddDate(0, 0, -days)
+				for _, t := range targets {
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+					scanned, matched, err := sweepS3Prefix(ctx, t.client, t.bucket, t.prefix, cutoff, dryRun)
+					cancel()
+					log.Printf("S3 retention sweep %s dry_run=%v cutoff=%s scanned=%d older=%d err=%v",
+						t.name, dryRun, cutoff.Format("2006-01-02"), scanned, matched, err)
+				}
+			}
+			time.Sleep(24 * time.Hour)
+		}
+	}()
 }
 
 func safeS3PathSegment(s string) string {
@@ -2483,6 +2611,28 @@ func newRateLimiter(limit int, window time.Duration) *rateLimiter {
 	return rl
 }
 
+// Blocked reports whether key has used its whole window, without counting a hit.
+func (rl *rateLimiter) Blocked(key string) bool {
+	if rl == nil || rl.limit <= 0 {
+		return false
+	}
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	w, ok := rl.hits[key]
+	return ok && time.Since(w.start) < rl.window && w.count >= rl.limit
+}
+
+func (rl *rateLimiter) Hit(key string) { rl.Allow(key) }
+
+func (rl *rateLimiter) Reset(key string) {
+	if rl == nil {
+		return
+	}
+	rl.mu.Lock()
+	delete(rl.hits, key)
+	rl.mu.Unlock()
+}
+
 func (rl *rateLimiter) Allow(key string) bool {
 	if rl == nil || rl.limit <= 0 {
 		return true
@@ -2499,19 +2649,71 @@ func (rl *rateLimiter) Allow(key string) bool {
 	return w.count <= rl.limit
 }
 
-// clientIP prefers the left-most X-Forwarded-For entry (the API already trusts
-// proxy headers for PUBLIC_API_URL), falling back to the TCP peer address.
+// trustedProxies parses TRUSTED_PROXY_CIDRS (comma-separated CIDRs or IPs).
+func trustedProxies() []*net.IPNet {
+	var nets []*net.IPNet
+	for _, raw := range strings.Split(os.Getenv("TRUSTED_PROXY_CIDRS"), ",") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if !strings.Contains(raw, "/") {
+			if strings.Contains(raw, ":") {
+				raw += "/128"
+			} else {
+				raw += "/32"
+			}
+		}
+		if _, n, err := net.ParseCIDR(raw); err == nil {
+			nets = append(nets, n)
+		}
+	}
+	return nets
+}
+
+func ipInNets(ip string, nets []*net.IPNet) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	for _, n := range nets {
+		if n.Contains(parsed) {
+			return true
+		}
+	}
+	return false
+}
+
+// clientIP returns the caller's address for throttling. With TRUSTED_PROXY_CIDRS
+// unset it keeps the legacy behaviour (left-most X-Forwarded-For, which a client
+// can spoof). With it set, X-Forwarded-For is honoured only when the TCP peer is
+// a listed proxy, and the right-most untrusted entry wins.
 func clientIP(r *http.Request) string {
-	if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
+	peer := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		peer = host
+	}
+	xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
+	if xff == "" {
+		return peer
+	}
+	nets := trustedProxies()
+	if len(nets) == 0 {
 		if i := strings.IndexByte(xff, ','); i >= 0 {
 			xff = xff[:i]
 		}
 		return strings.TrimSpace(xff)
 	}
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return host
+	if !ipInNets(peer, nets) {
+		return peer
 	}
-	return r.RemoteAddr
+	parts := strings.Split(xff, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		if ip := strings.TrimSpace(parts[i]); ip != "" && !ipInNets(ip, nets) {
+			return ip
+		}
+	}
+	return peer
 }
 
 // requireRateLimit rejects requests once the caller exceeds its window. A nil
@@ -2599,6 +2801,8 @@ type roleUpdateRequest struct {
 type deviceNameRequest struct {
 	Name string `json:"name"`
 }
+
+var dummyPasswordHash, _ = bcrypt.GenerateFromPassword([]byte("devicepulse-dummy-password"), bcrypt.DefaultCost)
 
 func normalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
@@ -2959,6 +3163,7 @@ func deviceCommandCreateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("RemoteAction: %s issued %s for %s", user.Email, body.Type, deviceID)
+	recordAudit(r, "device.command."+body.Type, deviceID, "")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(cmd)
@@ -3139,6 +3344,10 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 	if hostname == "" {
 		hostname = "unknown"
 	}
+	if !validIdentityField(hostname) || !validIdentityField(hardwareUUID) || !validIdentityField(macAddress) {
+		http.Error(w, "Invalid device identity fields", http.StatusBadRequest)
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -3185,6 +3394,7 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			log.Printf("Known device re-registered (key rotated): %s (uuid=%s mac=%s host=%s)",
 				deviceID, hardwareUUID, macAddress, hostname)
+			recordAudit(r, "device.key_rotated", deviceID, hostname)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{
 				"device_id": deviceID,
@@ -3192,6 +3402,15 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+	}
+
+	// Opt-in: when ENROLLMENT_TOKEN is set, brand-new devices must present it.
+	// Recovery of already-known hardware (above) is unaffected so installed
+	// agents that lose their key can still recover.
+	if want := strings.TrimSpace(os.Getenv("ENROLLMENT_TOKEN")); want != "" &&
+		subtle.ConstantTimeCompare([]byte(want), []byte(r.Header.Get("X-Enrollment-Token"))) != 1 {
+		http.Error(w, "Enrollment token required", http.StatusForbidden)
+		return
 	}
 
 	// New device — mint a stable device_id derived from hardware UUID when available.
@@ -3248,6 +3467,20 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 		"device_id": deviceID,
 		"api_key":   apiKey,
 	})
+}
+
+// validIdentityField bounds client-supplied identity strings (lenient: real
+// hostnames, UUIDs and MACs always pass).
+func validIdentityField(s string) bool {
+	if len(s) > 256 {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // rotateDeviceKey mints a fresh API key for an existing device record and
@@ -3414,15 +3647,29 @@ func authLoginHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	failKey := normalizeEmail(body.Email) + "|" + clientIP(r)
+	if loginFailLimiter.Blocked(failKey) {
+		w.Header().Set("Retry-After", strconv.Itoa(int(loginFailLimiter.window.Seconds())))
+		http.Error(w, "Too many failed sign-in attempts. Try again later.", http.StatusTooManyRequests)
+		return
+	}
+
 	var user DashboardUser
 	err := mongoClient.Database(dbName).Collection("users").FindOne(ctx, bson.M{
 		"email":  normalizeEmail(body.Email),
 		"status": "active",
 	}).Decode(&user)
+	if err != nil {
+		// Burn the same bcrypt time as a real check so response timing does not
+		// reveal which emails exist.
+		bcrypt.CompareHashAndPassword(dummyPasswordHash, []byte(body.Password))
+	}
 	if err != nil || bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(body.Password)) != nil {
+		loginFailLimiter.Hit(failKey)
 		http.Error(w, "Invalid email or password", http.StatusUnauthorized)
 		return
 	}
+	loginFailLimiter.Reset(failKey)
 	if err := setSessionCookie(w, user); err != nil {
 		http.Error(w, "Session error", http.StatusInternalServerError)
 		return
@@ -3625,6 +3872,11 @@ func userPasswordHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "User not found", http.StatusNotFound)
 		return
 	}
+	target := userID.Hex()
+	if u, ok := loadUserByID(ctx, userID); ok {
+		target = u.Email
+	}
+	recordAudit(r, "user.password_reset", target, "")
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -3977,6 +4229,8 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 		if archiveResult != nil {
 			payload["browser_history_archive"] = archiveResult
 			pruneArchivedBrowserHistory(payload, archiveResult)
+		} else {
+			dropBrowserRecentSnapshot(payload)
 		}
 	}
 
@@ -4063,7 +4317,7 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 		setDoc["data"] = payload["data"]
 	}
 	update := bson.M{"$set": setDoc}
-	if _, archived := payload["browser_history_archive"]; archived {
+	if _, archived := payload["browser_history_archive"]; archived || browserArchive != nil {
 		update["$unset"] = bson.M{
 			"data.BrowserHistory.new_history_entries": "",
 			"data.BrowserHistory.top_recent_urls":     "",
@@ -4219,6 +4473,7 @@ func deviceNameHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Device not found", http.StatusNotFound)
 		return
 	}
+	recordAudit(r, "device.renamed", deviceID, name)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -4826,6 +5081,7 @@ func deviceDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	globalFocusCache.mu.Unlock()
 
 	log.Printf("Device deleted: %s (telemetry=%d telemetry_archive_objects=%d browser_archive_objects=%d app_usage=%d app_usage_archive_objects=%d)", deviceID, telemetryRes.DeletedCount, telemetryArchiveDeleted, browserArchiveDeleted, appUsageRes.DeletedCount, appUsageArchiveDeleted)
+	recordAudit(r, "device.deleted", deviceID, "")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"device_id":                       deviceID,
@@ -5361,7 +5617,28 @@ func compareAgentVersions(a, b string) int {
 			return -1
 		}
 	}
-	return strings.Compare(a, b)
+	// Equal numeric parts: a release outranks its own prereleases (semver), and
+	// build metadata is ignored.
+	apre, bpre := agentVersionPrerelease(a), agentVersionPrerelease(b)
+	switch {
+	case apre == bpre:
+		return 0
+	case apre == "":
+		return 1
+	case bpre == "":
+		return -1
+	}
+	return strings.Compare(apre, bpre)
+}
+
+func agentVersionPrerelease(v string) string {
+	if i := strings.IndexByte(v, '+'); i >= 0 {
+		v = v[:i]
+	}
+	if i := strings.IndexByte(v, '-'); i >= 0 {
+		return v[i+1:]
+	}
+	return ""
 }
 
 func agentVersionParts(v string) []int {
@@ -5418,6 +5695,7 @@ func releasePublishHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("Agent release published: %s %s/%s", rel.Version, rel.OS, rel.Arch)
+	recordAudit(r, "release.published", rel.OS+"/"+rel.Arch, rel.Version)
 	w.WriteHeader(http.StatusCreated)
 }
 
@@ -5536,6 +5814,7 @@ func releaseActivateHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	recordAudit(r, "release.activated", req.OS+"/"+req.Arch, req.Version)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(rel)
 }
@@ -5630,6 +5909,7 @@ func releaseRolloutLatestHandler(w http.ResponseWriter, r *http.Request) {
 	})
 
 	log.Printf("Agent rollout: latest rollout requested, activated_targets=%d devices_marked=%d", len(activated), devicesMarked)
+	recordAudit(r, "release.rollout", "fleet", fmt.Sprintf("targets=%d devices=%d", len(activated), devicesMarked))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"activated":      activated,
@@ -5718,6 +5998,7 @@ func createAgentBuildJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	go runAgentBuildJob(job.ID)
+	recordAudit(r, "release.build_started", job.Version, strings.Join(job.Platforms, ","))
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
@@ -6311,6 +6592,9 @@ func main() {
 	// Optional throttles for unauthenticated endpoints; 0 disables a limiter.
 	loginLimiter = newRateLimiter(envInt("LOGIN_RATE_LIMIT_PER_MINUTE", 30), time.Minute)
 	registerLimiter = newRateLimiter(envInt("REGISTER_RATE_LIMIT_PER_MINUTE", 10), time.Minute)
+	// Generous default: whole offices register from one NAT address.
+	deviceRegisterLimiter = newRateLimiter(envInt("DEVICE_REGISTER_RATE_LIMIT_PER_MINUTE", 60), time.Minute)
+	loginFailLimiter = newRateLimiter(envInt("LOGIN_FAIL_LIMIT", 10), 15*time.Minute)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -6330,6 +6614,7 @@ func main() {
 	if err := ensureIndexes(); err != nil {
 		log.Printf("WARNING: index setup reported errors (server continues): %v", err)
 	}
+	ensureHeavyIndexes()
 
 	// One-time migration: swap plaintext device API keys for hashes. Existing
 	// agents keep working unchanged — they resend the same key and it resolves
@@ -6352,6 +6637,7 @@ func main() {
 	activityStore = initDailyActivityArchive(ctx)
 
 	startFocusCacheJanitor(time.Hour)
+	startRetentionSweep()
 
 	// Build focus cache from existing telemetry data
 	go buildFocusCacheFromMongo()
@@ -6387,7 +6673,8 @@ func main() {
 
 func registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/health", corsMiddleware(healthHandler))
-	mux.HandleFunc("/devices/register", corsMiddleware(registerHandler))
+	mux.HandleFunc("/devices/register", corsMiddleware(requireRateLimit(deviceRegisterLimiter, registerHandler)))
+	mux.HandleFunc("/devices/revocations/", corsMiddleware(requireRole(RoleAdmin, revocationClearHandler)))
 	mux.HandleFunc("/auth/bootstrap", corsMiddleware(requireEncryptedResponse(authBootstrapHandler)))
 	mux.HandleFunc("/auth/register", corsMiddleware(requireEncryptedResponse(requireRateLimit(registerLimiter, authRegisterHandler))))
 	mux.HandleFunc("/auth/login", corsMiddleware(requireEncryptedResponse(requireRateLimit(loginLimiter, authLoginHandler))))
@@ -6541,5 +6828,44 @@ func ensureIndexes() error {
 		errs = append(errs, fmt.Errorf("device_commands indexes: %w", err))
 	}
 
+	// audit_log: newest-first feed; optional expiry via AUDIT_RETENTION_DAYS
+	// (unset = keep forever, matching existing behaviour).
+	auditIdx := []mongo.IndexModel{
+		{Keys: bson.D{{Key: "at", Value: -1}}, Options: options.Index().SetName("at_desc")},
+	}
+	if days := envInt("AUDIT_RETENTION_DAYS", 0); days > 0 {
+		auditIdx = append(auditIdx, mongo.IndexModel{
+			Keys:    bson.D{{Key: "at", Value: 1}},
+			Options: options.Index().SetName("at_ttl").SetExpireAfterSeconds(int32(days * 86400)),
+		})
+	}
+	if _, err := db.Collection("audit_log").Indexes().CreateMany(ctx, auditIdx); err != nil {
+		errs = append(errs, fmt.Errorf("audit_log indexes: %w", err))
+	}
+
 	return errors.Join(errs...)
+}
+
+// ensureHeavyIndexes builds the indexes that serve presence and weekly-report
+// queries. They run in the background because building them on a large
+// telemetry collection takes a while and must not delay API startup. Set
+// SKIP_HEAVY_INDEXES=true to build them manually off-peak instead.
+func ensureHeavyIndexes() {
+	if strings.EqualFold(os.Getenv("SKIP_HEAVY_INDEXES"), "true") {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+		defer cancel()
+		coll := mongoClient.Database(dbName).Collection("telemetry")
+		for _, model := range []mongo.IndexModel{
+			{Keys: bson.D{{Key: "device_id", Value: 1}, {Key: "timestamp", Value: 1}}},
+			{Keys: bson.D{{Key: "ingested_at", Value: 1}}},
+		} {
+			if _, err := coll.Indexes().CreateOne(ctx, model); err != nil {
+				log.Printf("WARNING: background telemetry index build failed: %v", err)
+			}
+		}
+		log.Println("Background telemetry indexes ready")
+	}()
 }
