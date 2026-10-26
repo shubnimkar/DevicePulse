@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -29,9 +30,24 @@ func main() {
 	dryRun := flag.Bool("dry-run", false, "report affected rows without changing S3 or MongoDB")
 	apply := flag.Bool("apply", false, "write normalized sessions to S3 and MongoDB")
 	limit := flag.Int64("limit", 0, "maximum affected rows; 0 means all")
+	tz := flag.String("tz", "", "IANA timezone of the devices' local day, e.g. Asia/Kolkata (required with --apply)")
 	flag.Parse()
 	if *dryRun == *apply {
 		log.Fatal("specify exactly one of --dry-run or --apply")
+	}
+	// Live ingest buckets sessions by the device's LOCAL day, but archived
+	// sessions are stored in UTC, so the zone cannot be recovered from the data.
+	// Clipping to a UTC day would cut off hours of any non-UTC device's day.
+	loc := time.UTC
+	if *tz != "" {
+		var err error
+		if loc, err = time.LoadLocation(*tz); err != nil {
+			log.Fatalf("invalid --tz %q: %v", *tz, err)
+		}
+	} else if *apply {
+		log.Fatal("--apply requires --tz (the devices' local timezone, e.g. Asia/Kolkata)")
+	} else {
+		log.Printf("WARNING: no --tz given; dry-run assumes UTC days, which will misreport non-UTC devices")
 	}
 	_ = godotenv.Load(".env")
 
@@ -106,13 +122,13 @@ func main() {
 		if rawKey, ok := row["archive_key"].(string); ok && rawKey != "" {
 			key = rawKey
 		}
-		doc, err := readObject(ctx, s3Client, bucket, key)
+		doc, etag, err := readObject(ctx, s3Client, bucket, key)
 		if err != nil {
 			log.Printf("skip device=%s user=%s date=%s key=%s: %v", deviceID, username, date, key, err)
 			continue
 		}
 		sessions, _ := doc["sessions"].([]interface{})
-		normalized := normalize(sessions, date)
+		normalized := normalize(sessions, date, loc)
 		apps, total, count := summarize(normalized)
 		log.Printf("device=%s user=%s date=%s %.2fh -> %.2fh (%d sessions)", deviceID, username, date, number(row["total_seconds"])/3600, total/3600, count)
 		repaired++
@@ -121,7 +137,16 @@ func main() {
 		}
 		doc["sessions"], doc["apps"], doc["total_seconds"], doc["session_count"], doc["updated_at"] = normalized, apps, total, count, time.Now().UTC()
 		body, _ := json.Marshal(doc)
-		if _, err := s3Client.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), Body: bytes.NewReader(body), ContentType: aws.String("application/json")}); err != nil {
+		// Conditional write: if live ingest touched the object since we read it,
+		// skip this row instead of overwriting the newer sessions.
+		put := &s3.PutObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), Body: bytes.NewReader(body), ContentType: aws.String("application/json"), IfMatch: etag}
+		if _, err := s3Client.PutObject(ctx, put); err != nil {
+			var coded interface{ ErrorCode() string }
+			if errors.As(err, &coded) && (coded.ErrorCode() == "PreconditionFailed" || coded.ErrorCode() == "ConditionalRequestConflict") {
+				log.Printf("skip device=%s user=%s date=%s: object changed during repair; re-run", deviceID, username, date)
+				repaired--
+				continue
+			}
 			log.Fatal(err)
 		}
 		_, err = client.Database(dbName).Collection("app_usage_daily").UpdateOne(ctx, bson.M{"_id": row["_id"]}, bson.M{"$set": bson.M{"total_seconds": total, "session_count": count, "top_apps": apps, "updated_at": time.Now()}})
@@ -145,21 +170,21 @@ func pathPart(value string) string {
 	return strings.ReplaceAll(value, "\\", "_")
 }
 
-func readObject(ctx context.Context, client *s3.Client, bucket, key string) (map[string]interface{}, error) {
+func readObject(ctx context.Context, client *s3.Client, bucket, key string) (map[string]interface{}, *string, error) {
 	res, err := client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer res.Body.Close()
 	var doc map[string]interface{}
 	if err := json.NewDecoder(res.Body).Decode(&doc); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return doc, nil
+	return doc, res.ETag, nil
 }
 
-func normalize(raw []interface{}, date string) []interface{} {
-	day, err := time.Parse("2006-01-02", date)
+func normalize(raw []interface{}, date string, loc *time.Location) []interface{} {
+	day, err := time.ParseInLocation("2006-01-02", date, loc)
 	if err != nil {
 		return nil
 	}
