@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api:
+    name: API (vet, tests, MongoDB integration)
+    runs-on: ubuntu-latest
+    services:
+      mongo:
+        image: mongo:7
+        ports: ["27017:27017"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: api/go.mod
+          cache-dependency-path: api/go.sum
+      # The response-encryption interop test runs the dashboard's TypeScript helper.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+        working-directory: dashboard
+      - name: gofmt
+        working-directory: api
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: vet
+        working-directory: api
+        run: go vet ./...
+      - name: test (includes Mongo-backed release tests)
+        working-directory: api
+        env:
+          TEST_MONGO_URI: mongodb://localhost:27017
+        run: go test -race ./...
+
+  agent:
+    name: Agent (vet, race tests, cross-build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agent/go.mod
+          cache-dependency-path: agent/go.sum
+      - name: gofmt
+        working-directory: agent
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: vet (each target OS)
+        working-directory: agent
+        run: |
+          for os in linux windows darwin; do
+            echo "== vet $os"
+            GOOS=$os go vet . ./collector ./commander ./queue ./safefs ./updater
+          done
+      - name: test
+        working-directory: agent
+        run: go test -race ./...
+      - name: cross-build
+        working-directory: agent
+        run: |
+          for t in linux/amd64 linux/arm64 windows/amd64 windows/arm64 darwin/amd64 darwin/arm64; do
+            echo "== build $t"
+            GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 go build -o /dev/null .
+          done
+
+  dashboard:
+    name: Dashboard (types, lint, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+        working-directory: dashboard
+      - run: npx tsc --noEmit
+        working-directory: dashboard
+      - run: npm run lint
+        working-directory: dashboard
+      - run: npm run build
+        working-directory: dashboard
