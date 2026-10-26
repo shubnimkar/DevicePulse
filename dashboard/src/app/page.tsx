@@ -1,6 +1,7 @@
 'use client';
 
 import { encryptedFetch } from '@/lib/encrypted-fetch';
+import { fetchAllPages } from '@/lib/paged-fetch';
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { AnimatePresence, MotionConfig, motion } from 'motion/react';
@@ -508,9 +509,7 @@ export default function Home() {
     if (fetchAllInFlight.current) return; // skip poll/Retry while a fetch is running
     fetchAllInFlight.current = true;
     try {
-      const devRes = await apiFetch('/devices', { headers: readHeaders() });
-      if (!devRes.ok) throw new Error(`HTTP ${devRes.status}`);
-      const devList: Device[] = (await devRes.json()) ?? [];
+      const devList = await fetchAllPages<Device>(p => apiFetch(p, { headers: readHeaders() }), '/devices', 'after', 200);
       setDevices(devList);
       // Focus summaries are fetched lazily for the inspected device only — no fleet-wide fan-out.
       // Browser history / daily usage refresh only for devices whose relevant tab is open.
@@ -551,8 +550,7 @@ export default function Home() {
   const fetchUsers = useCallback(async () => {
     if (!canManageUsers) return;
     try {
-      const res = await apiFetch('/users');
-      if (res.ok) setUsers(await res.json());
+      setUsers(await fetchAllPages<DashboardUser>(p => apiFetch(p), '/users', 'offset', 100));
     } catch {}
   }, [apiFetch, canManageUsers]);
 
