@@ -10,7 +10,7 @@ function BatteryCard({ battery }: { battery?: BatteryStat }) {
   const state = battery.state ?? 'unknown';
   const rateW = Number.isFinite(battery.charge_rate_w) ? battery.charge_rate_w : 0;
   const isCharging = state === 'charging' || state === 'full' || state === 'idle';
-  const color = isCharging ? 'var(--status-ok-fg)' : pct <= 20 ? 'var(--status-crit-fg)' : pct <= 40 ? 'var(--status-warn-fg)' : 'var(--status-ok-fg)';
+  const color = isCharging ? 'var(--green)' : pct <= 20 ? 'var(--red)' : pct <= 40 ? 'var(--yellow)' : 'var(--green)';
   const stateLabel: Record<string, string> = { charging: 'Charging', full: 'Full', idle: 'Plugged In', discharging: 'Discharging', empty: 'Empty', unknown: 'Unknown' };
 
   return (
@@ -85,7 +85,7 @@ export default function HardwareTab({ hw }: Props) {
           <div className="hw-value" style={{ color: cpu?.usage_percent === undefined ? 'var(--text-3)' : metricColor(cpu.usage_percent) }}>
             {cpu?.usage_percent === undefined ? 'Unavailable' : `${cpu.usage_percent.toFixed(1)}%`}
           </div>
-          <GaugeBar label="CPU usage" value={cpu?.usage_percent ?? 0} color={metricColor(cpu?.usage_percent ?? 0)} />
+          <GaugeBar value={cpu?.usage_percent ?? 0} color={metricColor(cpu?.usage_percent ?? 0)} />
           <div className="hw-sub">{cpu?.core_count ?? '?'} logical cores</div>
         </div>
 
@@ -95,7 +95,7 @@ export default function HardwareTab({ hw }: Props) {
           <div className="hw-value" style={{ color: ram?.used_percent === undefined ? 'var(--text-3)' : metricColor(ram.used_percent) }}>
             {ram?.used_percent === undefined ? 'Unavailable' : `${ram.used_percent.toFixed(1)}%`}
           </div>
-          <GaugeBar label="Memory usage" value={ram?.used_percent ?? 0} color={metricColor(ram?.used_percent ?? 0)} />
+          <GaugeBar value={ram?.used_percent ?? 0} color={metricColor(ram?.used_percent ?? 0)} />
           <div className="hw-sub">{ram?.used_gb?.toFixed(1) ?? '?'} / {ram?.total_gb?.toFixed(1) ?? '?'} GB</div>
         </div>
 
@@ -105,7 +105,7 @@ export default function HardwareTab({ hw }: Props) {
           <div className="hw-value" style={{ color: diskPct === null ? 'var(--text-3)' : metricColor(diskPct) }}>
             {diskPct === null ? 'Unavailable' : `${diskPct.toFixed(1)}%`}
           </div>
-          <GaugeBar label="Disk usage" value={diskPct ?? 0} color={metricColor(diskPct ?? 0)} />
+          <GaugeBar value={diskPct ?? 0} color={metricColor(diskPct ?? 0)} />
           <div className="hw-sub">{disk ? `${diskSize(disk, 'used')} / ${diskSize(disk, 'total')}` : 'Telemetry unavailable'}</div>
         </div>
 
@@ -114,11 +114,11 @@ export default function HardwareTab({ hw }: Props) {
           <div className="hw-label">Network {net?.interface}</div>
           <div className="net-io-pair">
             <div className="net-io-item">
-              <span className="net-io-arrow" style={{ color: 'var(--accent)' }}>↑</span>
+              <span className="net-io-arrow" style={{ color: 'var(--cyan)' }}>↑</span>
               <span className="net-io-val">{net ? formatBytes(net.bytes_sent) : 'Unavailable'}</span>
             </div>
             <div className="net-io-item">
-              <span className="net-io-arrow" style={{ color: 'var(--accent)' }}>↓</span>
+              <span className="net-io-arrow" style={{ color: 'var(--blue)' }}>↓</span>
               <span className="net-io-val">{net ? formatBytes(net.bytes_recv) : 'Unavailable'}</span>
             </div>
           </div>
@@ -155,7 +155,7 @@ export default function HardwareTab({ hw }: Props) {
                       <td className="disk-usage-cell">
                         <div className="disk-usage-wrap">
                           <div className="disk-usage-gauge">
-                            <GaugeBar label={`Disk usage ${d.mount}`} value={pct ?? 0} color={metricColor(pct ?? 0)} height={3} />
+                            <GaugeBar value={pct ?? 0} color={metricColor(pct ?? 0)} height={3} />
                           </div>
                           <span className="mono disk-usage-pct" style={{ color: metricColor(pct ?? 0) }}>
                             {pct !== null ? `${pct.toFixed(0)}%` : 'Unavailable'}
@@ -187,8 +187,8 @@ export default function HardwareTab({ hw }: Props) {
               {hw.network.map((n, i) => (
                 <tr key={i}>
                   <td><span className="mono">{n.interface}</span></td>
-                  <td><span className="mono" style={{ color: 'var(--accent)' }}>↑ {formatBytes(n.bytes_sent)}</span></td>
-                  <td><span className="mono" style={{ color: 'var(--accent)' }}>↓ {formatBytes(n.bytes_recv)}</span></td>
+                  <td><span className="mono" style={{ color: 'var(--cyan)' }}>↑ {formatBytes(n.bytes_sent)}</span></td>
+                  <td><span className="mono" style={{ color: 'var(--blue)' }}>↓ {formatBytes(n.bytes_recv)}</span></td>
                 </tr>
               ))}
             </tbody>

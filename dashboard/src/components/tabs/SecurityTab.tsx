@@ -65,7 +65,6 @@ export default function SecurityTab({ usb, osUpd, deviceId, userRole, deviceOnli
   const [busyType, setBusyType]     = useState('');
   const [notice, setNotice]         = useState<{ kind: 'ok' | 'err'; msg: string } | null>(null);
   const [pendingAction, setPendingAction] = useState<ActionDef | null>(null);
-  const [refreshMsg, setRefreshMsg]       = useState('');
 
   const loadCommands = useCallback(async () => {
     if (!deviceId) return;
@@ -132,14 +131,8 @@ export default function SecurityTab({ usb, osUpd, deviceId, userRole, deviceOnli
         {!deviceOnline && (
           <div className="ra-offline-note">Device offline — commands queue until it reconnects.</div>
         )}
-        {[
-          { key: 'safe', title: null, items: visibleActions.filter(a => !a.danger && a.type !== 'quarantine_release') },
-          { key: 'danger', title: 'Danger zone', items: visibleActions.filter(a => a.danger || a.type === 'quarantine_release') },
-        ].map(group => (
-        <div key={group.key} className={`ra-group${group.key === 'danger' ? ' ra-group-danger' : ''}`}>
-        {group.title && <div className="ra-group-title">{group.title}</div>}
         <div className="ra-grid">
-          {group.items.map(a => {
+          {visibleActions.map(a => {
             const allowed = ROLE_RANK[userRole] >= ROLE_RANK[a.minRole];
             const busy = busyType === a.type;
             return (
@@ -152,20 +145,11 @@ export default function SecurityTab({ usb, osUpd, deviceId, userRole, deviceOnli
                 onClick={() => (a.confirm ? setPendingAction(a) : void issueCommand(a))}
               >
                 <span className="ra-btn-label">{busy ? 'Sending…' : a.label}</span>
-                {!allowed && (
-                  <span className="ra-btn-role">
-                    <svg aria-hidden="true" width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" style={{ verticalAlign: '-1px', marginRight: 3 }}>
-                      <rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 015 0v2"/>
-                    </svg>
-                    {a.minRole}
-                  </span>
-                )}
+                {!allowed && <span className="ra-btn-role">🔒 {a.minRole}</span>}
               </button>
             );
           })}
         </div>
-        </div>
-        ))}
         {notice && (
           <div role={notice.kind === 'err' ? 'alert' : 'status'} className={`ra-notice ${notice.kind === 'ok' ? 'ra-notice-ok' : 'ra-notice-err'}`}>{notice.msg}</div>
         )}
@@ -174,20 +158,10 @@ export default function SecurityTab({ usb, osUpd, deviceId, userRole, deviceOnli
         <div className="ra-history">
           <div className="ra-history-title">
             Recent Commands
-            <button
-              type="button"
-              className="ra-refresh"
-              onClick={async () => {
-                setRefreshMsg('Refreshing command history…');
-                await loadCommands();
-                setRefreshMsg('Command history refreshed.');
-              }}
-              disabled={cmdLoading}
-            >
-              <span aria-hidden="true">{cmdLoading ? '…' : '⟳'}</span> {cmdLoading ? 'Refreshing' : 'Refresh'}
+            <button type="button" className="ra-refresh" onClick={loadCommands} disabled={cmdLoading} aria-label="Refresh command history">
+              {cmdLoading ? '…' : '⟳'}
             </button>
           </div>
-          <span className="sr-only" role="status">{refreshMsg}</span>
           {commands.length === 0 && !cmdLoading && (
             <div className="no-data no-data-tight">No remote commands issued yet.</div>
           )}
@@ -269,7 +243,7 @@ export default function SecurityTab({ usb, osUpd, deviceId, userRole, deviceOnli
       <ConfirmDialog
         open={!!pendingAction}
         title={pendingAction?.label ?? ''}
-        message={pendingAction ? `${pendingAction.confirm}\n\nDevice: ${deviceId}` : ''}
+        message={pendingAction?.confirm ?? ''}
         confirmLabel={pendingAction?.label ?? 'Confirm'}
         danger={pendingAction?.danger}
         onConfirm={() => {

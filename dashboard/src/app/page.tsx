@@ -1,30 +1,19 @@
 'use client';
 
 import { encryptedFetch } from '@/lib/encrypted-fetch';
-import { fetchAllPages } from '@/lib/paged-fetch';
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { AnimatePresence, MotionConfig, motion } from 'motion/react';
-import Link from 'next/link';
 import type { FormEvent } from 'react';
-import SettingsView from '@/components/views/SettingsView';
-import AccessView, { roleChangeSummary } from '@/components/views/AccessView';
-import type { AuditEvent } from '@/types';
 import { Device, AppFocusSummary, FocusCacheData, DeviceTab, EnterprisePolicy, DashboardUser, UserRole, HistoryEntry, BrowserHistoryArchiveData, DailyAppUsageData, DailyPresenceData, AgentRelease, AgentBuildJob, AgentRolloutResponse, WeeklyReport } from '@/types';
-import { API, readHeaders, adminHeaders, isOnline, primaryDisk, deviceDisplayName, formatDuration } from '@/lib/utils';
+import { API, readHeaders, adminHeaders, isOnline, timeAgo, primaryDisk, deviceDisplayName, formatDuration } from '@/lib/utils';
 import DeviceCard from '@/components/DeviceCard';
+import HeaderClock from '@/components/HeaderClock';
 import ConfirmDialog from '@/components/ConfirmDialog';
-import AuthMissionPanel from '@/components/AuthMissionPanel';
-import LogoMark from '@/components/LogoMark';
-import AppShell from '@/components/shell/AppShell';
-import { IconReport } from '@/components/shell/nav';
-import EmptyState from '@/components/ui/EmptyState';
-import ErrorState from '@/components/ui/ErrorState';
-import OverviewView from '@/components/views/OverviewView';
-import DevicesView, { parseInventoryParams, setInventoryParams, type DeviceSort, type InventoryState } from '@/components/views/DevicesView';
 import type { BrowserHistoryRange } from '@/components/tabs/BrowserTab';
 
 type PageView = 'dashboard' | 'inventory' | 'reports' | 'inspect' | 'settings' | 'access';
+type StatusFilter = 'all' | 'online' | 'critical' | 'warning' | 'offline';
 type AuthMode = 'login' | 'register';
 type OnDemandReportType = 'executive' | 'app_usage' | 'device_health';
 type BrowserHistoryCache = Record<string, Partial<Record<BrowserHistoryRange, HistoryEntry[]>>>;
@@ -78,7 +67,6 @@ const RELEASE_TARGETS: Array<{ os: AgentRelease['os']; label: string }> = [
 
 const PAGE_VIEWS: PageView[] = ['dashboard', 'inventory', 'reports', 'inspect', 'settings', 'access'];
 const DEVICE_TABS: DeviceTab[] = ['overview', 'hardware', 'processes', 'browser', 'services', 'ports', 'apps', 'security', 'focus', 'sysinfo'];
-const AUTH_CHECK_TIMEOUT_MS = 8_000;
 
 const roleLabel: Record<UserRole, string> = {
   admin: 'Admin',
@@ -141,7 +129,6 @@ function readNavigationState() {
     view: view === 'inspect' && !deviceId ? 'inventory' : view,
     deviceId,
     tab,
-    inventory: parseInventoryParams(params),
   };
 }
 
@@ -163,9 +150,28 @@ async function readApiError(res: Response): Promise<string> {
 }
 
 // ── SVG icons ────────────────────────────────────────────────────────────────
+const IconGrid = () => (
+  <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
+    <rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/>
+    <rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/>
+  </svg>
+);
+const IconList = () => (
+  <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
+    <rect x="1" y="2" width="14" height="2.5" rx="1"/><rect x="1" y="6.75" width="14" height="2.5" rx="1"/>
+    <rect x="1" y="11.5" width="14" height="2.5" rx="1"/>
+  </svg>
+);
 const IconSearch = () => (
   <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
     <circle cx="6.5" cy="6.5" r="5"/><path d="M10.5 10.5L14 14"/>
+  </svg>
+);
+const IconLogo = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+    <circle cx="8" cy="8" r="6" stroke="white" strokeWidth="1.5"/>
+    <circle cx="8" cy="8" r="2.5" fill="white"/>
+    <path d="M8 2v2M8 12v2M2 8h2M12 8h2" stroke="white" strokeWidth="1.5" strokeLinecap="round"/>
   </svg>
 );
 const IconMail = () => (
@@ -193,16 +199,35 @@ const IconEyeOff = () => (
     <path d="M6.2 6.4a2 2 0 003.1 2.5"/>
   </svg>
 );
+const IconPulse = () => (
+  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M1.5 8.5h3l1.75-4.5 3.5 8 1.75-3.5h3"/>
+  </svg>
+);
 const IconShield = () => (
   <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
     <path d="M8 1.75l5 1.9v4.1c0 3.1-2.1 5.4-5 6.5-2.9-1.1-5-3.4-5-6.5v-4.1z"/>
     <path d="M5.9 8l1.5 1.5 2.7-2.9"/>
   </svg>
 );
-const IconWarning = () => (
+const IconDevices = () => (
+  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
+    <rect x="1.5" y="2.5" width="9.5" height="7" rx="1"/>
+    <path d="M4 12.5h4.5"/>
+    <rect x="11.5" y="6.5" width="3.5" height="6" rx="0.75"/>
+  </svg>
+);
+const IconSettings = () => (
+  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+    <circle cx="8" cy="8" r="2.25"/>
+    <path d="M13 8a5.3 5.3 0 00-.07-.86l1.42-1.08-1.35-2.33-1.66.68a5.1 5.1 0 00-1.48-.86L9.62 1.8H6.38l-.24 1.75a5.1 5.1 0 00-1.48.86L3 3.73 1.65 6.06l1.42 1.08A5.3 5.3 0 003 8c0 .3.02.58.07.86L1.65 9.94 3 12.27l1.66-.68c.44.37.94.66 1.48.86l.24 1.75h3.24l.24-1.75c.54-.2 1.04-.49 1.48-.86l1.66.68 1.35-2.33-1.42-1.08c.05-.28.07-.57.07-.86z"/>
+  </svg>
+);
+const IconReport = () => (
   <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M8 2l6.5 11.5h-13L8 2z"/>
-    <path d="M8 6.5v3M8 11.6v.1"/>
+    <path d="M3 2.5h10v11H3z"/>
+    <path d="M5.5 6.5h5M5.5 9h5M5.5 11.5h2.5"/>
+    <path d="M11 2.5v3h2"/>
   </svg>
 );
 
@@ -216,8 +241,15 @@ export default function Home() {
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [bootstrapRequired, setBootstrapRequired] = useState(false);
   const [users, setUsers]             = useState<DashboardUser[]>([]);
-  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+  const [userForm, setUserForm]       = useState<{ name: string; email: string; password: string; role: UserRole }>({
+    name: '',
+    email: '',
+    password: '',
+    role: 'viewer',
+  });
   const [userCreateStatus, setUserCreateStatus] = useState('');
+  const [passwordResetFor, setPasswordResetFor] = useState('');
+  const [passwordResetValue, setPasswordResetValue] = useState('');
   const [passwordResetStatus, setPasswordResetStatus] = useState('');
   const [roleUpdateStatus, setRoleUpdateStatus] = useState('');
   const [devices, setDevices]         = useState<Device[]>([]);
@@ -225,17 +257,12 @@ export default function Home() {
   const [isUpdating, setIsUpdating]   = useState(false);
   const [policy, setPolicy]           = useState<EnterprisePolicy>(DEFAULT_POLICY);
   const [policySavedAt, setPolicySavedAt] = useState<string>('');
-  const [policyAudit, setPolicyAudit] = useState<{ by: string; at: string } | null>(null);
-  const [settingsDirty, setSettingsDirty] = useState(false);
-  const [pendingPage, setPendingPage] = useState<PageView | null>(null);
-  const [policyResult, setPolicyResult] = useState<{ ok: boolean } | null>(null);
   const [agentReleases, setAgentReleases] = useState<AgentRelease[]>([]);
   const [allAgentReleases, setAllAgentReleases] = useState<AgentRelease[]>([]);
   const [agentBuildJobs, setAgentBuildJobs] = useState<AgentBuildJob[]>([]);
   const [buildForm, setBuildForm] = useState<AgentBuildForm>(DEFAULT_BUILD_FORM);
   const [releaseStatus, setReleaseStatus] = useState('');
   const [rolloutSaving, setRolloutSaving] = useState(false);
-  const [activationRequired, setActivationRequired] = useState(false);
   const [showAllBuildHistory, setShowAllBuildHistory] = useState(false);
   const [activeTab, setActiveTab]     = useState<Record<string, DeviceTab>>({});
   const [focusCache, setFocusCache]   = useState<Record<string, AppFocusSummary[]>>({});
@@ -254,27 +281,20 @@ export default function Home() {
   const [onDemandReportType, setOnDemandReportType] = useState<OnDemandReportType>('executive');
   const [onDemandReportText, setOnDemandReportText] = useState('');
   const [onDemandReportName, setOnDemandReportName] = useState('');
-  const [inventory, setInventory] = useState<InventoryState>({ status: 'all', q: '', sort: null });
-  const inventoryRef = useRef(inventory); // latest value for URL writes outside render
-  const searchTimerRef = useRef<number | undefined>(undefined);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [currentPage, setCurrentPage] = useState<PageView>('dashboard');
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
   const [fleetConn, setFleetConn] = useState<'connecting' | 'live' | 'stale'>('connecting');
-  const [reportRowLimit, setReportRowLimit] = useState(25);
-  const [lastUpdatedAt, setLastUpdatedAt] = useState(0);
-  const [nowTick, setNowTick] = useState(0);
-  const [staleDismissed, setStaleDismissed] = useState(false);
-  const [fetchError, setFetchError] = useState('');
-  const [roleChange, setRoleChange] = useState<{ user: DashboardUser; role: UserRole } | null>(null);
   const [confirmTarget, setConfirmTarget] = useState<{ deviceId: string; name: string } | null>(null);
-  const [confirmBusy, setConfirmBusy] = useState(false);
-  const [confirmError, setConfirmError] = useState('');
   const [renameTarget, setRenameTarget] = useState<Device | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [renameError, setRenameError] = useState('');
   const [renameSaving, setRenameSaving] = useState(false);
   const [agentPingStatus, setAgentPingStatus] = useState<AgentPingStatus>({});
   const [deviceActionError, setDeviceActionError] = useState('');
+  const mobileNavButtonRef = useRef<HTMLButtonElement>(null);
   const appMainRef = useRef<HTMLElement>(null);
 
   const canManagePolicy = authUser?.role === 'admin' || authUser?.role === 'manager';
@@ -293,9 +313,7 @@ export default function Home() {
   }, []);
 
   const applyNavigationState = useCallback(() => {
-    const { view, deviceId, tab, inventory: inv } = readNavigationState();
-    window.clearTimeout(searchTimerRef.current);
-    if (view === 'inventory') { inventoryRef.current = inv; setInventory(inv); }
+    const { view, deviceId, tab } = readNavigationState();
     setCurrentPage(view);
     setSelectedDeviceId(view === 'inspect' ? deviceId : '');
     if (view === 'inspect' && deviceId) {
@@ -305,11 +323,10 @@ export default function Home() {
 
   const writeNavigationState = useCallback((
     view: PageView,
-    options: { deviceId?: string; tab?: DeviceTab; replace?: boolean; inventory?: InventoryState } = {}
+    options: { deviceId?: string; tab?: DeviceTab; replace?: boolean } = {}
   ) => {
     const params = new URLSearchParams();
     if (view !== 'dashboard') params.set('view', view);
-    if (view === 'inventory') setInventoryParams(params, options.inventory ?? inventoryRef.current);
     if (view === 'inspect' && options.deviceId) {
       params.set('device', options.deviceId);
       if (options.tab && options.tab !== 'overview') params.set('tab', options.tab);
@@ -321,10 +338,8 @@ export default function Home() {
 
   const goToPage = useCallback((
     view: PageView,
-    options: { deviceId?: string; tab?: DeviceTab; replace?: boolean; inventory?: InventoryState } = {}
+    options: { deviceId?: string; tab?: DeviceTab; replace?: boolean } = {}
   ) => {
-    window.clearTimeout(searchTimerRef.current);
-    if (options.inventory) { inventoryRef.current = options.inventory; setInventory(options.inventory); }
     const deviceId = options.deviceId ?? '';
     const tab = options.tab ?? 'overview';
     setCurrentPage(view);
@@ -339,35 +354,17 @@ export default function Home() {
     });
   }, [writeNavigationState]);
 
-  // Filter and sort changes push/replace the URL; search typing is debounced and always replaces.
-  const updateInventory = useCallback((patch: Partial<InventoryState>, replace: boolean) => {
-    const next = { ...inventoryRef.current, ...patch };
-    inventoryRef.current = next;
-    setInventory(next);
-    window.clearTimeout(searchTimerRef.current);
-    writeNavigationState('inventory', { inventory: next, replace });
-  }, [writeNavigationState]);
-
-  const updateInventorySearch = useCallback((q: string) => {
-    inventoryRef.current = { ...inventoryRef.current, q };
-    setInventory(inventoryRef.current);
-    window.clearTimeout(searchTimerRef.current);
-    searchTimerRef.current = window.setTimeout(() => writeNavigationState('inventory', { replace: true }), 300);
-  }, [writeNavigationState]);
-
   const loadCurrentUser = useCallback(async () => {
     setAuthLoading(true);
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), AUTH_CHECK_TIMEOUT_MS);
     try {
-      const bootRes = await apiFetch('/auth/bootstrap', { signal: controller.signal });
+      const bootRes = await apiFetch('/auth/bootstrap');
       if (bootRes.ok) {
         const boot = await bootRes.json();
         setBootstrapRequired(Boolean(boot.bootstrap_required));
         if (boot.bootstrap_required) setAuthMode('register');
       }
 
-      const res = await apiFetch('/auth/me', { signal: controller.signal });
+      const res = await apiFetch('/auth/me');
       if (res.ok) {
         const data = await res.json();
         setAuthUser(data.user);
@@ -378,7 +375,6 @@ export default function Home() {
       setAuthUser(null);
       setAuthError('Could not reach the API. Check that the DevicePulse API is running.');
     } finally {
-      window.clearTimeout(timeout);
       setAuthLoading(false);
     }
   }, [apiFetch]);
@@ -389,6 +385,23 @@ export default function Home() {
     const t = window.setTimeout(() => { void loadCurrentUser(); }, 0);
     return () => window.clearTimeout(t);
   }, [loadCurrentUser]);
+
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const trigger = mobileNavButtonRef.current;
+    document.body.style.overflow = 'hidden';
+    const firstItem = document.querySelector<HTMLElement>('.app-sidebar.mobile-open .nav-item');
+    firstItem?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMobileNavOpen(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      document.body.style.overflow = '';
+      trigger?.focus();
+    };
+  }, [mobileNavOpen]);
 
   useEffect(() => {
     const id = window.setTimeout(applyNavigationState, 0);
@@ -504,12 +517,11 @@ export default function Home() {
     }
   }, [apiFetch, weeklyReportFrom, weeklyReportTo]);
 
-  const fetchAllInFlight = useRef(false);
   const fetchAll = useCallback(async () => {
-    if (fetchAllInFlight.current) return; // skip poll/Retry while a fetch is running
-    fetchAllInFlight.current = true;
     try {
-      const devList = await fetchAllPages<Device>(p => apiFetch(p, { headers: readHeaders() }), '/devices', 'after', 200);
+      const devRes = await apiFetch('/devices', { headers: readHeaders() });
+      if (!devRes.ok) throw new Error(`HTTP ${devRes.status}`);
+      const devList: Device[] = (await devRes.json()) ?? [];
       setDevices(devList);
       // Focus summaries are fetched lazily for the inspected device only — no fleet-wide fan-out.
       // Browser history / daily usage refresh only for devices whose relevant tab is open.
@@ -522,16 +534,10 @@ export default function Home() {
           .map(d => fetchDailyAppUsage(d.device_id, appUsageDateRef.current, { showLoader: false })),
       ]);
       setFleetConn('live');
-      setFetchError('');
-      setLastUpdatedAt(Date.now());
-      setStaleDismissed(false);
     } catch (e) {
       console.error('Fetch error:', e);
       setFleetConn('stale');
-      setNowTick(Date.now());
-      setFetchError(e instanceof Error ? e.message : 'Could not reach the API.');
     } finally {
-      fetchAllInFlight.current = false;
       setLoading(false);
     }
   }, [apiFetch, fetchBrowserHistory, fetchDailyAppUsage]);
@@ -540,9 +546,9 @@ export default function Home() {
     try {
       const res = await apiFetch('/policy', { headers: readHeaders() });
       if (res.ok) {
-        const { updated_by, updated_at, ...d } = await res.json();
-        setPolicy({ ...DEFAULT_POLICY, ...d });
-        setPolicyAudit(updated_at ? { by: String(updated_by ?? ''), at: String(updated_at) } : null);
+        const d = await res.json();
+        const nextPolicy = { ...DEFAULT_POLICY, ...d };
+        setPolicy(nextPolicy);
       }
     } catch {}
   }, [apiFetch]);
@@ -550,15 +556,8 @@ export default function Home() {
   const fetchUsers = useCallback(async () => {
     if (!canManageUsers) return;
     try {
-      setUsers(await fetchAllPages<DashboardUser>(p => apiFetch(p), '/users', 'offset', 100));
-    } catch {}
-  }, [apiFetch, canManageUsers]);
-
-  const fetchAudit = useCallback(async () => {
-    if (!canManageUsers) return;
-    try {
-      const res = await apiFetch('/audit');
-      if (res.ok) setAuditEvents(await res.json());
+      const res = await apiFetch('/users');
+      if (res.ok) setUsers(await res.json());
     } catch {}
   }, [apiFetch, canManageUsers]);
 
@@ -570,7 +569,6 @@ export default function Home() {
         const data = await res.json();
         setAgentReleases(data.releases ?? []);
         setAllAgentReleases(data.all_releases ?? []);
-        setActivationRequired(!!data.activation_required);
       }
     } catch {}
   }, [apiFetch, canManageReleases]);
@@ -593,18 +591,11 @@ export default function Home() {
     return () => { window.clearTimeout(t); clearInterval(id); };
   }, [authUser, fetchAll, fetchPolicy]);
 
-  // Tick once a second while stale so "Last updated Xs ago" stays current.
-  useEffect(() => {
-    if (fleetConn !== 'stale') return;
-    const id = setInterval(() => setNowTick(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [fleetConn]);
-
   useEffect(() => {
     if (currentPage !== 'access') return;
-    const t = window.setTimeout(() => { void fetchUsers(); void fetchAudit(); }, 0);
+    const t = window.setTimeout(() => { void fetchUsers(); }, 0);
     return () => window.clearTimeout(t);
-  }, [currentPage, fetchUsers, fetchAudit]);
+  }, [currentPage, fetchUsers]);
 
   useEffect(() => {
     if (currentPage !== 'settings') return;
@@ -696,59 +687,54 @@ export default function Home() {
     }
   };
 
-  const createUser = async (form: { name: string; email: string; password: string; role: UserRole }): Promise<boolean> => {
+  const createUser = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
     if (!canManageUsers) {
       setUserCreateStatus('Admin access required.');
-      return false;
+      return;
     }
     setUserCreateStatus('');
-    setPasswordResetStatus('');
-    setRoleUpdateStatus('');
     try {
       const res = await apiFetch('/users', {
         method: 'POST',
         headers: adminHeaders(),
-        body: JSON.stringify(form),
+        body: JSON.stringify(userForm),
       });
       if (!res.ok) {
         setUserCreateStatus(await readApiError(res));
-        return false;
+        return;
       }
-      setUserCreateStatus(`User ${form.email} created`);
+      setUserForm({ name: '', email: '', password: '', role: 'viewer' });
+      setUserCreateStatus('User created');
       void fetchUsers();
-      void fetchAudit();
-      return true;
     } catch {
       setUserCreateStatus('Could not create user. Check the API connection and try again.');
-      return false;
     }
   };
 
-  const resetUserPassword = async (user: DashboardUser, password: string): Promise<boolean> => {
+  const resetUserPassword = async (e: FormEvent<HTMLFormElement>, user: DashboardUser) => {
+    e.preventDefault();
     if (!canManageUsers) {
       setPasswordResetStatus('Admin access required.');
-      return false;
+      return;
     }
     setPasswordResetStatus('');
-    setUserCreateStatus('');
-    setRoleUpdateStatus('');
     try {
       const res = await apiFetch(`/users/${user.id}/password`, {
         method: 'POST',
         headers: adminHeaders(),
-        body: JSON.stringify({ password }),
+        body: JSON.stringify({ password: passwordResetValue }),
       });
       if (!res.ok) {
         setPasswordResetStatus(await readApiError(res));
-        return false;
+        return;
       }
+      setPasswordResetValue('');
+      setPasswordResetFor('');
       setPasswordResetStatus(`Password reset for ${user.email}`);
       void fetchUsers();
-      void fetchAudit();
-      return true;
     } catch {
       setPasswordResetStatus('Could not reset password. Check the API connection and try again.');
-      return false;
     }
   };
 
@@ -770,47 +756,9 @@ export default function Home() {
       }
       setUsers(list => list.map(item => item.id === user.id ? { ...item, role } : item));
       setRoleUpdateStatus(`Role updated for ${user.email}`);
-      void fetchAudit();
       if (authUser?.id === user.id) void loadCurrentUser();
     } catch {
       setRoleUpdateStatus('Could not update role. Check the API connection and try again.');
-    }
-  };
-
-  const setUserStatus = async (user: DashboardUser, status: 'active' | 'disabled'): Promise<boolean> => {
-    if (!canManageUsers) return false;
-    setRoleUpdateStatus('');
-    try {
-      const res = await apiFetch(`/users/${user.id}/status`, { method: 'POST', headers: adminHeaders(), body: JSON.stringify({ status }) });
-      if (!res.ok) {
-        setRoleUpdateStatus(await readApiError(res));
-        return false;
-      }
-      setRoleUpdateStatus(`${user.email} ${status === 'active' ? 'reactivated' : 'deactivated and signed out'}`);
-      void fetchUsers();
-      void fetchAudit();
-      return true;
-    } catch {
-      setRoleUpdateStatus('Could not update the account. Check the API connection and try again.');
-      return false;
-    }
-  };
-
-  const revokeUserSessions = async (user: DashboardUser): Promise<boolean> => {
-    if (!canManageUsers) return false;
-    setRoleUpdateStatus('');
-    try {
-      const res = await apiFetch(`/users/${user.id}/sessions/revoke`, { method: 'POST', headers: adminHeaders() });
-      if (!res.ok) {
-        setRoleUpdateStatus(await readApiError(res));
-        return false;
-      }
-      setRoleUpdateStatus(`${user.email} was signed out everywhere`);
-      void fetchAudit();
-      return true;
-    } catch {
-      setRoleUpdateStatus('Could not revoke sessions. Check the API connection and try again.');
-      return false;
     }
   };
 
@@ -855,26 +803,31 @@ export default function Home() {
     }
   };
 
-  const savePolicy = async (nextPolicy: EnterprisePolicy): Promise<boolean> => {
-    if (!canManagePolicy) return false;
+  const savePolicy = async (nextPolicy: EnterprisePolicy) => {
+    if (!canManagePolicy) return;
     setIsUpdating(true);
+    setPolicy(nextPolicy);
     try {
       const res = await apiFetch('/policy', {
         method: 'POST',
         headers: adminHeaders(),
         body: JSON.stringify(nextPolicy),
       });
-      if (res.ok) {
-        setPolicy(nextPolicy);
-        setPolicySavedAt(new Date().toLocaleTimeString());
-        void fetchPolicy();
-      }
-      setPolicyResult({ ok: res.ok });
-      return res.ok;
-    } catch {
-      setPolicyResult({ ok: false });
-      return false;
-    } finally { setIsUpdating(false); }
+      if (res.ok) setPolicySavedAt(new Date().toLocaleTimeString());
+    } catch {} finally { setIsUpdating(false); }
+  };
+
+  const clampSyncInterval = (value: number) => Math.min(3600, Math.max(10, value || 10));
+
+  const updatePolicyField = <K extends keyof EnterprisePolicy>(key: K, value: EnterprisePolicy[K]) => {
+    const nextValue = key === 'sync_interval_seconds'
+      ? clampSyncInterval(Number(value)) as EnterprisePolicy[K]
+      : value;
+    const nextPolicy = { ...policy, [key]: nextValue };
+    if (key === 'browser_history_mode') {
+      nextPolicy.collect_browser_history = nextValue !== 'disabled';
+    }
+    void savePolicy(nextPolicy);
   };
 
   const startAgentBuild = async (e: FormEvent<HTMLFormElement>) => {
@@ -924,10 +877,7 @@ export default function Home() {
     }
   };
 
-  // useActive=false pushes the highest published version to every device;
-  // useActive=true pushes the currently ACTIVE version, moving devices on a newer
-  // build back to it (rollback).
-  const rolloutLatestAgents = async (useActive = false) => {
+  const rolloutLatestAgents = async () => {
     if (!canManageReleases || rolloutSaving) return;
     setReleaseStatus('');
     setRolloutSaving(true);
@@ -935,7 +885,6 @@ export default function Home() {
       const res = await apiFetch('/update/release/rollout-latest', {
         method: 'POST',
         headers: adminHeaders(),
-        ...(useActive ? { body: JSON.stringify({ use_active: true }) } : {}),
       });
       if (!res.ok) {
         setReleaseStatus(await readApiError(res));
@@ -943,7 +892,7 @@ export default function Home() {
       }
       const data: AgentRolloutResponse = await res.json();
       const targets = data.activated.map(rel => `${rel.os}/${rel.arch} ${rel.version}`).join(', ');
-      setReleaseStatus(`${useActive ? 'Rollback to the active version' : 'Immediate rollout'} started for ${targets}. ${data.devices_marked} device${data.devices_marked === 1 ? '' : 's'} will check on their next heartbeat.`);
+      setReleaseStatus(`Immediate rollout started for ${targets}. ${data.devices_marked} device${data.devices_marked === 1 ? '' : 's'} will check on their next heartbeat.`);
       await fetchAgentReleases();
       await fetchAll();
     } catch {
@@ -956,14 +905,11 @@ export default function Home() {
   const openDeleteConfirm = (deviceId: string, name: string) => {
     if (!canDeleteDevices) return;
     setDeviceActionError('');
-    setConfirmError('');
     setConfirmTarget({ deviceId, name });
   };
 
   const performDeleteDevice = async (deviceId: string) => {
-    if (!canDeleteDevices || confirmBusy) return;
-    setConfirmBusy(true);
-    setConfirmError('');
+    if (!canDeleteDevices) return;
     try {
       const res = await apiFetch(`/devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE', headers: adminHeaders() });
       if (!res.ok) throw new Error(await readApiError(res));
@@ -1006,14 +952,9 @@ export default function Home() {
       if (selectedDeviceId === deviceId) {
         goToPage('inventory', { replace: true });
       }
-      setConfirmTarget(null);
     } catch (e) {
       console.error('Device deletion failed:', e);
-      const msg = e instanceof Error ? e.message : 'Device deletion failed.';
-      setDeviceActionError(msg);
-      setConfirmError(msg);
-    } finally {
-      setConfirmBusy(false);
+      setDeviceActionError(e instanceof Error ? e.message : 'Device deletion failed.');
     }
   };
 
@@ -1212,6 +1153,7 @@ export default function Home() {
 
   const onlineCount  = devices.filter(d => isOnline(d.last_seen)).length;
   const offlineCount = devices.length - onlineCount;
+  const fleetUptimePercent = devices.length > 0 ? (onlineCount / devices.length) * 100 : 0;
   const selectedDevice = devices.find(d => d.device_id === selectedDeviceId);
   const selectedDeviceName = selectedDevice ? deviceDisplayName(selectedDevice) : selectedDeviceId;
   const selectedBrowserHistory = selectedDevice
@@ -1254,6 +1196,47 @@ export default function Home() {
 
   const criticalCount = devices.filter(d => getDeviceState(d) === 'critical').length;
   const warningCount  = devices.filter(d => getDeviceState(d) === 'warning').length;
+  const attentionDevices = [...devices]
+    .filter(d => getDeviceState(d) !== 'online')
+    .sort((a, b) => {
+      const stateWeight = (device: Device) => {
+        const state = getDeviceState(device);
+        if (state === 'critical') return 400;
+        if (state === 'offline') return 300;
+        if (state === 'warning') return 200;
+        return 0;
+      };
+      return stateWeight(b) + deviceRisk(b) - (stateWeight(a) + deviceRisk(a));
+    });
+  const needsAttentionCount = attentionDevices.length;
+  const avgCpu = devices.length > 0
+    ? devices.reduce((sum, d) => sum + (d.data?.HardwareStats?.cpu?.usage_percent ?? 0), 0) / devices.length
+    : 0;
+  const avgRam = devices.length > 0
+    ? devices.reduce((sum, d) => sum + (d.data?.HardwareStats?.ram?.used_percent ?? 0), 0) / devices.length
+    : 0;
+  const avgDisk = devices.length > 0
+    ? devices.reduce((sum, d) => sum + (primaryDisk(d.data?.HardwareStats?.disks)?.used_percent ?? 0), 0) / devices.length
+    : 0;
+  const normalizedQuery = searchQuery.trim().toLowerCase();
+  const filteredDevices = devices.filter(device => {
+    const state = getDeviceState(device);
+    if (statusFilter === 'online' && !isOnline(device.last_seen)) return false;
+    if (statusFilter !== 'all' && statusFilter !== 'online' && state !== statusFilter) return false;
+    if (!normalizedQuery) return true;
+    const sys = device.data?.SystemInfo;
+    return [device.device_id, device.display_name, device.hostname, sys?.hostname, sys?.os, sys?.platform, sys?.platform_version]
+      .filter(Boolean).join(' ').toLowerCase().includes(normalizedQuery);
+  });
+
+  const filterOptions: { key: StatusFilter; label: string; count: number }[] = [
+    { key: 'all',      label: 'All Devices', count: devices.length },
+    { key: 'online',   label: 'Online',      count: onlineCount },
+    { key: 'critical', label: 'Critical',    count: criticalCount },
+    { key: 'warning',  label: 'Warning',     count: warningCount },
+    { key: 'offline',  label: 'Offline',     count: offlineCount },
+  ];
+
   const viewDeviceDetails = (deviceId: string) => {
     goToPage('inspect', { deviceId, tab: 'overview' });
   };
@@ -1286,7 +1269,7 @@ export default function Home() {
         return true;
       });
   };
-  const visibleBuildJobs = showAllBuildHistory ? agentBuildJobs : agentBuildJobs.slice(0, 1);
+  const visibleBuildJobs = showAllBuildHistory ? agentBuildJobs : agentBuildJobs.slice(0, 2);
   const hiddenBuildJobCount = Math.max(0, agentBuildJobs.length - visibleBuildJobs.length);
   const weeklyCoverageLabel = weeklyReport
     ? weeklyReport.coverage.complete_app_usage_week
@@ -1294,13 +1277,6 @@ export default function Home() {
       : `Partial app-usage data: ${weeklyReport.coverage.app_usage_days}/${weeklyReport.requested_days} days`
     : '';
   const weeklyDevices = weeklyReport?.devices ?? [];
-  const visibleWeeklyDevices = weeklyDevices.slice(0, reportRowLimit);
-  const reportDatesDirty = !!weeklyReport && (weeklyReport.from !== weeklyReportFrom || weeklyReport.to !== weeklyReportTo);
-  const reportShowMore = weeklyDevices.length > reportRowLimit && (
-    <button type="button" className="action-btn show-more-btn" onClick={() => setReportRowLimit(n => n + 25)}>
-      Show more ({weeklyDevices.length - reportRowLimit} remaining)
-    </button>
-  );
 
   const toggleBuildPlatform = (os: AgentRelease['os'], checked: boolean) => {
     setBuildForm(form => ({
@@ -1322,8 +1298,8 @@ export default function Home() {
     return (
       <div className="auth-shell auth-shell-solo">
         <div className="auth-form-col">
-          <div className="auth-panel" role="status">
-            <div className="auth-logo-lg pulse"><LogoMark /></div>
+          <div className="auth-panel">
+            <div className="auth-logo-lg pulse"><IconLogo /></div>
             <h1>DevicePulse</h1>
             <p>Checking dashboard session…</p>
           </div>
@@ -1335,156 +1311,246 @@ export default function Home() {
   if (!authUser) {
     const isBootstrap = authMode === 'register' && bootstrapRequired;
     return (
-      <MotionConfig reducedMotion="user">
-      <div className="auth-shell auth-shell-floating">
-        <AuthMissionPanel />
+      <div className="auth-shell">
+        {/* ── Brand panel ── */}
+        <aside className="auth-brand" aria-hidden="true">
+          <div className="auth-brand-inner">
+            <div className="auth-brand-mark"><IconLogo /></div>
+            <div className="auth-brand-name">DevicePulse</div>
+            <h2 className="auth-brand-headline">Your fleet,<br />at a glance.</h2>
+            <p className="auth-brand-sub">
+              Real-time endpoint telemetry for Linux, Windows and macOS — hardware,
+              processes, browser activity and security posture in a single console.
+            </p>
+            <ul className="auth-brand-points">
+              <li><IconPulse /> Live telemetry, refreshed every few seconds</li>
+              <li><IconShield /> Role-based access with remote quarantine</li>
+              <li><IconDevices /> Cross-platform agents, one dashboard</li>
+            </ul>
+            <div className="auth-demo">
+              <div className="auth-demo-title"><span className="auth-demo-dot" />Sample fleet snapshot</div>
+              <div className="auth-demo-row">
+                <span className="auth-demo-label">CPU</span>
+                <span className="auth-demo-track"><span className="auth-demo-fill" style={{ width: '34%' }} /></span>
+                <span className="auth-demo-val">34%</span>
+              </div>
+              <div className="auth-demo-row">
+                <span className="auth-demo-label">MEM</span>
+                <span className="auth-demo-track"><span className="auth-demo-fill warn" style={{ width: '58%' }} /></span>
+                <span className="auth-demo-val">58%</span>
+              </div>
+              <div className="auth-demo-row">
+                <span className="auth-demo-label">Online</span>
+                <span className="auth-demo-track"><span className="auth-demo-fill ok" style={{ width: '86%' }} /></span>
+                <span className="auth-demo-val">128</span>
+              </div>
+            </div>
+          </div>
+          <div className="auth-brand-foot">Sessions are secured with HTTP-only cookies over TLS.</div>
+        </aside>
 
         {/* ── Form panel ── */}
-        <motion.main
-          className="auth-form-col"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ duration: .35 }}
-        >
-          <div className="auth-form-topbar">
-            <span>Private operations console</span>
-            <Link href="/platform">Platform overview <span aria-hidden="true">↗</span></Link>
-          </div>
-          <motion.section
-            className="auth-form-card"
-            aria-labelledby="auth-title"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ duration: .45, ease: [0.22, 1, 0.36, 1] }}
-          >
+        <main className="auth-form-col">
+          <form className="auth-form" onSubmit={submitAuth}>
             <div className="auth-form-brand">
-              <div className="auth-logo-lg"><LogoMark /></div>
-              <span><strong>DevicePulse</strong><small>Fleet operations console</small></span>
+              <div className="auth-logo-lg"><IconLogo /></div>
+              <span>DevicePulse</span>
             </div>
-            <div className="auth-form-heading">
-              <div className="auth-form-kicker">{isBootstrap ? 'Initial setup' : 'Authorized access'}</div>
-              <h1 id="auth-title">{isBootstrap ? 'Create first admin' : 'Welcome back'}</h1>
-              <p className="auth-form-sub">
-                {isBootstrap
-                  ? 'Create the first administrator account for this DevicePulse deployment.'
-                  : 'Sign in to inspect endpoint health, activity and security posture.'}
-              </p>
-            </div>
+            <h1>{isBootstrap ? 'Create first admin' : 'Sign in'}</h1>
+            <p className="auth-form-sub">
+              {isBootstrap
+                ? 'Bootstrap the first administrator account for this DevicePulse dashboard.'
+                : 'Use your dashboard account to view endpoint telemetry.'}
+            </p>
 
-            <form className="auth-form" onSubmit={submitAuth}>
-              {authMode === 'register' && (
-                <label className="auth-field" htmlFor="auth-name">
-                  <span>Name</span>
-                  <input
-                    id="auth-name"
-                    value={authForm.name}
-                    onChange={e => setAuthForm(f => ({ ...f, name: e.target.value }))}
-                    autoComplete="name"
-                    aria-invalid={authError ? true : undefined}
-                    aria-describedby={authError ? 'auth-error' : undefined}
-                    required
-                  />
-                </label>
-              )}
-
-              <label className="auth-field" htmlFor="auth-email">
-                <span>Email address</span>
-                <span className="auth-input-wrap">
-                  <span className="auth-input-icon"><IconMail /></span>
-                  <input
-                    id="auth-email"
-                    type="email"
-                    value={authForm.email}
-                    onChange={e => setAuthForm(f => ({ ...f, email: e.target.value }))}
-                    autoComplete="email"
-                    inputMode="email"
-                    aria-invalid={authError ? true : undefined}
-                    aria-describedby={authError ? 'auth-error' : undefined}
-                    required
-                  />
-                </span>
+            {authMode === 'register' && (
+              <label className="auth-field">
+                <span>Name</span>
+                <input
+                  value={authForm.name}
+                  onChange={e => setAuthForm(f => ({ ...f, name: e.target.value }))}
+                  autoComplete="name"
+                  required
+                />
               </label>
+            )}
 
-              <label className="auth-field" htmlFor="auth-password">
-                <span>Password</span>
-                <span className="auth-input-wrap has-toggle">
-                  <span className="auth-input-icon"><IconLock /></span>
-                  <input
-                    id="auth-password"
-                    type={showAuthPassword ? 'text' : 'password'}
-                    value={authForm.password}
-                    onChange={e => setAuthForm(f => ({ ...f, password: e.target.value }))}
-                    autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
-                    minLength={8}
-                    aria-invalid={authError ? true : undefined}
-                    aria-describedby={authError ? 'auth-error' : undefined}
-                    required
-                  />
-                  <button
-                    type="button"
-                    className="auth-pass-toggle"
-                    onClick={() => setShowAuthPassword(v => !v)}
-                    aria-label={showAuthPassword ? 'Hide password' : 'Show password'}
-                    aria-pressed={showAuthPassword}
-                  >
-                    {showAuthPassword ? <IconEyeOff /> : <IconEye />}
-                  </button>
-                </span>
-              </label>
+            <label className="auth-field">
+              <span>Email</span>
+              <span className="auth-input-wrap">
+                <span className="auth-input-icon"><IconMail /></span>
+                <input
+                  type="email"
+                  value={authForm.email}
+                  onChange={e => setAuthForm(f => ({ ...f, email: e.target.value }))}
+                  autoComplete="email"
+                  required
+                />
+              </span>
+            </label>
 
-              {authError && <div className="auth-error" id="auth-error" role="alert">{authError}</div>}
+            <label className="auth-field">
+              <span>Password</span>
+              <span className="auth-input-wrap has-toggle">
+                <span className="auth-input-icon"><IconLock /></span>
+                <input
+                  type={showAuthPassword ? 'text' : 'password'}
+                  value={authForm.password}
+                  onChange={e => setAuthForm(f => ({ ...f, password: e.target.value }))}
+                  autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
+                  minLength={8}
+                  required
+                />
+                <button
+                  type="button"
+                  className="auth-pass-toggle"
+                  onClick={() => setShowAuthPassword(v => !v)}
+                  aria-label={showAuthPassword ? 'Hide password' : 'Show password'}
+                  aria-pressed={showAuthPassword}
+                >
+                  {showAuthPassword ? <IconEyeOff /> : <IconEye />}
+                </button>
+              </span>
+            </label>
 
-              <motion.button
-                type="submit"
-                className="auth-submit"
-                disabled={authSubmitting}
-                whileTap={{ opacity: .9 }}
-              >
-                {authSubmitting && <span className="auth-btn-spinner" aria-hidden="true" />}
-                <span>
-                  {authSubmitting
-                    ? (authMode === 'register' ? 'Creating account…' : 'Verifying access…')
-                    : (authMode === 'register' ? 'Create admin account' : 'Enter operations console')}
-                </span>
-                {!authSubmitting && <span className="auth-submit-arrow" aria-hidden="true">→</span>}
-              </motion.button>
+            {authError && <div className="auth-error" role="alert">{authError}</div>}
 
-              {!bootstrapRequired && (
-                <p className="auth-hint"><IconShield /> Accounts are provisioned by your DevicePulse administrator.</p>
-              )}
-            </form>
+            <button type="submit" className="auth-submit" disabled={authSubmitting}>
+              {authSubmitting && <span className="auth-btn-spinner" aria-hidden="true" />}
+              {authSubmitting
+                ? (authMode === 'register' ? 'Creating account…' : 'Signing in…')
+                : (authMode === 'register' ? 'Create admin account' : 'Sign in')}
+            </button>
 
-            <div className="auth-session-note">
-              <IconLock />
-              <span><strong>Protected session</strong><small>HTTP-only cookies · encrypted API responses</small></span>
-            </div>
-          </motion.section>
-          <nav className="auth-form-foot" aria-label="Legal and trust documents">
-            <Link href="/privacy">Privacy</Link>
-            <Link href="/terms">Terms</Link>
-            <Link href="/security">Security</Link>
-            <Link href="/data-processing">Data processing</Link>
-          </nav>
-        </motion.main>
+            {!bootstrapRequired && (
+              <p className="auth-hint">New accounts are created by an admin.</p>
+            )}
+          </form>
+          <div className="auth-form-foot">DevicePulse · Endpoint telemetry console</div>
+        </main>
       </div>
-      </MotionConfig>
     );
   }
 
   return (
     <MotionConfig reducedMotion="user" transition={{ duration: 0.18, ease: 'easeOut' }}>
-    <AppShell
-      currentPage={currentPage}
-      onNavigate={page => (currentPage === 'settings' && settingsDirty && page !== 'settings' ? setPendingPage(page) : goToPage(page))}
-      canManageUsers={canManageUsers}
-      fleetConn={fleetConn}
-      loading={loading}
-      staleSeconds={fleetConn === 'stale' && lastUpdatedAt > 0 ? Math.max(0, Math.round((nowTick - lastUpdatedAt) / 1000)) : null}
-      onlineCount={onlineCount}
-      totalCount={devices.length}
-      user={{ name: authUser.name, email: authUser.email, roleText: roleLabel[authUser.role] }}
-      onSignOut={() => { void logout(); }}
+    <motion.div
+      className="app-shell"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
     >
+
+      {/* ── Top header bar ── */}
+      <header className="app-header">
+        <button
+          ref={mobileNavButtonRef}
+          type="button"
+          className="mobile-nav-toggle"
+          aria-label={mobileNavOpen ? 'Close navigation' : 'Open navigation'}
+          aria-expanded={mobileNavOpen}
+          onClick={() => setMobileNavOpen(open => !open)}
+        >
+          <span /><span /><span />
+        </button>
+        <div className="header-brand">
+          <div className="header-logo"><IconLogo /></div>
+          <span className="brand-name">DevicePulse</span>
+        </div>
+
+        <div className="header-right">
+          <div className="header-status">
+            <HeaderClock />
+            {!loading && fleetConn === 'live' && (
+              <span className="live-badge">
+                <span className="dot" />
+                Live
+              </span>
+            )}
+            {fleetConn === 'stale' && (
+              <span className="live-badge is-stale" role="status">
+                <span className="dot" />
+                Reconnecting…
+              </span>
+            )}
+          </div>
+          <details className="user-menu">
+            <summary className="user-chip" aria-label="User menu">
+              <span className="user-avatar">{(authUser.name || authUser.email || 'U').charAt(0).toUpperCase()}</span>
+              <span className="user-copy">
+                <span className="user-name">{authUser.name || authUser.email}</span>
+                <span className="user-role">{roleLabel[authUser.role]}</span>
+              </span>
+              <span className="user-caret" aria-hidden="true" />
+            </summary>
+            <div className="user-menu-panel">
+              <button type="button" onClick={logout}>Sign out</button>
+            </div>
+          </details>
+        </div>
+      </header>
+
+      {/* ── Sidebar ── */}
+      <aside className={`app-sidebar ${mobileNavOpen ? 'mobile-open' : ''}`} aria-label="Primary navigation">
+        <div className="sidebar-section">
+          <div className="sidebar-label">Navigation</div>
+          <nav className="sidebar-nav" aria-label="Dashboard pages">
+            <button
+              type="button"
+              className={`nav-item ${currentPage === 'dashboard' ? 'active' : ''}`}
+              onClick={() => { goToPage('dashboard'); setMobileNavOpen(false); }}
+              aria-current={currentPage === 'dashboard' ? 'page' : undefined}
+            >
+              <IconGrid />
+              Overview
+            </button>
+            <button
+              type="button"
+              className={`nav-item ${currentPage === 'inventory' ? 'active' : ''}`}
+              onClick={() => { goToPage('inventory'); setMobileNavOpen(false); }}
+              aria-current={currentPage === 'inventory' ? 'page' : undefined}
+            >
+              <IconList />
+              Devices
+            </button>
+            <button
+              type="button"
+              className={`nav-item ${currentPage === 'reports' ? 'active' : ''}`}
+              onClick={() => { goToPage('reports'); setMobileNavOpen(false); }}
+              aria-current={currentPage === 'reports' ? 'page' : undefined}
+            >
+              <IconReport />
+              Reports
+            </button>
+            <button
+              type="button"
+              className={`nav-item ${currentPage === 'settings' ? 'active' : ''}`}
+              onClick={() => { goToPage('settings'); setMobileNavOpen(false); }}
+              aria-current={currentPage === 'settings' ? 'page' : undefined}
+            >
+              <IconSettings />
+              Settings
+            </button>
+            {canManageUsers && (
+              <button
+                type="button"
+                className={`nav-item ${currentPage === 'access' ? 'active' : ''}`}
+                onClick={() => { goToPage('access'); setMobileNavOpen(false); }}
+                aria-current={currentPage === 'access' ? 'page' : undefined}
+              >
+                <IconSettings />
+                Access
+              </button>
+            )}
+          </nav>
+        </div>
+
+        <div className="sidebar-status" aria-label="Fleet connection status">
+          <span className={`status-indicator ${fleetConn === 'live' ? 'is-live' : ''}`} />
+          <div><strong>{fleetConn === 'live' ? 'Fleet connected' : 'Updating fleet'}</strong><span>{onlineCount} of {devices.length} online now</span></div>
+        </div>
+
+      </aside>
+      {mobileNavOpen && <button type="button" className="mobile-nav-backdrop" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)} />}
 
       {/* ── Main content ── */}
       <main ref={appMainRef} className="app-main">
@@ -1495,26 +1561,18 @@ export default function Home() {
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: -8 }}
-          transition={{ duration: 0.12 }}
         >
 
-          {fleetConn === 'stale' && !staleDismissed && lastUpdatedAt > 0 && ['dashboard', 'inventory', 'inspect'].includes(currentPage) && (
-            <div className="stale-banner" role="status">
-              <span>Connection lost. Showing the last data received; retrying automatically.</span>
-              <button type="button" className="action-btn" onClick={() => void fetchAll()}>Retry now</button>
-              <button type="button" className="stale-banner-close" aria-label="Dismiss connection warning" onClick={() => setStaleDismissed(true)}>×</button>
-            </div>
-          )}
-
-          {/* Page header (the device detail view renders its own compact header) */}
-          {currentPage !== 'inspect' && (
+          {/* Page header */}
           <div className="page-header">
-            <div className="page-heading-copy">
+            <div>
               <h1>
                 {currentPage === 'settings'
                   ? 'Settings'
                   : currentPage === 'access'
                     ? 'Access Control'
+                  : currentPage === 'inspect'
+                    ? selectedDeviceName || 'Inspect Device'
                   : currentPage === 'reports'
                     ? 'Weekly Report'
                   : currentPage === 'inventory'
@@ -1526,13 +1584,34 @@ export default function Home() {
                   ? 'Enterprise data collection, retention and upload controls'
                   : currentPage === 'access'
                   ? 'Create dashboard users and assign roles'
+                  : currentPage === 'inspect'
+                  ? selectedDevice?.device_id || 'Device telemetry details'
                   : currentPage === 'reports'
                   ? 'Seven-day fleet activity and coverage'
                   : currentPage === 'inventory'
                   ? `${devices.length.toLocaleString()} registered endpoint${devices.length !== 1 ? 's' : ''}`
-                  : 'Current fleet health'}
+                  : 'Current fleet health and devices that need attention'}
               </p>
             </div>
+            {currentPage === 'inspect' ? (
+              <div className="toolbar">
+                <button type="button" className="btn" onClick={() => goToPage('inventory')}>
+                  ‹ Back to Inventory
+                </button>
+              </div>
+            ) : currentPage === 'inventory' && (
+              <div className="toolbar">
+                <div className="search-box">
+                  <IconSearch />
+                  <input
+                    value={searchQuery}
+                    onChange={e => setSearchQuery(e.target.value)}
+                    placeholder="Search by ID, name or OS…"
+                    aria-label="Search devices"
+                  />
+                </div>
+              </div>
+            )}
             {currentPage === 'reports' && (
               <div className="toolbar report-toolbar">
                 <label>
@@ -1562,198 +1641,526 @@ export default function Home() {
                 <button type="button" className="btn" onClick={() => void fetchWeeklyReport()} disabled={weeklyReportLoading}>
                   {weeklyReportLoading ? 'Loading...' : 'Refresh'}
                 </button>
-                {reportDatesDirty && !weeklyReportLoading && (
-                  <span className="date-dirty-hint" role="status">Dates changed — refresh to update</span>
-                )}
+              </div>
+            )}
+            {currentPage === 'settings' && (
+              <div className="page-save-status" aria-live="polite">
+                <span className={`status-indicator ${isUpdating ? 'is-saving' : policySavedAt ? 'is-saved' : ''}`} />
+                <div>
+                  <strong>{!canManagePolicy ? 'Read-only access' : isUpdating ? 'Saving changes' : policySavedAt ? 'Policy saved' : 'Changes save automatically'}</strong>
+                  <small>{!canManagePolicy ? 'A manager or admin can change fleet policy.' : policySavedAt ? `Last saved ${policySavedAt}` : 'Updates apply to the global fleet policy.'}</small>
+                </div>
               </div>
             )}
           </div>
-          )}
 
           {deviceActionError && <div className="auth-error" role="alert">{deviceActionError}</div>}
 
           {currentPage === 'dashboard' && (
             <>
-              <OverviewView
-                devices={devices}
-                counts={{ all: devices.length, online: onlineCount, warning: warningCount, critical: criticalCount, offline: offlineCount }}
-                getState={getDeviceState}
-                onOpenDevices={filter => goToPage('inventory', { inventory: { ...inventoryRef.current, status: filter, q: '' } })}
-                onInspect={viewDeviceDetails}
-              />
+              <section className="dashboard-tiles" aria-label="Fleet summary">
+                <button
+                  type="button"
+                  className="dashboard-tile"
+                  onClick={() => {
+                    setStatusFilter('all');
+                    goToPage('inventory');
+                  }}
+                >
+                  <span>Total Devices</span>
+                  <strong>{devices.length.toLocaleString()}</strong>
+                  <small>Registered endpoints</small>
+                </button>
+                <button
+                  type="button"
+                  className="dashboard-tile tile-online"
+                  onClick={() => {
+                    setStatusFilter('online');
+                    goToPage('inventory');
+                  }}
+                >
+                  <span>Online Now</span>
+                  <strong>{onlineCount.toLocaleString()}</strong>
+                  <small>{fleetUptimePercent.toFixed(0)}% of fleet</small>
+                </button>
+                <button
+                  type="button"
+                  className="dashboard-tile tile-offline"
+                  onClick={() => {
+                    setStatusFilter('offline');
+                    goToPage('inventory');
+                  }}
+                >
+                  <span>Offline</span>
+                  <strong>{offlineCount.toLocaleString()}</strong>
+                  <small>Missed recent check-in</small>
+                </button>
+                <button
+                  type="button"
+                  className="dashboard-tile tile-attention"
+                  onClick={() => {
+                    setStatusFilter(criticalCount > 0 ? 'critical' : warningCount > 0 ? 'warning' : offlineCount > 0 ? 'offline' : 'all');
+                    goToPage('inventory');
+                  }}
+                >
+                  <span>Needs Attention</span>
+                  <strong>{needsAttentionCount.toLocaleString()}</strong>
+                  <small>{criticalCount} critical · {warningCount} warning</small>
+                </button>
+              </section>
+
+              <section className="overview-workspace">
+                <div className="attention-panel">
+                  <div className="section-heading">
+                    <div><span>Priority queue</span><h2>Needs attention</h2></div>
+                    <button type="button" className="text-button" onClick={() => goToPage('inventory')}>View all devices</button>
+                  </div>
+                  {attentionDevices.length ? (
+                    <div className="attention-list">
+                      {attentionDevices.slice(0, 6).map(device => {
+                        const state = getDeviceState(device);
+                        const risk = deviceRisk(device);
+                        const reason = state === 'offline' ? 'Device is no longer checking in' : `${risk.toFixed(0)}% peak resource usage`;
+                        return (
+                          <button key={device.device_id} type="button" className="attention-row" onClick={() => viewDeviceDetails(device.device_id)}>
+                            <span className={`attention-icon state-${state}`} aria-hidden="true">{state === 'critical' ? '!' : state === 'warning' ? '↑' : '–'}</span>
+                            <span className="attention-copy"><strong>{deviceDisplayName(device)}</strong><small>{reason}</small></span>
+                            <span className={`status-badge badge-${state}`}><span className="dot" />{state === 'offline' ? 'Offline' : state}</span>
+                            <span className="attention-seen">{timeAgo(device.last_seen)}</span>
+                            <span className="row-chevron" aria-hidden="true">›</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="healthy-empty"><span>✓</span><div><strong>Fleet looks healthy</strong><p>All connected devices are within the current resource thresholds.</p></div></div>
+                  )}
+                </div>
+
+                <aside className="fleet-snapshot" aria-label="Fleet resource snapshot">
+                  <div className="section-heading"><div><span>Current snapshot</span><h2>Fleet resources</h2></div></div>
+                  {[
+                    ['CPU', avgCpu, 'blue'],
+                    ['Memory', avgRam, 'cyan'],
+                    ['Disk', avgDisk, 'violet'],
+                    ['Connected', fleetUptimePercent, 'green'],
+                  ].map(([label, value, tone]) => (
+                    <div className="snapshot-metric" key={String(label)}>
+                      <div><span>{label}</span><strong>{Number(value).toFixed(0)}%</strong></div>
+                      <div className="snapshot-track"><i className={`tone-${tone}`} style={{ width: `${Math.min(100, Number(value))}%` }} /></div>
+                    </div>
+                  ))}
+                  <p>Current fleet averages from the latest device check-ins.</p>
+                </aside>
+              </section>
             </>
+          )}
+
+          {/* Status filter tabs */}
+          {currentPage === 'inventory' && (
+            <div className="filter-tabs" role="group" aria-label="Filter by status">
+              {filterOptions.map(opt => (
+                <button
+                  key={opt.key}
+                  type="button"
+                  className={`filter-tab tab-${opt.key} ${statusFilter === opt.key ? 'active' : ''}`}
+                  onClick={() => setStatusFilter(opt.key)}
+                >
+                  {opt.label}
+                  <span className="tab-count">{opt.count.toLocaleString()}</span>
+                </button>
+              ))}
+            </div>
           )}
 
           {/* Content */}
           {currentPage === 'access' && !canManageUsers ? (
             <div className="empty-state">
-              <span className="empty-icon" aria-hidden="true"><IconLock /></span>
+              <span className="empty-icon">🔒</span>
               <div className="empty-title">Admin access required</div>
               <div className="empty-sub">User management is available to dashboard admins only.</div>
             </div>
           ) : currentPage === 'access' ? (
-            <AccessView
-              users={users}
-              currentUserId={authUser?.id}
-              onRequestRoleChange={(user, role) => setRoleChange({ user, role })}
-              onCreate={createUser}
-              onResetPassword={resetUserPassword}
-              notices={[userCreateStatus, passwordResetStatus, roleUpdateStatus]}
-              onSetStatus={setUserStatus}
-              onRevokeSessions={revokeUserSessions}
-              audit={auditEvents}
-            />
+            <div className="settings-layout">
+              <section className="role-summary-grid" aria-label="Dashboard role permissions">
+                <div><span>Viewer</span><strong>Read telemetry</strong><p>Can inspect devices, reports, and current policy.</p></div>
+                <div><span>Manager</span><strong>Manage policy</strong><p>Viewer access plus collection and retention settings.</p></div>
+                <div><span>Admin</span><strong>Full control</strong><p>Can manage users, devices, releases, and fleet policy.</p></div>
+              </section>
+              <section className="settings-panel">
+                <div className="settings-panel-header">
+                  <div>
+                    <h2>Create Dashboard User</h2>
+                    <p>New users can sign in after an admin creates their account.</p>
+                  </div>
+                  {userCreateStatus && <span className="save-state" role="status">{userCreateStatus}</span>}
+                </div>
+                <form className="user-form" onSubmit={createUser}>
+                  <label className="auth-field">
+                    <span>Name</span>
+                    <input
+                      value={userForm.name}
+                      onChange={e => setUserForm(f => ({ ...f, name: e.target.value }))}
+                      autoComplete="name"
+                    />
+                  </label>
+                  <label className="auth-field">
+                    <span>Email</span>
+                    <input
+                      type="email"
+                      value={userForm.email}
+                      onChange={e => setUserForm(f => ({ ...f, email: e.target.value }))}
+                      autoComplete="email"
+                      required
+                    />
+                  </label>
+                  <label className="auth-field">
+                    <span>Role</span>
+                    <select
+                      value={userForm.role}
+                      onChange={e => setUserForm(f => ({ ...f, role: e.target.value as UserRole }))}
+                    >
+                      <option value="viewer">Viewer</option>
+                      <option value="manager">Manager</option>
+                      <option value="admin">Admin</option>
+                    </select>
+                  </label>
+                  <label className="auth-field">
+                    <span>Temporary Password</span>
+                    <input
+                      type="password"
+                      value={userForm.password}
+                      onChange={e => setUserForm(f => ({ ...f, password: e.target.value }))}
+                      autoComplete="new-password"
+                      minLength={8}
+                      required
+                    />
+                  </label>
+                  <button type="submit" className="auth-submit user-submit">Create user</button>
+                </form>
+              </section>
+
+              <section className="settings-panel">
+                <div className="settings-panel-header">
+                  <div>
+                    <h2>Dashboard Users</h2>
+                    <p>Accounts with active access to this dashboard.</p>
+                  </div>
+                  {passwordResetStatus && <span className="save-state" role="status">{passwordResetStatus}</span>}
+                  {roleUpdateStatus && <span className="save-state" role="status">{roleUpdateStatus}</span>}
+                </div>
+                <div className="table-wrap">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th scope="col">User</th>
+                        <th scope="col">Role</th>
+                        <th scope="col">Status</th>
+                        <th scope="col">Created</th>
+                        <th scope="col" style={{ textAlign: 'right' }}>Password</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {users.map(user => (
+                        <tr key={user.id}>
+                          <td>
+                            <div className="device-cell-text">
+                              <strong>{user.name || user.email}</strong>
+                              <span>{user.email}</span>
+                            </div>
+                          </td>
+                          <td>
+                            <select
+                              className="role-select"
+                              value={user.role}
+                              onChange={e => updateUserRole(user, e.target.value as UserRole)}
+                              aria-label={`Change role for ${user.email}`}
+                            >
+                              <option value="viewer">Viewer</option>
+                              <option value="manager">Manager</option>
+                              <option value="admin">Admin</option>
+                            </select>
+                          </td>
+                          <td>{user.status ?? 'active'}</td>
+                          <td>{user.created_at ? new Date(user.created_at).toLocaleDateString() : '—'}</td>
+                          <td>
+                            {passwordResetFor === user.id ? (
+                              <form className="reset-password-form" onSubmit={e => resetUserPassword(e, user)}>
+                                <input
+                                  type="password"
+                                  value={passwordResetValue}
+                                  onChange={e => setPasswordResetValue(e.target.value)}
+                                  placeholder="New password"
+                                  minLength={8}
+                                  autoComplete="new-password"
+                                  required
+                                />
+                                <button type="submit" className="action-btn">Save</button>
+                                <button
+                                  type="button"
+                                  className="action-btn"
+                                  onClick={() => {
+                                    setPasswordResetFor('');
+                                    setPasswordResetValue('');
+                                  }}
+                                >
+                                  Cancel
+                                </button>
+                              </form>
+                            ) : (
+                              <div className="row-actions">
+                                <button
+                                  type="button"
+                                  className="action-btn"
+                                  onClick={() => {
+                                    setPasswordResetStatus('');
+                                    setPasswordResetFor(user.id);
+                                    setPasswordResetValue('');
+                                  }}
+                                >
+                                  Reset
+                                </button>
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
           ) : currentPage === 'settings' ? (
-            <SettingsView
-              policy={policy}
-              canManage={canManagePolicy}
-              collectors={collectorControls}
-              onSave={savePolicy}
-              saving={isUpdating}
-              savedAt={policySavedAt}
-              saveFailed={policyResult?.ok === false}
-              deviceCount={devices.length}
-              audit={policyAudit}
-              onDirtyChange={setSettingsDirty}
-              releases={canManageReleases ? (
-                <section className="set-card">
-                  <header className="rel-card-head">
+            <div className="settings-layout">
+              <section className="settings-panel">
+                <div className="settings-panel-header">
+                  <div>
+                    <h2>Retention</h2>
+                    <p>Controls how long new server telemetry remains queryable.</p>
+                  </div>
+                </div>
+                <div className="settings-grid two-col">
+                  <label className="setting-field">
+                    <span>Telemetry Retention</span>
+                    <div className="number-control">
+                      <input
+                        type="number"
+                        min="1"
+                        max="3650"
+                        value={policy.telemetry_retention_days}
+                        disabled={!canManagePolicy}
+                        onChange={e => setPolicy(p => ({ ...p, telemetry_retention_days: Number(e.target.value) }))}
+                        onBlur={e => updatePolicyField('telemetry_retention_days', Number(e.target.value))}
+                      />
+                      <span>days</span>
+                    </div>
+                  </label>
+                  <label className="setting-field">
+                    <span>Sync Interval</span>
+                    <div className="number-control">
+                      <input
+                        type="number"
+                        min="10"
+                        max="3600"
+                        value={policy.sync_interval_seconds}
+                        disabled={!canManagePolicy}
+                        onChange={e => {
+                          const next = Number(e.target.value);
+                          setPolicy(p => ({ ...p, sync_interval_seconds: next }));
+                        }}
+                        onBlur={e => updatePolicyField('sync_interval_seconds', Number(e.target.value))}
+                      />
+                      <span>seconds</span>
+                    </div>
+                  </label>
+                </div>
+              </section>
+
+              <section className="settings-panel">
+                <div className="settings-panel-header">
+                  <div>
+                    <h2>Data Caching</h2>
+                    <p>Reduces repeated uploads by sending only data that changed or has not been sent before.</p>
+                  </div>
+                </div>
+                <div className="toggle-list">
+                  <label className="toggle-row">
+                    <span>
+                      <strong>Delta upload</strong>
+                      <small>Upload changed collector payloads instead of full repeated snapshots.</small>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={policy.delta_upload_enabled}
+                      disabled={!canManagePolicy}
+                      onChange={e => updatePolicyField('delta_upload_enabled', e.target.checked)}
+                    />
+                  </label>
+                  <label className="toggle-row">
+                    <span>
+                      <strong>Cache unchanged collector data</strong>
+                      <small>Keep local fingerprints so unchanged apps, services, ports and browser entries are skipped.</small>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={policy.cache_unchanged_collector_data}
+                      disabled={!canManagePolicy}
+                      onChange={e => updatePolicyField('cache_unchanged_collector_data', e.target.checked)}
+                    />
+                  </label>
+                </div>
+              </section>
+
+              <section className="settings-panel">
+                <div className="settings-panel-header">
+                  <div>
+                    <h2>Browser History</h2>
+                    <p>Choose how much URL detail is retained for browser history reporting.</p>
+                  </div>
+                </div>
+                <div className="segmented-control" role="group" aria-label="Browser history mode">
+                  {([
+                    ['domain_only', 'Domain only'],
+                    ['full_url', 'Full URL'],
+                  ] as const).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      className={policy.browser_history_mode === value ? 'active' : ''}
+                      disabled={!canManagePolicy}
+                      onClick={() => updatePolicyField('browser_history_mode', value)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <label className="setting-field compact-field">
+                  <span>Browser Entry Limit</span>
+                  <div className="number-control">
+                    <input
+                      type="number"
+                      min="0"
+                      max="1000"
+                      value={policy.browser_history_limit}
+                      disabled={!canManagePolicy}
+                      onChange={e => setPolicy(p => ({ ...p, browser_history_limit: Number(e.target.value) }))}
+                      onBlur={e => updatePolicyField('browser_history_limit', Number(e.target.value))}
+                    />
+                    <span>entries</span>
+                  </div>
+                </label>
+              </section>
+
+              {canManageReleases && (
+                <section className="settings-panel">
+                  <div className="settings-panel-header">
                     <div>
-                      <h2>Agent releases</h2>
+                      <h2>Agent Rollouts</h2>
                       <p>Build, upload, publish, and roll back agent binaries for supported targets.</p>
                     </div>
                     <div className="release-header-actions">
                       <button
                         type="button"
-                        className="action-btn"
+                        className="action-btn primary"
                         onClick={() => void rolloutLatestAgents()}
                         disabled={rolloutSaving || allAgentReleases.length === 0}
                       >
                         {rolloutSaving ? 'Starting...' : 'Update Agents'}
                       </button>
-                      <button
-                        type="button"
-                        className="action-btn"
-                        title="Move every device to the currently active version, including devices on a newer build"
-                        onClick={() => void rolloutLatestAgents(true)}
-                        disabled={rolloutSaving || allAgentReleases.length === 0}
-                      >
-                        Roll back to active
-                      </button>
                       <button type="button" className="action-btn" onClick={() => { void fetchAgentReleases(); void fetchAgentBuildJobs(); }}>
                         Refresh
                       </button>
                     </div>
-                  </header>
+                  </div>
 
-                  {activationRequired && (
-                    <p className="rel-empty">New builds are held back until you activate them. Agents keep updating only to the active version.</p>
-                  )}
-                  <div className="rel-grid">
+                  <div className="release-grid">
                     {releasesByOS.map(target => (
-                      <section key={target.os} className={`rel-card${target.releases.length ? '' : ' is-empty'}`} aria-label={`${target.label} releases`}>
-                        <header className="rel-head">
+                      <div key={target.os} className="release-card">
+                        <div className="release-card-head">
                           <strong>{target.label}</strong>
-                          <span className={`rel-status${target.releases.length ? ' is-live' : ''}`}>{target.releases.length ? 'Published' : 'Not released'}</span>
-                        </header>
+                          <span>{target.releases.length ? `${target.releases.length} build${target.releases.length !== 1 ? 's' : ''}` : 'No release'}</span>
+                        </div>
                         {target.releases.length ? (
-                          <ul className="rel-list">
+                          <div className="release-builds">
                             {target.releases.map(rel => (
-                              <li key={`${rel.os}-${rel.arch}`} className="rel-item">
-                                <div className="rel-item-top">
-                                  <span className="rel-arch">{rel.arch}</span>
-                                  <strong className="rel-version">v{rel.version.replace(/^v/i, '')}</strong>
-                                  <span className="rel-active">Active</span>
-                                </div>
-                                <small>{rel.published_at ? new Date(rel.published_at).toLocaleString(undefined, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Published'}</small>
-                                <label className="rel-switch">
-                                  <span>Active version</span>
-                                  <select
-                                    value={rel.version}
-                                    onChange={e => {
-                                      const selected = releaseOptionsFor(rel.os, rel.arch).find(item => item.version === e.target.value);
-                                      if (selected) void activateAgentRelease(selected);
-                                    }}
-                                    aria-label={`Activate ${target.label} ${rel.arch} release`}
-                                  >
-                                    {releaseOptionsFor(rel.os, rel.arch).map(option => (
-                                      <option key={`${option.os}-${option.arch}-${option.version}`} value={option.version}>
-                                        {option.version}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </label>
-                              </li>
+                              <div key={`${rel.os}-${rel.arch}`} className="release-build">
+                                <span className="pill pill-blue mono">{rel.arch}</span>
+                                <strong>{rel.version}</strong>
+                                <small>{rel.published_at ? new Date(rel.published_at).toLocaleString() : 'Published'}</small>
+                                <select
+                                  value={rel.version}
+                                  onChange={e => {
+                                    const selected = releaseOptionsFor(rel.os, rel.arch).find(item => item.version === e.target.value);
+                                    if (selected) void activateAgentRelease(selected);
+                                  }}
+                                  aria-label={`Activate ${target.label} ${rel.arch} release`}
+                                >
+                                  {releaseOptionsFor(rel.os, rel.arch).map(option => (
+                                    <option key={`${option.os}-${option.arch}-${option.version}`} value={option.version}>
+                                      {option.version}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
                             ))}
-                          </ul>
-                        ) : (
-                          <p className="rel-empty">No binary published yet. Build a version below to publish one.</p>
-                        )}
-                        {allAgentReleases.filter(rel => rel.os === target.os && rel.pending_activation).map(rel => (
-                          <div key={`pending-${rel.os}-${rel.arch}-${rel.version}`} className="rel-item">
-                            <div className="rel-item-top">
-                              <span className="rel-arch">{rel.arch}</span>
-                              <strong className="rel-version">v{rel.version.replace(/^v/i, '')}</strong>
-                              <span className="rel-status">Awaiting activation</span>
-                            </div>
-                            <button type="button" className="action-btn" onClick={() => void activateAgentRelease(rel)}>
-                              Activate
-                            </button>
                           </div>
-                        ))}
-                      </section>
+                        ) : (
+                          <div className="release-empty">No binary published yet.</div>
+                        )}
+                      </div>
                     ))}
                   </div>
 
-                  <form className="build-form" onSubmit={startAgentBuild} aria-label="Build a new agent version">
-                    <div className="build-fields">
-                      <label className="build-field">
-                        <span>Version</span>
-                        <input
-                          value={buildForm.version}
-                          onChange={e => setBuildForm(form => ({ ...form, version: e.target.value }))}
-                          placeholder="1.0.1"
-                          required
-                        />
-                      </label>
-                      <label className="build-field">
-                        <span>API URL</span>
-                        <input
-                          value={buildForm.api_url}
-                          onChange={e => setBuildForm(form => ({ ...form, api_url: e.target.value }))}
-                          placeholder={API || 'Auto from hosted API'}
-                          type="url"
-                        />
-                      </label>
-                    </div>
-                    <div className="build-choices">
-                      <fieldset className="build-choice">
-                        <legend>Platforms</legend>
-                        <div>
-                          {RELEASE_TARGETS.map(target => (
-                            <label key={target.os} className="chip-check">
-                              <input type="checkbox" checked={buildForm.platforms.includes(target.os)} onChange={e => toggleBuildPlatform(target.os, e.target.checked)} />
-                              <span>{target.label}</span>
-                            </label>
-                          ))}
-                        </div>
-                      </fieldset>
-                      <fieldset className="build-choice">
-                        <legend>Architectures</legend>
-                        <div>
-                          {['amd64', 'arm64'].map(arch => (
-                            <label key={arch} className="chip-check">
-                              <input type="checkbox" checked={buildForm.archs.includes(arch)} onChange={e => toggleBuildArch(arch, e.target.checked)} />
-                              <span>{arch}</span>
-                            </label>
-                          ))}
-                        </div>
-                      </fieldset>
-                    </div>
-                    <div className="build-footer">
-                      <p>{buildForm.platforms.length * buildForm.archs.length} target{buildForm.platforms.length * buildForm.archs.length === 1 ? '' : 's'} will be built{buildForm.version.trim() ? ` as v${buildForm.version.trim().replace(/^v/i, '')}` : ''}.</p>
-                      <button type="submit" className="action-btn primary" disabled={buildForm.platforms.length === 0 || buildForm.archs.length === 0}>Build version</button>
-                    </div>
+                  <form className="release-form build-form" onSubmit={startAgentBuild}>
+                    <label className="setting-field">
+                      <span>Version</span>
+                      <input
+                        value={buildForm.version}
+                        onChange={e => setBuildForm(form => ({ ...form, version: e.target.value }))}
+                        placeholder="1.0.1"
+                        required
+                      />
+                    </label>
+                    <label className="setting-field">
+                      <span>API URL</span>
+                      <input
+                        value={buildForm.api_url}
+                        onChange={e => setBuildForm(form => ({ ...form, api_url: e.target.value }))}
+                        placeholder={API || 'Auto from hosted API'}
+                        type="url"
+                      />
+                    </label>
+                    <label className="setting-field release-choice-field">
+                      <span>Platforms</span>
+                      <div className="choice-row">
+                        {RELEASE_TARGETS.map(target => (
+                          <label key={target.os}>
+                            <input
+                              type="checkbox"
+                              checked={buildForm.platforms.includes(target.os)}
+                              onChange={e => toggleBuildPlatform(target.os, e.target.checked)}
+                            />
+                            {target.label}
+                          </label>
+                        ))}
+                      </div>
+                    </label>
+                    <label className="setting-field release-choice-field">
+                      <span>Architectures</span>
+                      <div className="choice-row">
+                        {['amd64', 'arm64'].map(arch => (
+                          <label key={arch}>
+                            <input
+                              type="checkbox"
+                              checked={buildForm.archs.includes(arch)}
+                              onChange={e => toggleBuildArch(arch, e.target.checked)}
+                            />
+                            {arch}
+                          </label>
+                        ))}
+                      </div>
+                    </label>
+                    <button type="submit" className="action-btn release-submit">Build New Version</button>
                   </form>
                   {releaseStatus && <div className="form-status" role="status">{releaseStatus}</div>}
 
@@ -1761,7 +2168,7 @@ export default function Home() {
                     <div className="build-history">
                       <div className="build-history-head">
                         <div className="sub-section-title">Build History</div>
-                        {agentBuildJobs.length > 1 && (
+                        {agentBuildJobs.length > 2 && (
                           <button
                             type="button"
                             className="action-btn compact"
@@ -1806,10 +2213,35 @@ export default function Home() {
                     </div>
                   )}
                 </section>
-              ) : null}
-            />
+              )}
+
+              <section className="settings-panel">
+                <div className="settings-panel-header">
+                  <div>
+                    <h2>Collectors</h2>
+                    <p>Enable only the telemetry categories required by your environment.</p>
+                  </div>
+                </div>
+                <div className="collector-grid">
+                  {collectorControls.map(item => (
+                    <label key={item.key} className="collector-toggle">
+                      <span>
+                        <strong>{item.label}</strong>
+                        <small>{item.meta}</small>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(policy[item.key])}
+                        disabled={!canManagePolicy}
+                        onChange={e => updatePolicyField(item.key, e.target.checked)}
+                      />
+                    </label>
+                  ))}
+                </div>
+              </section>
+            </div>
           ) : currentPage === 'reports' ? (
-            <div className="reports-layout" aria-busy={weeklyReportLoading} data-refreshing={weeklyReportLoading && !!weeklyReport ? 'true' : undefined}>
+            <div className="reports-layout">
               {weeklyReportError && <div className="auth-error" role="alert">{weeklyReportError}</div>}
               {weeklyReportLoading && !weeklyReport ? (
                 <div className="loading" role="status">Building weekly report...</div>
@@ -1946,9 +2378,8 @@ export default function Home() {
                             <p>Devices sorted by total app usage in this report window.</p>
                           </div>
                         </div>
-                        <div className="table-wrap" role="region" tabIndex={0} aria-label="Highest usage devices, scrollable table">
+                        <div className="table-wrap">
                           <table className="data-table report-table">
-                            <caption className="sr-only">Highest usage devices in the report window</caption>
                             <thead>
                               <tr>
                                 <th scope="col">Device</th>
@@ -1959,7 +2390,7 @@ export default function Home() {
                               </tr>
                             </thead>
                             <tbody>
-                              {visibleWeeklyDevices.map(device => (
+                              {weeklyDevices.map(device => (
                                 <tr key={device.device_id} className={`row-${device.state}`}>
                                   <td>
                                     <div className="device-cell-text">
@@ -1981,7 +2412,6 @@ export default function Home() {
                             </tbody>
                           </table>
                         </div>
-                        {reportShowMore}
                       </section>
                     </>
                   )}
@@ -2017,9 +2447,8 @@ export default function Home() {
                             <p>Per-device app usage coverage and session volume.</p>
                           </div>
                         </div>
-                        <div className="table-wrap" role="region" tabIndex={0} aria-label="Device usage, scrollable table">
+                        <div className="table-wrap">
                           <table className="data-table report-table">
-                            <caption className="sr-only">Per-device app usage in the report window</caption>
                             <thead>
                               <tr>
                                 <th scope="col">Device</th>
@@ -2030,7 +2459,7 @@ export default function Home() {
                               </tr>
                             </thead>
                             <tbody>
-                              {visibleWeeklyDevices.map(device => (
+                              {weeklyDevices.map(device => (
                                 <tr key={device.device_id} className={`row-${device.state}`}>
                                   <td>
                                     <div className="device-cell-text">
@@ -2047,7 +2476,6 @@ export default function Home() {
                             </tbody>
                           </table>
                         </div>
-                        {reportShowMore}
                       </section>
                     </>
                   )}
@@ -2076,9 +2504,8 @@ export default function Home() {
                             <p>Sorted by usage, with current CPU, memory, disk and pending updates.</p>
                           </div>
                         </div>
-                        <div className="table-wrap" role="region" tabIndex={0} aria-label="Device health breakdown, scrollable table">
+                        <div className="table-wrap">
                           <table className="data-table report-table">
-                            <caption className="sr-only">Device health breakdown</caption>
                             <thead>
                               <tr>
                                 <th scope="col">Device</th>
@@ -2091,7 +2518,7 @@ export default function Home() {
                               </tr>
                             </thead>
                             <tbody>
-                              {visibleWeeklyDevices.map(device => (
+                              {weeklyDevices.map(device => (
                                 <tr key={device.device_id} className={`row-${device.state}`}>
                                   <td>
                                     <div className="device-cell-text">
@@ -2115,22 +2542,22 @@ export default function Home() {
                             </tbody>
                           </table>
                         </div>
-                        {reportShowMore}
                       </section>
                     </>
                   )}
                 </>
               ) : (
-                <EmptyState icon={<IconReport />} title="No report loaded" description="Choose a date window and refresh." />
+                <div className="empty-state">
+                  <span className="empty-icon">📄</span>
+                  <div className="empty-title">No report loaded</div>
+                  <div className="empty-sub">Choose a date window and refresh.</div>
+                </div>
               )}
             </div>
           ) : loading ? (
-            <div className="skeleton-list" role="status" aria-label="Loading devices" aria-busy="true">
-              {[0, 1, 2, 3, 4].map(i => <div key={i} className="skeleton-row" aria-hidden="true" />)}
-              <span className="sr-only">Connecting to telemetry stream…</span>
+            <div className="loading" role="status" aria-label="Loading">
+              Connecting to telemetry stream…
             </div>
-          ) : fetchError && devices.length === 0 ? (
-            <ErrorState icon={<IconWarning />} title="Could not load devices" message={`${fetchError}. Check the API connection and try again.`} onRetry={() => void fetchAll()} />
           ) : currentPage === 'dashboard' ? null : currentPage === 'inspect' ? (
             selectedDevice ? (
               <div className="inspect-device">
@@ -2140,7 +2567,6 @@ export default function Home() {
                   onTabChange={tab => setTab(selectedDevice.device_id, tab)}
                   onDelete={canDeleteDevices ? () => openDeleteConfirm(selectedDevice.device_id, deviceDisplayName(selectedDevice)) : undefined}
                   onPing={canPingAgents ? () => pingAgent(selectedDevice.device_id) : undefined}
-                  onBack={() => goToPage('inventory')}
                   pingStatus={agentPingStatus[selectedDevice.device_id]}
                   cachedFocus={focusCache[selectedDevice.device_id] ?? []}
                   dailyAppUsage={selectedDailyAppUsage}
@@ -2158,22 +2584,154 @@ export default function Home() {
                 />
               </div>
             ) : (
-              <EmptyState icon={<IconSearch />} title="Device not found" description="Return to inventory and choose a device." />
+              <div className="empty-state">
+                <span className="empty-icon">🔍</span>
+                <div className="empty-title">Device not found</div>
+                <div className="empty-sub">Return to inventory and choose a device.</div>
+              </div>
             )
+          ) : devices.length === 0 ? (
+            <div className="empty-state">
+              <span className="empty-icon">📡</span>
+              <div className="empty-title">No devices connected</div>
+              <div className="empty-sub">Start the DevicePulse agent on a machine to begin.</div>
+            </div>
+          ) : filteredDevices.length === 0 ? (
+            <div className="empty-state">
+              <span className="empty-icon">🔍</span>
+              <div className="empty-title">No matching devices</div>
+              <div className="empty-sub">Adjust your search or status filter.</div>
+            </div>
           ) : currentPage === 'inventory' ? (
-            <DevicesView
-              devices={devices}
-              counts={{ all: devices.length, online: onlineCount, warning: warningCount, critical: criticalCount, offline: offlineCount }}
-              state={inventory}
-              getState={getDeviceState}
-              onStatusChange={status => updateInventory({ status }, false)}
-              onQueryChange={updateInventorySearch}
-              onSortChange={(sort: DeviceSort) => updateInventory({ sort }, true)}
-              onClearFilters={() => { updateInventory({ status: 'all', q: '' }, false); }}
-              onInspect={viewDeviceDetails}
-              onRename={canDeleteDevices ? openRenameDevice : undefined}
-              onRemove={canDeleteDevices ? openDeleteConfirm : undefined}
-            />
+            /* ── Inventory table ── */
+            <div>
+              <div className="inventory-mobile-list">
+                {filteredDevices.map(device => {
+                  const sys = device.data?.SystemInfo;
+                  const state = getDeviceState(device);
+                  const name = deviceDisplayName(device);
+                  const cpu = device.data?.HardwareStats?.cpu?.usage_percent;
+                  const ram = device.data?.HardwareStats?.ram?.used_percent;
+                  return (
+                    <article key={device.device_id} className={`inventory-mobile-card state-${state}`}>
+                      <button type="button" className="mobile-device-main" onClick={() => viewDeviceDetails(device.device_id)}>
+                        <span className="mobile-device-title"><strong>{name}</strong><span className={`status-badge badge-${state}`}><span className="dot" />{state === 'online' ? 'Online' : state}</span></span>
+                        <span className="mobile-device-meta">{sys?.hostname || device.hostname || device.device_id}</span>
+                        <span className="mobile-device-meta">{sys?.platform || device.agent_os || 'Platform unavailable'} · {timeAgo(device.last_seen)}</span>
+                        <span className="mobile-resource-row"><span>CPU <strong>{cpu === undefined ? 'Unavailable' : `${cpu.toFixed(0)}%`}</strong></span><span>Memory <strong>{ram === undefined ? 'Unavailable' : `${ram.toFixed(0)}%`}</strong></span></span>
+                      </button>
+                      <div className="mobile-device-actions">
+                        <button type="button" className="action-btn primary" onClick={() => viewDeviceDetails(device.device_id)}>Inspect</button>
+                        {canDeleteDevices && <button type="button" className="action-btn" onClick={() => openRenameDevice(device)}>Rename</button>}
+                        {canDeleteDevices && <button type="button" className="action-btn danger" onClick={() => openDeleteConfirm(device.device_id, name)}>Remove</button>}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+              <div className="table-wrap">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">Device</th>
+                      <th scope="col">Status</th>
+                      <th scope="col">Resources</th>
+                      <th scope="col">Platform</th>
+                      <th scope="col">Last Seen</th>
+                      <th scope="col" style={{ textAlign: 'right' }}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredDevices.map(device => {
+                      const sys    = device.data?.SystemInfo;
+                      const state  = getDeviceState(device);
+                      const online = isOnline(device.last_seen);
+                      const name   = deviceDisplayName(device);
+                      const hw     = device.data?.HardwareStats;
+                      const cpu    = hw?.cpu?.usage_percent;
+                      const ram    = hw?.ram?.used_percent;
+
+                      const stateLabel = state === 'critical' ? 'Critical'
+                        : state === 'warning' ? 'Warning'
+                        : online ? 'Online' : 'Offline';
+
+                      const platform = sys?.platform
+                        ? `${sys.platform}${sys.architecture ? `, ${sys.architecture}` : ''}`
+                        : '—';
+
+                      return (
+                        <tr key={device.device_id} className={`row-${state}`}>
+                          <td>
+                            <div className="device-cell">
+                              <div className="device-cell-text">
+                                <button type="button" onClick={() => viewDeviceDetails(device.device_id)}>{name}</button>
+                                <span>{sys?.hostname || device.hostname || device.device_id}</span>
+                              </div>
+                            </div>
+                          </td>
+                          <td>
+                            <span className={`status-badge badge-${state}`}>
+                              <span className="dot" />
+                              {stateLabel}
+                            </span>
+                          </td>
+                          <td>
+                            <div className="resource-pair">
+                              <div><span>CPU</span><i><b style={{ width: `${Math.min(100, cpu ?? 0)}%` }} /></i><strong>{cpu === undefined ? '—' : `${cpu.toFixed(0)}%`}</strong></div>
+                              <div><span>MEM</span><i><b style={{ width: `${Math.min(100, ram ?? 0)}%` }} /></i><strong>{ram === undefined ? '—' : `${ram.toFixed(0)}%`}</strong></div>
+                            </div>
+                          </td>
+                          <td>
+                            <div className="cell-stack">
+                              <strong>{platform}</strong>
+                              <span>{device.agent_version ? `Agent ${device.agent_version}` : 'Agent version unavailable'}</span>
+                            </div>
+                          </td>
+                          <td>
+                            <div className="cell-stack"><strong>{timeAgo(device.last_seen)}</strong><span>{online ? 'Receiving telemetry' : 'Last known state'}</span></div>
+                          </td>
+                          <td>
+                            <div className="row-actions">
+                              <button
+                                type="button"
+                                className="action-btn"
+                                onClick={() => viewDeviceDetails(device.device_id)}
+                              >
+                                Inspect
+                              </button>
+                              {canDeleteDevices && (
+                                <button
+                                  type="button"
+                                  className="action-btn"
+                                  onClick={() => openRenameDevice(device)}
+                                >
+                                  Rename
+                                </button>
+                              )}
+                              {canDeleteDevices && (
+                                <button
+                                  type="button"
+                                  className="action-btn danger"
+                                  onClick={() => openDeleteConfirm(device.device_id, name)}
+                                  aria-label={`Remove ${name}`}
+                                >
+                                  ×
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <div className="table-footer">
+                  <span>
+                    Showing {filteredDevices.length ? '1' : '0'}–{filteredDevices.length} of {devices.length.toLocaleString()} devices
+                  </span>
+                </div>
+              </div>
+            </div>
           ) : null}
 
         </motion.div>
@@ -2239,38 +2797,18 @@ export default function Home() {
         open={!!confirmTarget}
         title="Remove device"
         message={`Remove ${confirmTarget?.name || confirmTarget?.deviceId || 'this device'} (${confirmTarget?.deviceId ?? ''})?\n\nIts stored telemetry is deleted and future agent uploads are revoked.`}
-        confirmLabel={confirmBusy ? 'Removing…' : 'Remove device'}
+        confirmLabel="Remove device"
         cancelLabel="Cancel"
         danger
-        busy={confirmBusy}
-        error={confirmError}
         onConfirm={() => {
           const id = confirmTarget?.deviceId;
+          setConfirmTarget(null);
           if (id) void performDeleteDevice(id);
         }}
-        onCancel={() => { if (!confirmBusy) setConfirmTarget(null); }}
+        onCancel={() => setConfirmTarget(null)}
       />
 
-      <ConfirmDialog
-        open={pendingPage !== null}
-        title="Discard unsaved changes?"
-        message="You have unsaved settings changes. They will be lost if you leave this page."
-        confirmLabel="Discard and leave"
-        cancelLabel="Keep editing"
-        danger
-        onConfirm={() => { const next = pendingPage; setPendingPage(null); setSettingsDirty(false); if (next) goToPage(next); }}
-        onCancel={() => setPendingPage(null)}
-      />
-      <ConfirmDialog
-        open={!!roleChange}
-        title="Change role"
-        message={roleChange ? roleChangeSummary(roleChange.user.email, roleChange.user.role, roleChange.role) : ''}
-        confirmLabel="Change role"
-        danger={roleChange?.user.role === 'admin' || roleChange?.role === 'admin'}
-        onConfirm={() => { if (roleChange) void updateUserRole(roleChange.user, roleChange.role); setRoleChange(null); }}
-        onCancel={() => setRoleChange(null)}
-      />
-    </AppShell>
+    </motion.div>
     </MotionConfig>
   );
 }

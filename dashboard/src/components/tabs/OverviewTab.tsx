@@ -41,7 +41,7 @@ export default function OverviewTab({ data, cachedFocus, dailyAppUsage }: Props)
                 {cpu?.usage_percent === undefined ? 'Unavailable' : `${cpu.usage_percent.toFixed(1)}%`}
               </span>
             </div>
-            <GaugeBar label="CPU usage" value={cpu?.usage_percent ?? 0} color={metricColor(cpu?.usage_percent ?? 0)} />
+            <GaugeBar value={cpu?.usage_percent ?? 0} color={metricColor(cpu?.usage_percent ?? 0)} />
             <div className="rc-sub">{cpu?.core_count ?? '?'} cores</div>
           </div>
 
@@ -52,7 +52,7 @@ export default function OverviewTab({ data, cachedFocus, dailyAppUsage }: Props)
                 {ram?.used_percent === undefined ? 'Unavailable' : `${ram.used_percent.toFixed(1)}%`}
               </span>
             </div>
-            <GaugeBar label="Memory usage" value={ram?.used_percent ?? 0} color={metricColor(ram?.used_percent ?? 0)} />
+            <GaugeBar value={ram?.used_percent ?? 0} color={metricColor(ram?.used_percent ?? 0)} />
             <div className="rc-sub">{ram ? `${ram.used_gb.toFixed(1)} / ${ram.total_gb.toFixed(1)} GB` : 'Telemetry unavailable'}</div>
           </div>
 
@@ -63,7 +63,7 @@ export default function OverviewTab({ data, cachedFocus, dailyAppUsage }: Props)
                 {disk?.used_percent === undefined ? 'Unavailable' : `${disk.used_percent.toFixed(1)}%`}
               </span>
             </div>
-            <GaugeBar label="Disk usage" value={disk?.used_percent ?? 0} color={metricColor(disk?.used_percent ?? 0)} />
+            <GaugeBar value={disk?.used_percent ?? 0} color={metricColor(disk?.used_percent ?? 0)} />
             <div className="rc-sub">{disk ? `${disk.used_gb.toFixed(1)} / ${disk.total_gb.toFixed(1)} GB` : 'Telemetry unavailable'}</div>
           </div>
 
@@ -86,14 +86,13 @@ export default function OverviewTab({ data, cachedFocus, dailyAppUsage }: Props)
             <div className="resource-card">
               <div className="rc-header">
                 <span className="rc-label">Battery</span>
-                <span className="rc-value" style={{ color: battery.state === 'charging' || battery.state === 'full' ? 'var(--status-ok-fg)' : battery.percent <= 20 ? 'var(--status-crit-fg)' : 'var(--status-warn-fg)' }}>
+                <span className="rc-value" style={{ color: battery.state === 'charging' || battery.state === 'full' ? 'var(--green)' : battery.percent <= 20 ? 'var(--red)' : 'var(--yellow)' }}>
                   {battery.percent.toFixed(0)}%
                 </span>
               </div>
               <GaugeBar
-                label="Battery level"
                 value={battery.percent}
-                color={battery.state === 'charging' || battery.state === 'full' ? 'var(--status-ok-fg)' : battery.percent <= 20 ? 'var(--status-crit-fg)' : 'var(--status-warn-fg)'}
+                color={battery.state === 'charging' || battery.state === 'full' ? 'var(--green)' : battery.percent <= 20 ? 'var(--red)' : 'var(--yellow)'}
               />
               <div className="rc-sub" style={{ textTransform: 'capitalize' }}>{battery.state}</div>
             </div>
@@ -122,9 +121,9 @@ export default function OverviewTab({ data, cachedFocus, dailyAppUsage }: Props)
             <span>USB</span>
           </div>
           {osUpd && (
-            <div className={`stat-chip ${osUpd.pending_count > 0 ? 'warn' : ''}`} title="Pending OS updates">
+            <div className={`stat-chip ${osUpd.pending_count > 0 ? 'warn' : ''}`}>
               <strong>{osUpd.pending_count}</strong>
-              <span>Updates pending</span>
+              <span>Updates</span>
             </div>
           )}
         </div>
@@ -145,13 +144,13 @@ export default function OverviewTab({ data, cachedFocus, dailyAppUsage }: Props)
                 <span className="mini-proc-name" title={p.name}>{p.name}</span>
                 <div className="mini-metric mini-metric-cpu" aria-label={`CPU ${p.cpu.toFixed(1)}%`}>
                   <div className="mini-bar-track">
-                    <div className="mini-bar-fill" style={{ width: `${Math.min(p.cpu, 100)}%`, background: 'var(--accent)' }} />
+                    <div className="mini-bar-fill" style={{ width: `${Math.min(p.cpu, 100)}%`, background: 'var(--yellow)' }} />
                   </div>
                   <span className="mini-pct pct-cpu">{p.cpu.toFixed(1)}%</span>
                 </div>
                 <div className="mini-metric mini-metric-mem" aria-label={`Memory ${p.memory.toFixed(1)}%`}>
                   <div className="mini-bar-track">
-                    <div className="mini-bar-fill" style={{ width: `${Math.min(p.memory, 100)}%`, background: 'var(--accent)' }} />
+                    <div className="mini-bar-fill" style={{ width: `${Math.min(p.memory, 100)}%`, background: 'var(--cyan)' }} />
                   </div>
                   <span className="mini-pct pct-mem">{p.memory.toFixed(1)}%</span>
                 </div>
@@ -187,7 +186,7 @@ export default function OverviewTab({ data, cachedFocus, dailyAppUsage }: Props)
                     {app.app_name}
                   </span>
                   <div className="mini-bar-track" style={{ flex: 1 }}>
-                    <div className="mini-bar-fill" style={{ width: `${pct}%`, background: isActive ? 'var(--status-ok-fg)' : 'var(--accent)' }} />
+                    <div className="mini-bar-fill" style={{ width: `${pct}%`, background: isActive ? 'var(--green)' : 'var(--blue)' }} />
                   </div>
                   <span className="mini-focus-dur">{formatDuration(app.total_focus_seconds)}</span>
                 </div>

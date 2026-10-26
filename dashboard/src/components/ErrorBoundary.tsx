@@ -29,15 +29,16 @@ export default class ErrorBoundary extends Component<Props, State> {
     if (this.state.error) {
       return (
         <div className="error-boundary">
-          <div className="empty-icon" aria-hidden="true">
-            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3l10 18H2L12 3z"/><path d="M12 10v5M12 18v.5"/></svg>
-          </div>
+          <div className="empty-icon">⚠️</div>
           <h1>Something went wrong</h1>
-          <p className="error-detail">The dashboard hit an unexpected error. Reloading usually fixes it.</p>
+          <p className="error-detail">{this.state.error.message}</p>
           <button
             type="button"
             className="action-btn"
-            onClick={() => window.location.reload()}
+            onClick={() => {
+              this.setState({ error: null });
+              window.location.reload();
+            }}
           >
             Reload dashboard
           </button>

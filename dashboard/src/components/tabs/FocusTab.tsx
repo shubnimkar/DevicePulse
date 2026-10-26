@@ -4,7 +4,6 @@ import { motion } from 'motion/react';
 import { AppFocusSummary, ActiveWindowData, DailyAppUsageData, DailyPresenceData } from '@/types';
 import { buildAppUsageSummaries, formatDuration } from '@/lib/utils';
 import GaugeBar from '@/components/GaugeBar';
-import { focusTrust } from '@/lib/focus-trust';
 
 interface Props {
   data?: ActiveWindowData;
@@ -25,7 +24,6 @@ export default function FocusTab({ data, cachedSummaries, dailyUsage, dailyPrese
   const { summaries } = buildAppUsageSummaries(data, cachedSummaries, dailyUsage, dailyPresence?.online_seconds);
   const totalSeconds = summaries.reduce((s, a) => s + a.total_focus_seconds, 0);
   const currentApp = data?.current_app ?? '';
-  const trust = focusTrust(data);
 
   return (
     <div>
@@ -42,20 +40,6 @@ export default function FocusTab({ data, cachedSummaries, dailyUsage, dailyPrese
         {dailyUsageLoading && <span className="focus-archive-note">Loading daily usage...</span>}
         {dailyPresence?.first_seen && <span className="focus-archive-note">Connected {new Date(dailyPresence.first_seen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · online {formatDuration(dailyPresence.online_seconds)}</span>}
       </div>
-
-      {trust.level !== 'ok' ? (
-        <div className={`focus-quality is-${trust.level}`} role="status">
-          <strong>{trust.title}</strong>
-          <span>{trust.detail}</span>
-        </div>
-      ) : (
-        (trust.sourceLabel || trust.away) && (
-          <div className="focus-quality-ok">
-            {trust.sourceLabel && <>Tracking via {trust.sourceLabel}</>}
-            {trust.away && <> · user away (locked or idle), time not counted</>}
-          </div>
-        )
-      )}
 
       {currentApp && (
         <div className="focus-current">
@@ -90,9 +74,8 @@ export default function FocusTab({ data, cachedSummaries, dailyUsage, dailyPrese
                   <span className="focus-sessions">{app.session_count} session{app.session_count !== 1 ? 's' : ''}</span>
                 </div>
                 <GaugeBar
-                  label={`${app.app_name} share of app usage time`}
                   value={pct}
-                  color={isActive ? 'var(--status-ok-fg)' : 'var(--accent)'}
+                  color={isActive ? 'var(--green)' : 'var(--blue)'}
                   height={3}
                 />
                 <div className="focus-pct">{pct.toFixed(1)}% of app usage time</div>

@@ -119,14 +119,6 @@ export interface AppFocusSummary {
 
 export interface ActiveWindowData {
   current_app: string;
-  /** How the agent finds the focused window (gnome-extension, x11, proc-guess, none, ...). */
-  focus_source?: string;
-  /** accurate | estimated | unavailable */
-  focus_quality?: 'accurate' | 'estimated' | 'unavailable' | string;
-  /** Why tracking is degraded, for example an extension waiting for a re-login. */
-  focus_note?: string;
-  /** True while the screen is locked or the user is idle (time is not counted). */
-  idle?: boolean;
   collected_at?: string;
   last_sample_at?: string;
   tracker_fresh?: boolean;
@@ -312,14 +304,6 @@ export interface DashboardUser {
   updated_at?: string;
 }
 
-export interface AuditEvent {
-  action: string;
-  actor: string;
-  target: string;
-  detail: string;
-  at: string;
-}
-
 export interface AgentRelease {
   version: string;
   os: 'darwin' | 'linux' | 'windows';
@@ -327,8 +311,6 @@ export interface AgentRelease {
   download_url: string;
   checksum_sha256: string;
   published_at?: string;
-  /** Held back from agents until an admin activates it (RELEASES_REQUIRE_ACTIVATION). */
-  pending_activation?: boolean;
 }
 
 export interface AgentRolloutResponse {

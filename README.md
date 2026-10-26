@@ -1,3 +1,5 @@
+> **Branch `legacy-ui`:** the dashboard on this branch is the earlier UI (sources from commit `f722b20`, 9 Sep 2026: the blue "Your fleet, at a glance." sign-in and the original console) running on the current backend (API and agent as of PR #6). Dependency files come from `9611b57`, so Next.js stays on the patched 16.3.x. It has none of the later dashboard work: the redesigned console, release controls, paged lists, the tracking-quality banner, or the privacy/terms/platform pages. The API is backward compatible with it.
+
 # DevicePulse
 
 Enterprise endpoint telemetry platform. Deploy a lightweight Go agent on any machine and get live system data — hardware stats, processes, browser history, active-window focus tracking, installed apps, open ports, services, USB devices, and OS updates — streamed to a central API and visualised in a real-time dashboard.

@@ -11,7 +11,6 @@ interface Props {
   cancelLabel?: string;
   danger?: boolean;
   busy?: boolean;
-  error?: string;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -28,7 +27,6 @@ export default function ConfirmDialog({
   cancelLabel = 'Cancel',
   danger = false,
   busy = false,
-  error,
   onConfirm,
   onCancel,
 }: Props) {
@@ -107,12 +105,7 @@ export default function ConfirmDialog({
             <div className="modal-header">
               <h2 id="confirm-dialog-title">{title}</h2>
             </div>
-            <div id="confirm-dialog-message">
-              {message.split('\n\n').map((para, i) => (
-                <p key={i} className="confirm-message">{para}</p>
-              ))}
-            </div>
-            {error && <p role="alert" className="confirm-message confirm-error">{error}</p>}
+            <p id="confirm-dialog-message" className="confirm-message">{message}</p>
             <div className="modal-actions">
               <button type="button" className="modal-btn" onClick={onCancel} disabled={busy}>
                 {cancelLabel}
@@ -122,7 +115,6 @@ export default function ConfirmDialog({
                 className={`modal-btn ${danger ? 'danger' : ''}`}
                 onClick={onConfirm}
                 disabled={busy}
-                aria-busy={busy}
               >
                 {confirmLabel}
               </button>
