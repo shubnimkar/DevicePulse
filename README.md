@@ -226,11 +226,11 @@ Paths below are shown without the optional `/api` prefix. For nginx deployments,
 | `POST` | `/auth/login` | — | Login dashboard user and set session cookie |
 | `POST` | `/auth/logout` | Dashboard session | Clear dashboard session cookie |
 | `GET` | `/auth/me` | Dashboard session | Return current dashboard user |
-| `GET` | `/users` | `admin` | List dashboard users |
+| `GET` | `/users` | `admin` | List dashboard users. Add `?limit=N` (1–500) for `{items,total,next}` pages; pass `next` back as `?offset=` |
 | `POST` | `/users` | `admin` | Create a dashboard user |
 | `POST` | `/users/{id}/password` | `admin` | Reset a dashboard user's password |
 | `POST` | `/users/{id}/role` | `admin` | Change a dashboard user's role |
-| `GET` | `/devices` | `viewer`+ | List all registered devices |
+| `GET` | `/devices` | `viewer`+ | List registered devices. Without parameters: the whole list as an array. Add `?limit=N` (1–500) for `{items,total,next}` pages; pass `next` back as `?after=` |
 | `PUT` | `/devices/{id}/name` | `admin` | Set or clear a device display name |
 | `DELETE` | `/devices/{id}` | `admin` | Remove a device |
 | `GET` | `/devices/{id}/history` | `viewer`+ | Last 100 telemetry snapshots for a device |
@@ -416,6 +416,8 @@ Behavioral changes shipped with the backend audit fixes:
 - **Revocable sessions** — tokens embed a user epoch bumped on password reset; stale cookies die instantly.
 - **Safer registration** — credential recovery requires hardware UUID/MAC match; hostname-only requests always mint fresh devices; concurrent first-registrations resolve cleanly instead of 500-ing.
 - **No agent downgrades** — update checks offer releases strictly newer than the running version.
+- **Browser-history policy enforced on the server** — at ingest, `domain_only` reduces every URL to `scheme://host` (title cleared, entries with no host such as `file:` or `about:blank` dropped), and `disabled` / `collect_browser_history=false` drops the history entirely, whatever the agent sent. It applies to data arriving after the policy is set; history already stored is not rewritten.
+- **Paged device and user lists** — `/devices` and `/users` accept `?limit=`; the dashboard loads them page by page. Calls without `limit` return the original array, so older dashboards keep working.
 - **Non-root container** — runtime image drops privileges to uid 10001.
 
 ---

@@ -1,8 +1,8 @@
 package collector
 
 import (
-	"sort"
 	"github.com/shirou/gopsutil/v3/process"
+	"sort"
 )
 
 type ProcessMonitor struct{}
@@ -20,10 +20,10 @@ func (p *ProcessMonitor) Stop() error {
 }
 
 type ProcessData struct {
-	PID     int32   `json:"pid"`
-	Name    string  `json:"name"`
-	CPU     float64 `json:"cpu"`
-	Memory  float32 `json:"memory"`
+	PID    int32   `json:"pid"`
+	Name   string  `json:"name"`
+	CPU    float64 `json:"cpu"`
+	Memory float32 `json:"memory"`
 }
 
 func (p *ProcessMonitor) Collect() (map[string]interface{}, error) {
@@ -47,8 +47,8 @@ func (p *ProcessMonitor) Collect() (map[string]interface{}, error) {
 			continue
 		}
 
-	// Only include processes using some CPU or memory to filter out idle noise
-	if cpu > 0.1 || mem > 1.0 {
+		// Only include processes using some CPU or memory to filter out idle noise
+		if cpu > 0.1 || mem > 1.0 {
 			data = append(data, ProcessData{
 				PID:    proc.Pid,
 				Name:   name,

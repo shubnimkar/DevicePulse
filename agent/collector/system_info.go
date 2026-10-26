@@ -29,10 +29,10 @@ func (s *SystemInfo) Collect() (map[string]interface{}, error) {
 	// Enrich with gopsutil host info (OS version, kernel, platform)
 	hi, err := host.Info()
 	if err == nil {
-		info["platform"]         = hi.Platform
+		info["platform"] = hi.Platform
 		info["platform_version"] = hi.PlatformVersion
-		info["kernel_version"]   = hi.KernelVersion
-		info["os_family"]        = hi.PlatformFamily
+		info["kernel_version"] = hi.KernelVersion
+		info["os_family"] = hi.PlatformFamily
 	}
 
 	return info, nil

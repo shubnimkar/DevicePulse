@@ -930,6 +930,65 @@ func sanitizeActiveWindowPayload(payload map[string]interface{}) {
 	}
 }
 
+// enforceBrowserHistoryPolicy applies the fleet browser-history policy at ingest,
+// so it holds for agents that do not (or no longer) apply it themselves — older
+// builds, queued payloads collected before a policy change, or a modified agent.
+//
+//   - collection off or mode "disabled": the history is dropped entirely
+//   - mode "domain_only": every URL is reduced to scheme://host (port kept), the
+//     title is cleared, and entries without a host (file:, about:blank) are dropped
+//   - mode "full_url": unchanged
+//
+// It only affects data arriving after the policy is set; stored history is untouched.
+func enforceBrowserHistoryPolicy(payload map[string]interface{}, mode string, collect bool) {
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	history, ok := data["BrowserHistory"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	if !collect || mode == "disabled" {
+		delete(data, "BrowserHistory")
+		return
+	}
+	if mode != "domain_only" {
+		return
+	}
+	for _, key := range []string{"new_history_entries", "top_recent_urls"} {
+		items, ok := history[key].([]interface{})
+		if !ok {
+			continue
+		}
+		kept := make([]interface{}, 0, len(items))
+		for _, item := range items {
+			entry, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			raw, _ := entry["url"].(string)
+			origin, ok := originOnly(raw)
+			if !ok {
+				continue
+			}
+			entry["url"] = origin
+			entry["title"] = ""
+			kept = append(kept, entry)
+		}
+		history[key] = kept
+	}
+}
+
+// originOnly returns scheme://host for a URL, or false when it has no host.
+func originOnly(raw string) (string, bool) {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", false
+	}
+	return parsed.Scheme + "://" + parsed.Host, true
+}
+
 func interfaceSlice(raw interface{}) ([]interface{}, bool) {
 	switch v := raw.(type) {
 	case []interface{}:
@@ -3764,10 +3823,28 @@ func authBootstrapHandler(w http.ResponseWriter, r *http.Request) {
 func usersHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		limit, paged, limitErr := parsePageLimit(r)
+		if limitErr != nil {
+			http.Error(w, limitErr.Error(), http.StatusBadRequest)
+			return
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		opts := options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}})
+		// _id breaks created_at ties so offset paging never repeats or skips a user.
+		opts := options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}, {Key: "_id", Value: 1}})
+		offset := 0
+		if paged {
+			if raw := r.URL.Query().Get("offset"); raw != "" {
+				n, convErr := strconv.Atoi(raw)
+				if convErr != nil || n < 0 {
+					http.Error(w, "Invalid offset", http.StatusBadRequest)
+					return
+				}
+				offset = n
+			}
+			opts.SetSkip(int64(offset)).SetLimit(int64(limit) + 1)
+		}
 		cursor, err := mongoClient.Database(dbName).Collection("users").Find(ctx, bson.M{}, opts)
 		if err != nil {
 			http.Error(w, "Database error", http.StatusInternalServerError)
@@ -3780,12 +3857,22 @@ func usersHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Parsing error", http.StatusInternalServerError)
 			return
 		}
+		next := ""
+		if paged && len(users) > limit {
+			users = users[:limit]
+			next = strconv.Itoa(offset + limit)
+		}
 		result := make([]map[string]interface{}, 0, len(users))
 		for _, user := range users {
 			result = append(result, userResponse(user))
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(result)
+		if !paged {
+			json.NewEncoder(w).Encode(result)
+			return
+		}
+		total, _ := mongoClient.Database(dbName).Collection("users").CountDocuments(ctx, bson.M{})
+		json.NewEncoder(w).Encode(map[string]interface{}{"items": result, "total": total, "next": next})
 
 	case http.MethodPost:
 		var body authRequest
@@ -4227,6 +4314,11 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 	payload["ingested_at"] = now
 	payload["telemetry_expires_at"] = now.AddDate(0, 0, retentionDays)
 	sanitizeActiveWindowPayload(payload)
+	globalPolicy.mu.RLock()
+	historyMode, _ := globalPolicy.config["browser_history_mode"].(string)
+	collectHistory, _ := globalPolicy.config["collect_browser_history"].(bool)
+	globalPolicy.mu.RUnlock()
+	enforceBrowserHistoryPolicy(payload, historyMode, collectHistory)
 	if eventID, ok := payload["event_id"].(string); ok && strings.TrimSpace(eventID) != "" {
 		var existing bson.M
 		err := mongoClient.Database(dbName).Collection("telemetry").FindOne(ctx, bson.M{"device_id": authDeviceID, "event_id": eventID}, options.FindOne().SetProjection(bson.M{"_id": 1})).Decode(&existing)
@@ -5127,15 +5219,39 @@ func deviceDeleteHandler(w http.ResponseWriter, r *http.Request) {
 
 // ─── Devices Handler ───────────────────────────────────────────────────────────
 
+// maxPageSize bounds ?limit= on list endpoints.
+const maxPageSize = 500
+
+// parsePageLimit reads the optional ?limit= query. Without it the endpoint keeps
+// returning the whole list as a bare array (what older dashboards expect); with
+// it the response is a paged envelope {"items","total","next"}.
+func parsePageLimit(r *http.Request) (limit int, paged bool, err error) {
+	raw := r.URL.Query().Get("limit")
+	if raw == "" {
+		return 0, false, nil
+	}
+	n, convErr := strconv.Atoi(raw)
+	if convErr != nil || n < 1 || n > maxPageSize {
+		return 0, false, fmt.Errorf("limit must be between 1 and %d", maxPageSize)
+	}
+	return n, true, nil
+}
+
 func devicesHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	limit, paged, err := parsePageLimit(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	filter := bson.M{}
 	opts := options.Find().SetProjection(bson.M{
 		"api_key":      0,
 		"api_key_hash": 0,
@@ -5143,7 +5259,20 @@ func devicesHandler(w http.ResponseWriter, r *http.Request) {
 			"$slice": 200,
 		},
 	})
-	cursor, err := mongoClient.Database(dbName).Collection("devices").Find(ctx, bson.M{}, opts)
+	if paged {
+		// Keyset paging on _id: stable while devices are added or removed, and
+		// each page is a bounded query. One extra row tells us if more follow.
+		if after := r.URL.Query().Get("after"); after != "" {
+			id, idErr := primitive.ObjectIDFromHex(after)
+			if idErr != nil {
+				http.Error(w, "Invalid after cursor", http.StatusBadRequest)
+				return
+			}
+			filter["_id"] = bson.M{"$gt": id}
+		}
+		opts.SetSort(bson.D{{Key: "_id", Value: 1}}).SetLimit(int64(limit) + 1)
+	}
+	cursor, err := mongoClient.Database(dbName).Collection("devices").Find(ctx, filter, opts)
 	if err != nil {
 		log.Printf("Devices query error: %v", err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
@@ -5169,7 +5298,19 @@ func devicesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(devices)
+	if !paged {
+		json.NewEncoder(w).Encode(devices)
+		return
+	}
+	next := ""
+	if len(devices) > limit {
+		devices = devices[:limit]
+		if id, ok := devices[limit-1]["_id"].(primitive.ObjectID); ok {
+			next = id.Hex()
+		}
+	}
+	total, _ := mongoClient.Database(dbName).Collection("devices").EstimatedDocumentCount(ctx)
+	json.NewEncoder(w).Encode(map[string]interface{}{"items": devices, "total": total, "next": next})
 }
 
 // ─── History Handler ───────────────────────────────────────────────────────────

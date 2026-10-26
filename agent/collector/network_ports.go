@@ -96,7 +96,8 @@ func collectLinuxPorts() []PortEntry {
 // parseProcNet parses a /proc/net/{tcp,tcp6,udp,udp6} file.
 //
 // Column layout (space-separated):
-//   sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode
+//
+//	sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode
 //
 // local_address format: "0100007F:1F90" (hex little-endian IP : hex port)
 // For IPv6: "00000000000000000000000001000000:1F90"
