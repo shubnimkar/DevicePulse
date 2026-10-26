@@ -183,3 +183,17 @@ func TestAllowedOriginsExactMatchOnly(t *testing.T) {
 		t.Fatalf("arbitrary localhost origin leaked into allowlist: %#v", set)
 	}
 }
+
+// Regression: summaries read back from MongoDB are bson.M, not map[string]interface{};
+// the focus-cache rebuild used to skip all of them, so totals reset on every restart.
+func TestApplyFocusSummariesAcceptsBSONItems(t *testing.T) {
+	fc := &FocusCache{data: map[string]map[string]*AppFocusEntry{}}
+	fc.applyFocusSummaries("dev-1", []interface{}{
+		bson.M{"app_name": "Chrome", "total_focus_seconds": 12.5, "session_count": int32(2)},
+		map[string]interface{}{"app_name": "Chrome", "total_focus_seconds": 7.5, "session_count": 1.0},
+	})
+	snap := fc.snapshot("dev-1")
+	if len(snap) != 1 || snap[0].TotalFocusS != 20 || snap[0].SessionCount != 3 {
+		t.Fatalf("expected both item types to be counted, got %+v", snap)
+	}
+}
