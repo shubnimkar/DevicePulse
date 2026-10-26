@@ -107,7 +107,7 @@ func TestDashboardRoutesRequireEncryption(t *testing.T) {
 		"/devices/example/browser-history", "/devices/example/history", "/devices/example/name",
 		"/devices/example/ping", "/devices/example/app-usage", "/devices/example/presence",
 		"/reports/weekly", "/policy", "/focus/example", "/update/releases", "/update/builds",
-		"/update/release", "/update/release/activate", "/update/release/rollout-latest",
+		"/update/release", "/update/release/activate", "/update/release/signature", "/update/release/rollout-latest",
 	} {
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))

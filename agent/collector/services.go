@@ -17,10 +17,19 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"time"
 )
 
-// Services collector.
-type Services struct{}
+// Services collector. Enumeration scans /proc and the filesystem, so results are
+// reused for servicesCacheTTL.
+type Services struct {
+	mu   sync.Mutex
+	at   time.Time
+	last map[string]interface{}
+}
+
+const servicesCacheTTL = 30 * time.Second
 
 func (s *Services) Name() string { return "Services" }
 func (s *Services) Start() error { return nil }
@@ -34,6 +43,19 @@ type ServiceEntry struct {
 }
 
 func (s *Services) Collect() (map[string]interface{}, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.last != nil && time.Since(s.at) < servicesCacheTTL {
+		return s.last, nil
+	}
+	out, err := s.collect()
+	if err == nil {
+		s.last, s.at = out, time.Now()
+	}
+	return out, err
+}
+
+func (s *Services) collect() (map[string]interface{}, error) {
 	switch runtime.GOOS {
 	case "darwin":
 		services := collectMacOSServices()

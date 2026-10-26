@@ -9,7 +9,9 @@
 package updater
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -19,7 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"syscall"
+	"strings"
 	"time"
 )
 
@@ -29,6 +31,44 @@ type CheckResponse struct {
 	Version         string `json:"version"`         // e.g. "1.2.0"
 	DownloadURL     string `json:"download_url"`    // full URL to new binary
 	Checksum        string `json:"checksum_sha256"` // hex-encoded SHA-256 of the binary
+	Signature       string `json:"signature"`       // base64 Ed25519 signature, see ReleaseMessage
+}
+
+// PublicKeyB64 is the base64 Ed25519 release-signing public key, set at build time:
+//
+//	-ldflags "-X github.com/devicepulse/agent/updater.PublicKeyB64=<key>"
+//
+// When empty (default) updates are verified by checksum only, as before. When set,
+// an update is installed only if its signature verifies, so a compromised API or
+// download host cannot push a binary the release key did not sign.
+var PublicKeyB64 string
+
+// ReleaseMessage is the exact byte string that is signed for a release. It binds
+// the checksum to a version and target, so a signed binary cannot be replayed as
+// a different version or for another OS/arch. Keep in sync with cmd/sign_release.
+func ReleaseMessage(version, goos, goarch, checksum string) []byte {
+	return []byte("devicepulse-release-v1\n" + version + "\n" + goos + "/" + goarch + "\n" + strings.ToLower(checksum))
+}
+
+func verifyRelease(cr CheckResponse, goos, goarch string) error {
+	if PublicKeyB64 == "" {
+		return nil
+	}
+	pub, err := base64.StdEncoding.DecodeString(PublicKeyB64)
+	if err != nil || len(pub) != ed25519.PublicKeySize {
+		return fmt.Errorf("embedded update public key is invalid")
+	}
+	if cr.Signature == "" {
+		return fmt.Errorf("update %s is not signed — refusing", cr.Version)
+	}
+	sig, err := base64.StdEncoding.DecodeString(cr.Signature)
+	if err != nil || len(sig) != ed25519.SignatureSize {
+		return fmt.Errorf("update %s has a malformed signature — refusing", cr.Version)
+	}
+	if !ed25519.Verify(pub, ReleaseMessage(cr.Version, goos, goarch, cr.Checksum), sig) {
+		return fmt.Errorf("update %s signature does not verify — refusing", cr.Version)
+	}
+	return nil
 }
 
 // Poller runs in a goroutine and checks for updates on the given interval.
@@ -36,17 +76,22 @@ type CheckResponse struct {
 //
 // Parameters:
 //   - apiURL:        base URL of the DevicePulse API, e.g. "https://api.example.com"
-//   - apiKey:        X-API-Key header value for authentication
+//   - apiKey:        returns the current X-API-Key (called on every check, so a key
+//     rotated by re-registration is picked up without a restart)
 //   - currentVersion: the version string baked into the running binary, e.g. "1.0.0"
 //   - interval:      how often to poll (recommended: 5m in production, 30s for dev)
-func Poller(apiURL, apiKey, currentVersion string, interval time.Duration) {
+func Poller(apiURL string, apiKey func() string, currentVersion string, interval time.Duration) {
 	log.Printf("Updater: running version %s, polling every %v", currentVersion, interval)
+
+	if exe, err := os.Executable(); err == nil {
+		cleanupOldBinary(exe) // leftover from a previous Windows update
+	}
 
 	// Stagger the first check so it doesn't pile up with startup work.
 	time.Sleep(30 * time.Second)
 
 	for {
-		if err := CheckAndUpdate(apiURL, apiKey, currentVersion); err != nil {
+		if err := CheckAndUpdate(apiURL, apiKey(), currentVersion); err != nil {
 			log.Printf("Updater: check failed: %v", err)
 		}
 		time.Sleep(interval)
@@ -93,6 +138,9 @@ func CheckAndUpdate(apiURL, apiKey, currentVersion string) error {
 	}
 	if cr.Checksum == "" {
 		return fmt.Errorf("update available but checksum_sha256 is empty — refusing unsafe update")
+	}
+	if err := verifyRelease(cr, runtime.GOOS, runtime.GOARCH); err != nil {
+		return err
 	}
 
 	return applyUpdate(cr)
@@ -162,14 +210,12 @@ func applyUpdate(cr CheckResponse) error {
 		return fmt.Errorf("chmod: %w", err)
 	}
 
-	// Atomically replace the running binary.
-	if err := os.Rename(tmpPath, exePath); err != nil {
-		return fmt.Errorf("rename binary: %w", err)
+	// Replace the running binary (platform specific: atomic rename on Unix,
+	// move-aside on Windows where a running .exe cannot be overwritten).
+	if err := swapBinary(tmpPath, exePath); err != nil {
+		return fmt.Errorf("install binary: %w", err)
 	}
 
-	log.Printf("Updater: binary replaced, re-execing into version %s...", cr.Version)
-
-	// Re-exec: replace this process image with the new binary.
-	// os.Args[0] keeps the same invocation arguments.
-	return syscall.Exec(exePath, os.Args, os.Environ())
+	log.Printf("Updater: binary replaced, restarting into version %s...", cr.Version)
+	return relaunch(exePath)
 }

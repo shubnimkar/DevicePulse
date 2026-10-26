@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -3105,6 +3106,22 @@ func deviceCommandsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// quarantineWindowMinutes is how long a quarantine lasts: params.duration_minutes
+// (1 minute to 30 days) or QUARANTINE_MAX_HOURS (default 24).
+func quarantineWindowMinutes(params map[string]interface{}) float64 {
+	if m, ok := params["duration_minutes"].(float64); ok && m >= 1 {
+		if m > 30*24*60 {
+			m = 30 * 24 * 60
+		}
+		return m
+	}
+	hours := float64(envInt("QUARANTINE_MAX_HOURS", 24))
+	if hours < 1 {
+		hours = 24
+	}
+	return hours * 60
+}
+
 // POST /devices/{device_id}/commands  body: {"type": "collect_now"}
 func deviceCommandCreateHandler(w http.ResponseWriter, r *http.Request) {
 	deviceID, _ := r.Context().Value(targetDeviceKey).(string)
@@ -3117,6 +3134,17 @@ func deviceCommandCreateHandler(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "Bad JSON", http.StatusBadRequest)
 		return
+	}
+
+	// Quarantine always carries a deadline so an isolated host can never be
+	// stranded if its release command is lost; the agent releases itself.
+	var quarantineMinutes float64
+	if body.Type == "quarantine_enable" {
+		if body.Params == nil {
+			body.Params = map[string]interface{}{}
+		}
+		quarantineMinutes = quarantineWindowMinutes(body.Params)
+		body.Params["duration_minutes"] = quarantineMinutes
 	}
 
 	minRole, known := commandMinRole[body.Type]
@@ -3155,11 +3183,12 @@ func deviceCommandCreateHandler(w http.ResponseWriter, r *http.Request) {
 	case "quarantine_enable":
 		mongoClient.Database(dbName).Collection("devices").UpdateOne(ctx,
 			bson.M{"device_id": deviceID},
-			bson.M{"$set": bson.M{"quarantined": true, "quarantined_at": now}})
+			bson.M{"$set": bson.M{"quarantined": true, "quarantined_at": now,
+				"quarantine_until": now.Add(time.Duration(quarantineMinutes * float64(time.Minute)))}})
 	case "quarantine_release":
 		mongoClient.Database(dbName).Collection("devices").UpdateOne(ctx,
 			bson.M{"device_id": deviceID},
-			bson.M{"$set": bson.M{"quarantined": false}, "$unset": bson.M{"quarantined_at": ""}})
+			bson.M{"$set": bson.M{"quarantined": false}, "$unset": bson.M{"quarantined_at": "", "quarantine_until": ""}})
 	}
 
 	log.Printf("RemoteAction: %s issued %s for %s", user.Email, body.Type, deviceID)
@@ -5130,6 +5159,13 @@ func devicesHandler(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	for _, device := range devices {
 		sanitizeDeviceActiveWindowSnapshot(device, now)
+		// The agent releases itself at the deadline; show that without waiting
+		// for a command round trip.
+		if q, _ := device["quarantined"].(bool); q {
+			if until, ok := bsonTime(device["quarantine_until"]); ok && now.After(until) {
+				device["quarantined"] = false
+			}
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -5453,6 +5489,55 @@ type AgentRelease struct {
 	// PendingActivation holds a new release back from /update/check until an admin
 	// activates it. Rows written before this field existed are treated as active.
 	PendingActivation bool `bson:"pending_activation,omitempty" json:"pending_activation,omitempty"`
+	// Signature is a base64 Ed25519 signature over releaseSigningMessage. Agents
+	// built with an embedded public key install only releases that verify.
+	Signature string `bson:"signature,omitempty" json:"signature,omitempty"`
+}
+
+// releaseSigningMessage must match updater.ReleaseMessage in the agent and
+// cmd/sign_release; their golden-vector tests pin the format.
+func releaseSigningMessage(version, goos, goarch, checksum string) []byte {
+	return []byte("devicepulse-release-v1\n" + version + "\n" + goos + "/" + goarch + "\n" + strings.ToLower(checksum))
+}
+
+func signingKeyFromEnv() (ed25519.PrivateKey, bool) {
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(os.Getenv("RELEASE_SIGNING_KEY")))
+	if err != nil || len(raw) == 0 {
+		return nil, false
+	}
+	switch len(raw) {
+	case ed25519.SeedSize:
+		return ed25519.NewKeyFromSeed(raw), true
+	case ed25519.PrivateKeySize:
+		return ed25519.PrivateKey(raw), true
+	}
+	return nil, false
+}
+
+// verifyReleaseSignature checks a signature against the public key the operator
+// configured (UPDATE_PUBLIC_KEY). With no key configured it only checks the shape,
+// so a typo is caught but trust stays with the agents' embedded key.
+func verifyReleaseSignature(rel AgentRelease, sigB64 string) error {
+	sig, err := base64.StdEncoding.DecodeString(strings.TrimSpace(sigB64))
+	if err != nil || len(sig) != ed25519.SignatureSize {
+		return fmt.Errorf("signature must be a base64-encoded 64-byte Ed25519 signature")
+	}
+	pubB64 := strings.TrimSpace(os.Getenv("UPDATE_PUBLIC_KEY"))
+	if pubB64 == "" {
+		return nil
+	}
+	pub, err := base64.StdEncoding.DecodeString(pubB64)
+	if err != nil || len(pub) != ed25519.PublicKeySize {
+		return fmt.Errorf("UPDATE_PUBLIC_KEY is misconfigured on the server")
+	}
+	if !ed25519.Verify(pub, releaseSigningMessage(rel.Version, rel.OS, rel.Arch, rel.Checksum), sig) {
+		return fmt.Errorf("signature does not verify against the configured public key")
+	}
+	return nil
+}
+
+func updateRequiresSignature() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("UPDATE_REQUIRE_SIGNATURE")), "true")
 }
 
 // releasesRequireActivation gates new releases behind explicit activation. Off by
@@ -5546,6 +5631,10 @@ func updateCheckHandler(w http.ResponseWriter, r *http.Request) {
 	coll := mongoClient.Database(dbName).Collection("agent_releases")
 	opts := options.FindOne().SetSort(bson.D{{Key: "published_at", Value: -1}})
 	filter := bson.M{"os": agentOS, "arch": agentArch, "pending_activation": bson.M{"$ne": true}}
+	if updateRequiresSignature() {
+		// Unsigned releases are never offered; agents already on a signed build stay put.
+		filter["signature"] = bson.M{"$exists": true, "$ne": ""}
+	}
 
 	var latest AgentRelease
 	if err := coll.FindOne(ctx, filter, opts).Decode(&latest); err != nil {
@@ -5582,6 +5671,7 @@ func updateCheckHandler(w http.ResponseWriter, r *http.Request) {
 		"version":          latest.Version,
 		"download_url":     downloadURL,
 		"checksum_sha256":  latest.Checksum,
+		"signature":        latest.Signature,
 	})
 }
 
@@ -5971,6 +6061,53 @@ func releaseRolloutLatestHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// POST /update/release/signature  body {"os","arch","version","signature"}
+//
+// Attaches an offline-made signature (see cmd/sign_release) to a published
+// release, so the signing key never has to live on the API host.
+func releaseSignatureHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		OS        string `json:"os"`
+		Arch      string `json:"arch"`
+		Version   string `json:"version"`
+		Signature string `json:"signature"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Bad JSON", http.StatusBadRequest)
+		return
+	}
+	req.OS, req.Arch, req.Version = strings.TrimSpace(req.OS), strings.TrimSpace(req.Arch), strings.TrimSpace(req.Version)
+	req.Signature = strings.TrimSpace(req.Signature)
+	if !validAgentOS[req.OS] || !validAgentArch[req.Arch] || req.Version == "" || req.Signature == "" {
+		http.Error(w, "os, arch, version and signature are required", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	coll := mongoClient.Database(dbName).Collection("agent_releases")
+	var rel AgentRelease
+	if err := coll.FindOne(ctx, bson.M{"os": req.OS, "arch": req.Arch, "version": req.Version}).Decode(&rel); err != nil {
+		http.Error(w, "Release not found", http.StatusNotFound)
+		return
+	}
+	if err := verifyReleaseSignature(rel, req.Signature); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if _, err := coll.UpdateMany(ctx, bson.M{"os": req.OS, "arch": req.Arch, "version": req.Version},
+		bson.M{"$set": bson.M{"signature": req.Signature}}); err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	recordAudit(r, "release.signed", req.OS+"/"+req.Arch, req.Version)
+	w.WriteHeader(http.StatusOK)
+}
+
 func agentBuildsHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -6319,17 +6456,20 @@ func publishAgentArtifacts(ctx context.Context, version string, artifacts []Agen
 		if artifact.Kind != "" && artifact.Kind != "binary" {
 			continue
 		}
-		docs = append(docs, AgentRelease{
-			Version:     version,
-			OS:          artifact.OS,
-			Arch:        artifact.Arch,
-			DownloadURL: artifact.DownloadURL,
-			S3Key:       artifact.S3Key,
-			Checksum:    artifact.Checksum,
-			PublishedAt: now,
-
+		rel := AgentRelease{
+			Version:           version,
+			OS:                artifact.OS,
+			Arch:              artifact.Arch,
+			DownloadURL:       artifact.DownloadURL,
+			S3Key:             artifact.S3Key,
+			Checksum:          artifact.Checksum,
+			PublishedAt:       now,
 			PendingActivation: releasesRequireActivation(),
-		})
+		}
+		if key, ok := signingKeyFromEnv(); ok {
+			rel.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(key, releaseSigningMessage(version, artifact.OS, artifact.Arch, artifact.Checksum)))
+		}
+		docs = append(docs, rel)
 	}
 	if len(docs) == 0 {
 		return fmt.Errorf("no binary artifacts were produced")
@@ -6783,6 +6923,7 @@ func registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/update/releases", corsMiddleware(requireRole(RoleAdmin, releaseListHandler)))
 	mux.HandleFunc("/update/release/rollout-latest", corsMiddleware(requireRole(RoleAdmin, releaseRolloutLatestHandler)))
 	mux.HandleFunc("/update/release/activate", corsMiddleware(requireRole(RoleAdmin, releaseActivateHandler)))
+	mux.HandleFunc("/update/release/signature", corsMiddleware(requireRole(RoleAdmin, releaseSignatureHandler)))
 	mux.HandleFunc("/update/release", corsMiddleware(requireRole(RoleAdmin, releasePublishHandler)))
 	mux.HandleFunc("/update/builds", corsMiddleware(requireRole(RoleAdmin, agentBuildsHandler)))
 }

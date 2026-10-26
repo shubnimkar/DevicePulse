@@ -3,15 +3,30 @@ package queue
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 
+	"github.com/devicepulse/agent/safefs"
 	_ "modernc.org/sqlite"
 )
 
+// While the API is unreachable the queue keeps growing. Defaults keep a week of
+// data up to 512 MB (oldest rows are dropped first); both are tunable.
+const (
+	defaultQueueMaxMB       = 512
+	defaultQueueMaxAgeHours = 168
+	pruneEveryNPushes       = 100
+)
+
 type Queue struct {
-	db *sql.DB
+	db     *sql.DB
+	pushes atomic.Int64
 }
 
 type TelemetryItem struct {
@@ -43,16 +58,34 @@ func NewQueue(dbPath string) (*Queue, error) {
 	}
 	ensureSharedSQLiteFiles(dbPath)
 
-	return &Queue{db: db}, nil
+	q := &Queue{db: db}
+	if err := q.Prune(); err != nil {
+		log.Printf("Queue: startup prune failed: %v", err)
+	}
+	return q, nil
 }
 
+// ensureSharedSQLiteFiles makes the queue directory and database files usable by
+// the per-user window service. The directory is writable by every local user and
+// the agent runs as root here, so no path is ever chmod-ed by name: a planted
+// symlink is removed (never followed) and permissions are set on the opened file.
 func ensureSharedSQLiteFiles(dbPath string) {
 	if dir := filepath.Dir(dbPath); dir != "." && dir != "" {
-		_ = os.Chmod(dir, 0777)
+		if err := safefs.ChmodDir(dir, 0777); err != nil && !os.IsNotExist(err) {
+			log.Printf("Queue: not changing permissions of %s: %v", dir, err)
+		}
 	}
 	for _, path := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
-		if _, err := os.Stat(path); err == nil {
-			_ = os.Chmod(path, 0666)
+		if removed, err := safefs.RemoveIfSymlink(path); removed {
+			log.Printf("Queue: removed unexpected symlink %s", path)
+		} else if err != nil {
+			log.Printf("Queue: cannot remove symlink %s: %v", path, err)
+		}
+		if _, err := os.Lstat(path); err != nil {
+			continue
+		}
+		if err := safefs.ChmodFile(path, 0666); err != nil {
+			log.Printf("Queue: not changing permissions of %s: %v", path, err)
 		}
 	}
 }
@@ -63,8 +96,58 @@ func (q *Queue) Push(payload map[string]interface{}) error {
 		return err
 	}
 
-	_, err = q.db.Exec("INSERT INTO telemetry (payload) VALUES (?)", string(data))
-	return err
+	if _, err = q.db.Exec("INSERT INTO telemetry (payload) VALUES (?)", string(data)); err != nil {
+		return err
+	}
+	if q.pushes.Add(1)%pruneEveryNPushes == 0 {
+		if err := q.Prune(); err != nil {
+			log.Printf("Queue: prune failed: %v", err)
+		}
+	}
+	return nil
+}
+
+func envInt(key string, def int) int {
+	if n, err := strconv.Atoi(strings.TrimSpace(os.Getenv(key))); err == nil && n > 0 {
+		return n
+	}
+	return def
+}
+
+// Prune drops rows older than DEVICEPULSE_QUEUE_MAX_AGE_HOURS and, if the queue
+// is still larger than DEVICEPULSE_QUEUE_MAX_MB, the oldest rows beyond that size.
+func (q *Queue) Prune() error {
+	return q.pruneTo(
+		int64(envInt("DEVICEPULSE_QUEUE_MAX_MB", defaultQueueMaxMB))<<20,
+		time.Duration(envInt("DEVICEPULSE_QUEUE_MAX_AGE_HOURS", defaultQueueMaxAgeHours))*time.Hour,
+	)
+}
+
+func (q *Queue) pruneTo(maxBytes int64, maxAge time.Duration) error {
+	if _, err := q.db.Exec("DELETE FROM telemetry WHERE created_at < datetime('now', ?)",
+		fmt.Sprintf("-%d seconds", int64(maxAge.Seconds()))); err != nil {
+		return err
+	}
+	// Running total of payload bytes from the newest row backwards; the first row
+	// that pushes it over the cap and everything older goes.
+	var cutoff int64
+	err := q.db.QueryRow(`SELECT id FROM (
+		SELECT id, SUM(LENGTH(CAST(payload AS BLOB))) OVER (ORDER BY id DESC) AS running FROM telemetry
+	) WHERE running > ? ORDER BY id DESC LIMIT 1`, maxBytes).Scan(&cutoff)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	res, err := q.db.Exec("DELETE FROM telemetry WHERE id <= ?", cutoff)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		log.Printf("Queue: dropped %d oldest unsent item(s) to stay under the size cap", n)
+	}
+	return nil
 }
 
 func (q *Queue) PopBatch(limit int) ([]TelemetryItem, error) {

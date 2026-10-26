@@ -374,7 +374,23 @@ DevicePulse/
 | `DASHBOARD_EXTRA_ORIGINS` | API | — | Comma-separated extra browser origins allowed for credentialed CORS |
 | `COOKIE_SECURE` | API | automatic | Non-loopback/HTTPS dashboard origins always require Secure cookies; `true` also forces this locally |
 | `LOGIN_RATE_LIMIT_PER_MINUTE` | API | `30` | Per-IP login attempts per minute (0 disables) |
-| `REGISTER_RATE_LIMIT_PER_MINUTE` | API | `10` | Per-IP device registrations per minute (0 disables) |
+| `REGISTER_RATE_LIMIT_PER_MINUTE` | API | `10` | Per-IP dashboard first-admin registrations per minute (0 disables) |
+| `DEVICE_REGISTER_RATE_LIMIT_PER_MINUTE` | API | `60` | Per-IP agent registrations per minute (0 disables) |
+| `LOGIN_FAIL_LIMIT` | API | `10` | Failed sign-ins per email+IP in 15 minutes before a 429 (0 disables) |
+| `TRUSTED_PROXY_CIDRS` | API | — | Proxy addresses allowed to set `X-Forwarded-For`. Unset keeps the legacy (spoofable) behaviour |
+| `ENROLLMENT_TOKEN` | API | — | When set, brand-new devices must send it as `X-Enrollment-Token` (agent: `DEVICEPULSE_ENROLLMENT_TOKEN`). Known hardware can still recover |
+| `AUDIT_RETENTION_DAYS` | API | keep forever | Expire `audit_log` entries after this many days |
+| `SKIP_HEAVY_INDEXES` | API | `false` | Skip the background `telemetry` index builds (build them off-peak instead) |
+| `S3_RETENTION_SWEEP` | API | off | `dry-run` logs, `true` deletes S3 objects older than the retention policy (7-day floor) |
+| `RELEASES_REQUIRE_ACTIVATION` | API | `false` | New builds/publishes stay pending until an admin activates them |
+| `RELEASE_SIGNING_KEY` | API | — | Base64 Ed25519 seed: builds are signed automatically. Prefer signing offline with `api/cmd/sign_release` |
+| `UPDATE_PUBLIC_KEY` | API | — | Base64 Ed25519 public key used to check signatures uploaded to `/update/release/signature` |
+| `UPDATE_REQUIRE_SIGNATURE` | API | `false` | Never offer an unsigned release to agents |
+| `QUARANTINE_MAX_HOURS` | API | `24` | Default quarantine length; the agent releases itself at the deadline |
+| `DEVICEPULSE_UPDATE_PUBKEY` | Build | — | Base64 Ed25519 public key embedded in agents by `packaging/build.sh`; such agents install only signed updates |
+| `DEVICEPULSE_REQUIRE_HTTPS` | Agent | `false` | Refuse to start with a non-loopback `http://` API URL (otherwise only warns) |
+| `DEVICEPULSE_QUEUE_MAX_MB` | Agent | `512` | Cap on the offline telemetry queue; oldest unsent items are dropped first |
+| `DEVICEPULSE_QUEUE_MAX_AGE_HOURS` | Agent | `168` | Drop unsent queue items older than this |
 | `NEXT_PUBLIC_API_URL` | Dashboard | `/api` | API URL used by the browser dashboard |
 | `API_INTERNAL_URL` | Dashboard | `http://127.0.0.1:8000` | Server-side Next.js rewrite target for `/api/*` when nginx sends API traffic to the dashboard |
 | `NEXT_PUBLIC_DASHBOARD_TOKEN` | Dashboard | — | Legacy; read endpoints now require dashboard login sessions |
