@@ -43,4 +43,3 @@ func firstLine(s string) string {
 	}
 	return strings.TrimSpace(s)
 }
-

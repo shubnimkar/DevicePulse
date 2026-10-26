@@ -60,8 +60,8 @@ func (o *OSUpdates) Collect() (map[string]interface{}, error) {
 // softwareUpdatePlist mirrors the fields we read from
 // /Library/Preferences/com.apple.SoftwareUpdate.plist
 type softwareUpdatePlist struct {
-	LastSuccessfulDate     string   `plist:"LastSuccessfulDate"`
-	RecommendedUpdates     []suItem `plist:"RecommendedUpdates"`
+	LastSuccessfulDate string   `plist:"LastSuccessfulDate"`
+	RecommendedUpdates []suItem `plist:"RecommendedUpdates"`
 }
 
 type suItem struct {

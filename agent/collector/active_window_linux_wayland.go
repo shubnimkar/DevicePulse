@@ -270,7 +270,7 @@ func readFull(conn net.Conn, buf []byte) (int, error) {
 type swayNode struct {
 	ID       int64      `json:"id"`
 	Name     string     `json:"name"`
-	AppID    string     `json:"app_id"`    // Wayland app ID
+	AppID    string     `json:"app_id"` // Wayland app ID
 	Focused  bool       `json:"focused"`
 	Nodes    []swayNode `json:"nodes"`
 	Floating []swayNode `json:"floating_nodes"`
@@ -315,9 +315,10 @@ func findFocusedNode(n *swayNode) *swayNode {
 
 // extractAppNameFromTitle strips common window-title suffixes to return just
 // the application name. Examples:
-//   "README.md - Visual Studio Code"  → "Visual Studio Code"
-//   "Mozilla Firefox"                 → "Mozilla Firefox"
-//   "New Tab – Firefox"               → "Firefox"
+//
+//	"README.md - Visual Studio Code"  → "Visual Studio Code"
+//	"Mozilla Firefox"                 → "Mozilla Firefox"
+//	"New Tab – Firefox"               → "Firefox"
 func extractAppNameFromTitle(title string) string {
 	title = strings.TrimSpace(title)
 	if title == "" {

@@ -49,8 +49,8 @@ import (
 
 // Lazily loaded DLL procedures. Loaded once, zero cost after first call.
 var (
-	modUser32    = windows.NewLazySystemDLL("user32.dll")
-	modKernel32  = windows.NewLazySystemDLL("kernel32.dll")
+	modUser32   = windows.NewLazySystemDLL("user32.dll")
+	modKernel32 = windows.NewLazySystemDLL("kernel32.dll")
 
 	procGetForegroundWindow      = modUser32.NewProc("GetForegroundWindow")
 	procGetWindowThreadProcessId = modUser32.NewProc("GetWindowThreadProcessId")
@@ -203,27 +203,27 @@ func getForegroundAppFromConsoleSession() string {
 // "active app" heuristic.
 func isSystemProcess(name string) bool {
 	systemProcs := map[string]bool{
-		"system":               true,
-		"idle":                 true,
-		"smss.exe":             true,
-		"csrss.exe":            true,
-		"wininit.exe":          true,
-		"winlogon.exe":         true,
-		"services.exe":         true,
-		"lsass.exe":            true,
-		"svchost.exe":          true,
-		"dwm.exe":              true,
-		"explorer.exe":         true,
-		"taskhostw.exe":        true,
-		"conhost.exe":          true,
-		"spoolsv.exe":          true,
-		"searchindexer.exe":    true,
-		"wuauclt.exe":          true,
-		"audiodg.exe":          true,
-		"fontdrvhost.exe":      true,
-		"runtimebroker.exe":    true,
-		"sihost.exe":           true,
-		"ctfmon.exe":           true,
+		"system":            true,
+		"idle":              true,
+		"smss.exe":          true,
+		"csrss.exe":         true,
+		"wininit.exe":       true,
+		"winlogon.exe":      true,
+		"services.exe":      true,
+		"lsass.exe":         true,
+		"svchost.exe":       true,
+		"dwm.exe":           true,
+		"explorer.exe":      true,
+		"taskhostw.exe":     true,
+		"conhost.exe":       true,
+		"spoolsv.exe":       true,
+		"searchindexer.exe": true,
+		"wuauclt.exe":       true,
+		"audiodg.exe":       true,
+		"fontdrvhost.exe":   true,
+		"runtimebroker.exe": true,
+		"sihost.exe":        true,
+		"ctfmon.exe":        true,
 	}
 	return systemProcs[name]
 }

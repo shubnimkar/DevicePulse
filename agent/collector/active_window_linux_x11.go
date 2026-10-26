@@ -61,10 +61,10 @@ func linuxX11ActiveWindow() string {
 		return ""
 	}
 	netActiveWindow := atoms["_NET_ACTIVE_WINDOW"]
-	netWMName       := atoms["_NET_WM_NAME"]
-	wmName          := atoms["WM_NAME"]
-	wmClass         := atoms["WM_CLASS"]
-	utf8String      := atoms["UTF8_STRING"]
+	netWMName := atoms["_NET_WM_NAME"]
+	wmName := atoms["WM_NAME"]
+	wmClass := atoms["WM_CLASS"]
+	utf8String := atoms["UTF8_STRING"]
 
 	// ── Step 1: read root _NET_ACTIVE_WINDOW ─────────────────────────────────
 	activeWinID, err := readCardinal(conn, root, netActiveWindow)
