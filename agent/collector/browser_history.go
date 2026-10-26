@@ -23,6 +23,7 @@ import (
 	"bufio"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -30,12 +31,16 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
 
 type BrowserHistory struct {
+	// mu serialises Collect and Commit: the agent's collector guard can abandon a
+	// slow Collect, which may still finish while the next cycle commits.
+	mu             sync.Mutex
 	statePath      string
 	stateLoaded    bool
 	sentEntries    map[string]int64
@@ -68,6 +73,8 @@ func NewBrowserHistory(statePath string) *BrowserHistory {
 }
 
 func (b *BrowserHistory) Collect() (map[string]interface{}, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.loadState()
 
 	homeDirs := resolveHomeDirs()
@@ -145,6 +152,11 @@ func (b *BrowserHistory) Collect() (map[string]interface{}, error) {
 }
 
 func (b *BrowserHistory) Commit() error {
+	// Never stall the collection loop behind a Collect that is still running.
+	if !b.mu.TryLock() {
+		return nil
+	}
+	defer b.mu.Unlock()
 	if len(b.pendingEntries) == 0 {
 		return nil
 	}
@@ -415,6 +427,10 @@ func fetchChromiumHistory(baseDir, browserName string) []HistoryEntry {
 }
 
 func queryChromiumDB(historyPath, browserName string) []HistoryEntry {
+	return cachedScan(historyPath, func() []HistoryEntry { return scanChromiumDB(historyPath, browserName) })
+}
+
+func scanChromiumDB(historyPath, browserName string) []HistoryEntry {
 	tmp, err := os.CreateTemp("", "dp_chrome_*.db")
 	if err != nil {
 		return nil
@@ -499,6 +515,10 @@ func fetchFirefoxHistory(baseDir string) []HistoryEntry {
 }
 
 func queryFirefoxDB(historyPath string) []HistoryEntry {
+	return cachedScan(historyPath, func() []HistoryEntry { return scanFirefoxDB(historyPath) })
+}
+
+func scanFirefoxDB(historyPath string) []HistoryEntry {
 	tmp, err := os.CreateTemp("", "dp_firefox_*.db")
 	if err != nil {
 		return nil
@@ -555,6 +575,10 @@ func fetchSafariHistory(safariPath string) []HistoryEntry {
 	if _, err := os.Stat(safariPath); err != nil {
 		return nil
 	}
+	return cachedScan(safariPath, func() []HistoryEntry { return scanSafariDB(safariPath) })
+}
+
+func scanSafariDB(safariPath string) []HistoryEntry {
 
 	tmp, err := os.CreateTemp("", "dp_safari_*.db")
 	if err != nil {
@@ -609,6 +633,53 @@ func fetchSafariHistory(safariPath string) []HistoryEntry {
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
+
+// History databases can be hundreds of MB and every collection cycle used to copy
+// each one to a temp file. A scan is now reused until the database or its
+// write-ahead files change (size or modification time).
+type dbScan struct {
+	sig     string
+	entries []HistoryEntry
+}
+
+var (
+	scanMu    sync.Mutex
+	scanCache = map[string]dbScan{}
+)
+
+func dbSignature(path string) string {
+	var sb strings.Builder
+	found := false
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+		if info, err := os.Stat(path + suffix); err == nil {
+			found = true
+			fmt.Fprintf(&sb, "%s:%d:%d;", suffix, info.Size(), info.ModTime().UnixNano())
+		}
+	}
+	if !found {
+		return ""
+	}
+	return sb.String()
+}
+
+func cachedScan(path string, scan func() []HistoryEntry) []HistoryEntry {
+	sig := dbSignature(path)
+	if sig != "" {
+		scanMu.Lock()
+		c, ok := scanCache[path]
+		scanMu.Unlock()
+		if ok && c.sig == sig {
+			return append([]HistoryEntry(nil), c.entries...)
+		}
+	}
+	entries := scan()
+	if sig != "" && entries != nil {
+		scanMu.Lock()
+		scanCache[path] = dbScan{sig: sig, entries: append([]HistoryEntry(nil), entries...)}
+		scanMu.Unlock()
+	}
+	return entries
+}
 
 func copySQLiteDatabase(src, dst string) error {
 	if err := copyFile(src, dst); err != nil {

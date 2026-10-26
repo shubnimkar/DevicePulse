@@ -31,10 +31,13 @@ func quarantineEnable(apiURL string) (string, string) {
 	var b strings.Builder
 	b.WriteString("# Managed by DevicePulse agent — do not edit\n")
 	b.WriteString("set skip on lo0\n")
-	b.WriteString("pass out quick inet proto udp to any port 53 keep state\n")   // DNS
-	b.WriteString("pass out quick inet proto tcp to any port 53 keep state\n")
+	b.WriteString("pass out quick proto udp to any port 53 keep state\n") // DNS (IPv4 and IPv6)
+	b.WriteString("pass out quick proto tcp to any port 53 keep state\n")
 	b.WriteString("pass out quick inet proto udp from any port 68 to any port 67 keep state\n") // DHCP
 	b.WriteString("pass in quick inet proto udp from any port 67 to any port 68 keep state\n")
+	b.WriteString("pass out quick inet6 proto udp from any port 546 to any port 547 keep state\n") // DHCPv6
+	b.WriteString("pass in quick inet6 proto udp from any port 547 to any port 546 keep state\n")
+	b.WriteString("pass quick inet6 proto icmp6 all\n") // neighbour discovery / router advertisements
 	for _, ip := range apiIPs {
 		fmt.Fprintf(&b, "pass out quick to %s keep state\n", ip)
 		fmt.Fprintf(&b, "pass in quick from %s keep state\n", ip)

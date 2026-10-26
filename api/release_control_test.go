@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -183,6 +185,53 @@ func TestReleaseControlRollbackOnlyForTargetedDevices(t *testing.T) {
 	}
 	if _, still := d["agent_target_version"]; still {
 		t.Fatalf("rollback target not cleared: %#v", d)
+	}
+}
+
+func TestReleaseSignatureGatesUpdates(t *testing.T) {
+	useTestMongo(t)
+	t.Setenv("RELEASES_REQUIRE_ACTIVATION", "")
+	t.Setenv("UPDATE_REQUIRE_SIGNATURE", "true")
+	seed := make([]byte, 32)
+	for i := range seed {
+		seed[i] = byte(i + 1)
+	}
+	priv := ed25519.NewKeyFromSeed(seed)
+	t.Setenv("UPDATE_PUBLIC_KEY", base64.StdEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)))
+	seedDevice(t, "1.0.0")
+	publish(t, "1.1.0") // checksum "abc" from the helper
+
+	// Unsigned: never offered while signatures are required.
+	if ok, v := checkUpdate(t, "1.0.0"); ok {
+		t.Fatalf("unsigned release offered: %q", v)
+	}
+
+	// A signature that does not verify is rejected and changes nothing.
+	bad := base64.StdEncoding.EncodeToString(make([]byte, 64))
+	body := fmt.Sprintf(`{"os":"linux","arch":"amd64","version":"1.1.0","signature":%q}`, bad)
+	if w := call(releaseSignatureHandler, http.MethodPost, "/update/release/signature", body, ""); w.Code != http.StatusBadRequest {
+		t.Fatalf("forged signature: %d %s", w.Code, w.Body.String())
+	}
+	if ok, _ := checkUpdate(t, "1.0.0"); ok {
+		t.Fatal("rejected signature must not release the update")
+	}
+
+	good := base64.StdEncoding.EncodeToString(ed25519.Sign(priv, releaseSigningMessage("1.1.0", "linux", "amd64", "abc")))
+	body = fmt.Sprintf(`{"os":"linux","arch":"amd64","version":"1.1.0","signature":%q}`, good)
+	if w := call(releaseSignatureHandler, http.MethodPost, "/update/release/signature", body, ""); w.Code != 200 {
+		t.Fatalf("valid signature: %d %s", w.Code, w.Body.String())
+	}
+	w := call(updateCheckHandler, http.MethodGet, "/update/check?version=1.0.0&os=linux&arch=amd64", "", "agent-key")
+	var out struct {
+		Available bool   `json:"update_available"`
+		Version   string `json:"version"`
+		Signature string `json:"signature"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.Available || out.Version != "1.1.0" || out.Signature != good {
+		t.Fatalf("signed release must be offered with its signature: %+v", out)
 	}
 }
 

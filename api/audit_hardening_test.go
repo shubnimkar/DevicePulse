@@ -74,6 +74,22 @@ func TestClientIPTrustedProxies(t *testing.T) {
 	}
 }
 
+func TestQuarantineWindowMinutes(t *testing.T) {
+	t.Setenv("QUARANTINE_MAX_HOURS", "")
+	for params, want := range map[float64]float64{0: 24 * 60, 0.5: 24 * 60, 90: 90, 1e9: 30 * 24 * 60} {
+		if got := quarantineWindowMinutes(map[string]interface{}{"duration_minutes": params}); got != want {
+			t.Errorf("duration_minutes=%v -> %v, want %v", params, got, want)
+		}
+	}
+	if got := quarantineWindowMinutes(nil); got != 24*60 {
+		t.Errorf("default = %v", got)
+	}
+	t.Setenv("QUARANTINE_MAX_HOURS", "2")
+	if got := quarantineWindowMinutes(map[string]interface{}{}); got != 120 {
+		t.Errorf("env default = %v", got)
+	}
+}
+
 func TestRateLimiterBlockedHitReset(t *testing.T) {
 	rl := &rateLimiter{limit: 2, window: time.Minute, hits: map[string]*rateWindow{}}
 	if rl.Blocked("k") {

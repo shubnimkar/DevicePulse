@@ -56,6 +56,12 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 AGENT_DIR="$REPO_ROOT/agent"
 DIST_DIR="${DEVICEPULSE_DIST_DIR:-$REPO_ROOT/dist}"
 BASE_LDFLAGS="-X main.defaultAPIURL=${API_URL} -X main.agentVersion=${VERSION} -s -w"
+# Optional: embed the release-signing public key (base64 Ed25519). Agents built
+# with it refuse any update whose signature does not verify. Unset = unsigned
+# updates stay accepted, exactly as before.
+if [[ -n "${DEVICEPULSE_UPDATE_PUBKEY:-}" ]]; then
+  BASE_LDFLAGS="$BASE_LDFLAGS -X github.com/devicepulse/agent/updater.PublicKeyB64=${DEVICEPULSE_UPDATE_PUBKEY}"
+fi
 
 mkdir -p "$DIST_DIR"
 

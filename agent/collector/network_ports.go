@@ -22,10 +22,19 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
-// NetworkPorts collector.
-type NetworkPorts struct{}
+// NetworkPorts collector. Walking /proc/*/fd to map sockets to processes is
+// expensive on busy hosts, so results are reused for portsCacheTTL.
+type NetworkPorts struct {
+	mu   sync.Mutex
+	at   time.Time
+	last map[string]interface{}
+}
+
+const portsCacheTTL = 30 * time.Second
 
 func (n *NetworkPorts) Name() string { return "NetworkPorts" }
 func (n *NetworkPorts) Start() error { return nil }
@@ -41,6 +50,11 @@ type PortEntry struct {
 }
 
 func (n *NetworkPorts) Collect() (map[string]interface{}, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.last != nil && time.Since(n.at) < portsCacheTTL {
+		return n.last, nil
+	}
 	var ports []PortEntry
 
 	switch runtime.GOOS {
@@ -52,7 +66,9 @@ func (n *NetworkPorts) Collect() (map[string]interface{}, error) {
 		ports = collectWindowsPorts()
 	}
 
-	return map[string]interface{}{"open_ports": ports, "source": "native"}, nil
+	n.last = map[string]interface{}{"open_ports": ports, "source": "native"}
+	n.at = time.Now()
+	return n.last, nil
 }
 
 // ─── Linux /proc/net ─────────────────────────────────────────────────────────

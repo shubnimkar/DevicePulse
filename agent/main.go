@@ -21,6 +21,7 @@ import (
 	"github.com/devicepulse/agent/collector"
 	"github.com/devicepulse/agent/commander"
 	"github.com/devicepulse/agent/queue"
+	"github.com/devicepulse/agent/safefs"
 	"github.com/devicepulse/agent/updater"
 	"github.com/joho/godotenv"
 )
@@ -113,6 +114,9 @@ func runAgent() {
 		apiURL = v
 	}
 	log.Printf("API endpoint: %s", apiURL)
+	if err := checkAPIScheme(apiURL, requireHTTPSFromEnv()); err != nil {
+		log.Fatalf("%v", err)
+	}
 
 	// Resolve data directory.
 	// Priority: DEVICEPULSE_DATA_DIR env var → platform default.
@@ -142,19 +146,24 @@ func runAgent() {
 	}
 
 	// 2. Register device and obtain API key
+	// An unreachable API must not stop collection: telemetry queues locally and
+	// registration keeps retrying in the background.
 	if err := registerDevice(); err != nil {
-		log.Fatalf("Device registration failed: %v", err)
+		log.Printf("Device registration failed (retrying in the background): %v", err)
+		go registerUntilSuccess()
+	} else {
+		log.Printf("Registered as device_id=%s", currentDeviceID())
 	}
-	log.Printf("Registered as device_id=%s", deviceID)
 
 	// 3. Start remote-command poller (collect_now / restart / lock /
 	//    quarantine / wipe). Credentials were pushed to the commander during
 	//    registration.
 	commander.SetDataDir(dataDir)
+	commander.ResumeQuarantineDeadline()
 	go commander.Poller(5 * time.Second)
 
 	// 4. Start Update Poller — checks for new binary every few minutes
-	go updater.Poller(apiURL, apiKey, agentVersion, 5*time.Minute)
+	go updater.Poller(apiURL, currentAPIKey, agentVersion, 5*time.Minute)
 
 	// 4. Start Policy Poller
 	go policyPoller()
@@ -197,6 +206,7 @@ func runAgent() {
 
 	// Run slow collectors once immediately in a goroutine, then every 60s.
 	go func() {
+		slow := guardSet{}
 		for {
 			policyMu.RLock()
 			shouldCollectApps := collectInstalledApps
@@ -204,7 +214,7 @@ func runAgent() {
 			policyMu.RUnlock()
 
 			if shouldCollectApps {
-				if v, err := installedApps.Collect(); err == nil {
+				if v, err := slow.run(installedApps.Name(), slowCollectTimeout, installedApps.Collect); err == nil {
 					cache.mu.Lock()
 					cache.apps = v
 					cache.mu.Unlock()
@@ -219,7 +229,7 @@ func runAgent() {
 			}
 
 			if shouldCollectUpdates {
-				if v, err := osUpdates.Collect(); err == nil {
+				if v, err := slow.run(osUpdates.Name(), slowCollectTimeout, osUpdates.Collect); err == nil {
 					cache.mu.Lock()
 					cache.osUpd = v
 					cache.mu.Unlock()
@@ -241,6 +251,7 @@ func runAgent() {
 	agentSessionID := newAgentSessionID()
 	bootID := readBootID()
 	var sequence uint64
+	guards := guardSet{}
 	for {
 		policyMu.RLock()
 		shouldCollectSystem := collectSystemInfo
@@ -259,7 +270,7 @@ func runAgent() {
 		var err error
 
 		if shouldCollectSystem {
-			if sysPayload, err := sysInfo.Collect(); err != nil {
+			if sysPayload, err := guards.run(sysInfo.Name(), collectTimeout, sysInfo.Collect); err != nil {
 				log.Printf("Error collecting system info: %v", err)
 			} else {
 				dataMap[sysInfo.Name()] = sysPayload
@@ -267,7 +278,7 @@ func runAgent() {
 		}
 
 		if shouldCollectProcesses {
-			if procPayload, err := procMon.Collect(); err != nil {
+			if procPayload, err := guards.run(procMon.Name(), collectTimeout, procMon.Collect); err != nil {
 				log.Printf("Error collecting process info: %v", err)
 			} else {
 				dataMap[procMon.Name()] = procPayload
@@ -276,7 +287,7 @@ func runAgent() {
 
 		var histPayload map[string]interface{}
 		if collectHistory {
-			histPayload, err = browserHist.Collect()
+			histPayload, err = guards.run(browserHist.Name(), collectTimeout, browserHist.Collect)
 			if err != nil {
 				log.Printf("Error collecting browser history: %v", err)
 			} else {
@@ -286,7 +297,7 @@ func runAgent() {
 		}
 
 		if shouldCollectHardware {
-			if hwPayload, err := hwStats.Collect(); err != nil {
+			if hwPayload, err := guards.run(hwStats.Name(), collectTimeout, hwStats.Collect); err != nil {
 				log.Printf("Error collecting hardware stats: %v", err)
 			} else {
 				dataMap[hwStats.Name()] = hwPayload
@@ -294,7 +305,7 @@ func runAgent() {
 		}
 
 		if shouldCollectServices {
-			if svcPayload, err := services.Collect(); err != nil {
+			if svcPayload, err := guards.run(services.Name(), collectTimeout, services.Collect); err != nil {
 				log.Printf("Error collecting services: %v", err)
 			} else {
 				dataMap[services.Name()] = svcPayload
@@ -302,7 +313,7 @@ func runAgent() {
 		}
 
 		if shouldCollectPorts {
-			if portsPayload, err := netPorts.Collect(); err != nil {
+			if portsPayload, err := guards.run(netPorts.Name(), collectTimeout, netPorts.Collect); err != nil {
 				log.Printf("Error collecting network ports: %v", err)
 			} else {
 				dataMap[netPorts.Name()] = portsPayload
@@ -310,7 +321,7 @@ func runAgent() {
 		}
 
 		if shouldCollectUSB {
-			if usbPayload, err := usbEvents.Collect(); err != nil {
+			if usbPayload, err := guards.run(usbEvents.Name(), collectTimeout, usbEvents.Collect); err != nil {
 				log.Printf("Error collecting USB events: %v", err)
 			} else {
 				dataMap[usbEvents.Name()] = usbPayload
@@ -318,7 +329,7 @@ func runAgent() {
 		}
 
 		if shouldCollectActiveWindow && activeWin != nil {
-			if activeWinPayload, err := activeWin.Collect(); err != nil {
+			if activeWinPayload, err := guards.run(activeWin.Name(), collectTimeout, activeWin.Collect); err != nil {
 				log.Printf("Error collecting active window: %v", err)
 			} else {
 				dataMap[activeWin.Name()] = activeWinPayload
@@ -340,7 +351,7 @@ func runAgent() {
 		}
 
 		finalPayload := map[string]interface{}{
-			"device_id":        deviceID,
+			"device_id":        currentDeviceID(),
 			"event_id":         fmt.Sprintf("%s-%d", agentSessionID, sequence),
 			"agent_session_id": agentSessionID,
 			"boot_id":          bootID,
@@ -423,9 +434,16 @@ func configureLogging(dir string) {
 		return
 	}
 	logFile := filepath.Join(dir, "agent.log")
-	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	// The directory can be writable by other local users while the agent runs as
+	// root: never follow a symlink planted at the log path.
+	f, err := safefs.OpenAppend(logFile, 0644)
 	if err != nil {
-		return
+		if removed, _ := safefs.RemoveIfSymlink(logFile); !removed {
+			return
+		}
+		if f, err = safefs.OpenAppend(logFile, 0644); err != nil {
+			return
+		}
 	}
 	log.SetOutput(io.MultiWriter(os.Stderr, f))
 }
@@ -466,10 +484,8 @@ func registerDeviceWithCache(useCache bool) error {
 				// This handles the case where the binary is copied to a different machine.
 				if reg["device_id"] != "" && reg["api_key"] != "" &&
 					cachedUUID == fp.HardwareUUID && cachedMAC == fp.MACAddress {
-					deviceID = reg["device_id"]
-					apiKey = reg["api_key"]
-					commander.SetCredentials(apiURL, apiKey)
-					log.Printf("Loaded cached registration: device_id=%s", deviceID)
+					setCredentials(reg["device_id"], reg["api_key"])
+					log.Printf("Loaded cached registration: device_id=%s", reg["device_id"])
 					return nil
 				}
 				log.Printf("Fingerprint mismatch or incomplete cache — re-registering")
@@ -485,7 +501,16 @@ func registerDeviceWithCache(useCache bool) error {
 	}
 	body, _ := json.Marshal(payload)
 
-	resp, err := http.Post(apiURL+"/devices/register", "application/json", bytes.NewBuffer(body))
+	req, err := http.NewRequest(http.MethodPost, apiURL+"/devices/register", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build registration request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	// Only needed when the server sets ENROLLMENT_TOKEN for brand-new devices.
+	if token := strings.TrimSpace(os.Getenv("DEVICEPULSE_ENROLLMENT_TOKEN")); token != "" {
+		req.Header.Set("X-Enrollment-Token", token)
+	}
+	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
 	if err != nil {
 		return fmt.Errorf("registration request failed: %w", err)
 	}
@@ -500,18 +525,16 @@ func registerDeviceWithCache(useCache bool) error {
 		return fmt.Errorf("failed to decode registration response: %w", err)
 	}
 
-	deviceID = result["device_id"]
-	apiKey = result["api_key"]
-
-	if deviceID == "" || apiKey == "" {
+	newID, newKey := result["device_id"], result["api_key"]
+	if newID == "" || newKey == "" {
 		return fmt.Errorf("registration response missing device_id or api_key")
 	}
-	commander.SetCredentials(apiURL, apiKey)
+	setCredentials(newID, newKey)
 
 	// Persist credentials + fingerprint so we can validate on next startup
 	reg := map[string]string{
-		"device_id":     deviceID,
-		"api_key":       apiKey,
+		"device_id":     newID,
+		"api_key":       newKey,
 		"hardware_uuid": fp.HardwareUUID,
 		"mac_address":   fp.MACAddress,
 	}
@@ -530,7 +553,7 @@ func registerDeviceWithCache(useCache bool) error {
 func policyPoller() {
 	for {
 		req, _ := http.NewRequest(http.MethodGet, apiURL+"/policy", nil)
-		req.Header.Set("X-API-Key", apiKey)
+		req.Header.Set("X-API-Key", currentAPIKey())
 		client := &http.Client{Timeout: 5 * time.Second}
 
 		resp, err := client.Do(req)
@@ -695,7 +718,7 @@ func uploadQueuedItem(client *http.Client, item queue.TelemetryItem) (int, bool)
 		return 0, false
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("X-API-Key", currentAPIKey())
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -711,7 +734,7 @@ func uploadQueuedItem(client *http.Client, item queue.TelemetryItem) (int, bool)
 		if err := json.NewDecoder(resp.Body).Decode(&result); err == nil && result.CheckUpdateNow {
 			log.Printf("SyncEngine: server requested immediate agent update check")
 			go func() {
-				if err := updater.CheckAndUpdate(apiURL, apiKey, agentVersion); err != nil {
+				if err := updater.CheckAndUpdate(apiURL, currentAPIKey(), agentVersion); err != nil {
 					log.Printf("Updater: immediate check failed: %v", err)
 				}
 			}()
@@ -751,13 +774,12 @@ func runWindowOnlyMode() {
 	if data, err := os.ReadFile(regFile); err == nil {
 		var reg map[string]string
 		if json.Unmarshal(data, &reg) == nil {
-			deviceID = reg["device_id"]
-			apiKey = reg["api_key"]
+			setCredentials(reg["device_id"], reg["api_key"])
 		}
 	} else {
 		log.Printf("window_only: registration cache not readable (%v); queueing without local credentials", err)
 	}
-	if deviceID == "" {
+	if currentDeviceID() == "" {
 		// Root service may not have registered yet, or registration.json may be
 		// intentionally private. Retry briefly for installs that have not
 		// finished bootstrapping, then keep running without local credentials.
@@ -767,20 +789,21 @@ func runWindowOnlyMode() {
 			if data, err := os.ReadFile(regFile); err == nil {
 				var reg map[string]string
 				if json.Unmarshal(data, &reg) == nil && reg["device_id"] != "" {
-					deviceID = reg["device_id"]
-					apiKey = reg["api_key"]
+					setCredentials(reg["device_id"], reg["api_key"])
 					break
 				}
 			}
 		}
-		if deviceID == "" {
+		if currentDeviceID() == "" {
 			log.Printf("window_only: continuing without registration cache; root sync will attach device identity")
 		}
 	}
-	if deviceID != "" && apiKey != "" {
-		log.Printf("window_only: using device_id=%s", deviceID)
-		commander.SetCredentials(apiURL, apiKey)
+	if currentDeviceID() != "" && currentAPIKey() != "" {
+		log.Printf("window_only: using device_id=%s", currentDeviceID())
 		commander.SetDataDir(dataDir)
+		// The root service may rotate the key after a 401; pick the new one up
+		// from the registration cache instead of failing until restart.
+		commander.ReauthHook = reloadCredentialsFromCache
 
 		// The window service also polls remote commands: session-context actions
 		// (lock_screen) must run here because the root system service cannot reach
@@ -812,7 +835,7 @@ func runWindowOnlyMode() {
 			continue
 		}
 		finalPayload := map[string]interface{}{
-			"device_id":        deviceID,
+			"device_id":        currentDeviceID(),
 			"event_id":         fmt.Sprintf("%s-%d", agentSessionID, sequence),
 			"agent_session_id": agentSessionID,
 			"boot_id":          bootID,

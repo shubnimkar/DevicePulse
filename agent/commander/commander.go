@@ -52,6 +52,10 @@ type resultRequest struct {
 	Detail    string `json:"detail"`
 }
 
+// ReauthHook, when set, is called after the server answers 401 so the process can
+// reload credentials another process rotated. It reports whether they changed.
+var ReauthHook func() bool
+
 var (
 	mu           sync.RWMutex
 	apiEndpoint  string
@@ -116,6 +120,9 @@ func fetchAndExecute() {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("Commander: pending poll returned status %d", resp.StatusCode)
+		if resp.StatusCode == http.StatusUnauthorized && ReauthHook != nil {
+			ReauthHook()
+		}
 		return
 	}
 
@@ -176,10 +183,20 @@ func Execute(apiURL string, cmd Command) (string, string) {
 		return lockScreen()
 
 	case "quarantine_enable":
-		return quarantineEnable(apiURL)
+		status, detail := quarantineEnable(apiURL)
+		if status == StatusSuccess {
+			d := quarantineDuration(cmd.Params)
+			armQuarantineDeadline(d)
+			detail += fmt.Sprintf("; auto-release in %s", d.Round(time.Minute))
+		}
+		return status, detail
 
 	case "quarantine_release":
-		return quarantineRelease()
+		status, detail := quarantineRelease()
+		if status == StatusSuccess {
+			clearQuarantineDeadline()
+		}
+		return status, detail
 
 	case "wipe_agent":
 		go func() {
