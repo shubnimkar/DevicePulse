@@ -97,7 +97,9 @@ func (fc *FocusCache) applyFocusSummaries(deviceID string, summaries []interface
 	}
 
 	for _, raw := range summaries {
-		m, ok := raw.(map[string]interface{})
+		// Rebuilding from MongoDB yields bson.M items, ingest yields plain maps;
+		// a bare map assertion silently skipped every stored summary.
+		m, ok := mapValue(raw)
 		if !ok {
 			continue
 		}
@@ -2570,16 +2572,13 @@ func cleanupBootstrapLocks() {
 
 // savePolicyToMongo persists the current policy config to MongoDB so it
 // survives API restarts.
-func savePolicyToMongo(cfg map[string]interface{}) {
-	if mongoClient == nil {
-		return
-	}
+func savePolicyToMongo(coll *mongo.Collection, cfg map[string]interface{}) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	update := bson.M{"$set": cfg}
 	opts := options.Update().SetUpsert(true)
-	_, err := mongoClient.Database(dbName).Collection("config").UpdateOne(
+	_, err := coll.UpdateOne(
 		ctx, bson.M{"_id": "global_policy"}, update, opts,
 	)
 	if err != nil {
@@ -4060,10 +4059,13 @@ func recordAudit(r *http.Request, action, target, detail string) {
 		actor = u.Email
 	}
 	ev := AuditEvent{Action: action, Actor: actor, Target: target, Detail: detail, At: time.Now().UTC()}
+	// Capture the handle here: the goroutine must not read the package globals
+	// later (they are swapped by tests, and it keeps the write on one database).
+	audit := mongoClient.Database(dbName).Collection("audit_log")
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if _, err := mongoClient.Database(dbName).Collection("audit_log").InsertOne(ctx, ev); err != nil {
+		if _, err := audit.InsertOne(ctx, ev); err != nil {
 			log.Printf("Audit log write failed: %v", err)
 		}
 	}()
@@ -4384,10 +4386,7 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 	collActivity := mongoClient.Database(dbName).Collection("app_usage_daily")
 
 	// Insert telemetry event
-	telemetryDoc := bson.M(payload)
-	if telemetryArchiveResult != nil {
-		telemetryDoc = telemetryMetadata(payload, telemetryArchiveResult)
-	}
+	telemetryDoc := telemetryDocForStorage(payload, telemetryArchiveResult, now)
 	if _, err = collTelemetry.InsertOne(ctx, telemetryDoc); err != nil {
 		// A concurrent retry can pass the preflight lookup before the first
 		// request commits. The unique event_id index is the final arbiter; treat
@@ -5580,7 +5579,11 @@ func policyHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		globalPolicy.mu.Unlock()
 		// Persist so the policy survives API restarts.
-		go savePolicyToMongo(savedConfig)
+		// Resolve the collection now: the goroutine must not read the package
+		// globals later.
+		if mongoClient != nil {
+			go savePolicyToMongo(mongoClient.Database(dbName).Collection("config"), savedConfig)
+		}
 		recordAudit(r, "policy.updated", "fleet policy", "")
 		log.Println("Global policy updated")
 		w.WriteHeader(http.StatusOK)

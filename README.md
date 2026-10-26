@@ -386,6 +386,8 @@ DevicePulse/
 | `RELEASE_SIGNING_KEY` | API | — | Base64 Ed25519 seed: builds are signed automatically. Prefer signing offline with `api/cmd/sign_release` |
 | `UPDATE_PUBLIC_KEY` | API | — | Base64 Ed25519 public key used to check signatures uploaded to `/update/release/signature` |
 | `UPDATE_REQUIRE_SIGNATURE` | API | `false` | Never offer an unsigned release to agents |
+| `TELEMETRY_SNAPSHOT_MINUTES` | API | `60` | Without a telemetry S3 bucket, each sync is stored slim (about 1 KB) and one full snapshot per device and role is kept per this many minutes (`0` = no snapshots) |
+| `TELEMETRY_STORE_FULL` | API | `false` | `true` stores every sync in full in MongoDB, as before (about 31 KB per sync per device) |
 | `QUARANTINE_MAX_HOURS` | API | `24` | Default quarantine length; the agent releases itself at the deadline |
 | `DEVICEPULSE_UPDATE_PUBKEY` | Build | — | Base64 Ed25519 public key embedded in agents by `packaging/build.sh`; such agents install only signed updates |
 | `DEVICEPULSE_REQUIRE_HTTPS` | Agent | `false` | Refuse to start with a non-loopback `http://` API URL (otherwise only warns) |
@@ -417,6 +419,7 @@ Behavioral changes shipped with the backend audit fixes:
 - **Safer registration** — credential recovery requires hardware UUID/MAC match; hostname-only requests always mint fresh devices; concurrent first-registrations resolve cleanly instead of 500-ing.
 - **No agent downgrades** — update checks offer releases strictly newer than the running version.
 - **Browser-history policy enforced on the server** — at ingest, `domain_only` reduces every URL to `scheme://host` (title cleared, entries with no host such as `file:` or `about:blank` dropped), and `disabled` / `collect_browser_history=false` drops the history entirely, whatever the agent sent. It applies to data arriving after the policy is set; history already stored is not rewritten.
+- **Slim telemetry in MongoDB** — each sync used to be stored whole (about 31 KB per device every sync: services, installed apps, processes, ports). The dashboard shows current values from the `devices` collection, and the telemetry collection is only read for timestamps (connection history), per-app focus summaries and the browser-history pointer, so syncs are now stored slim (about 1 KB) with one full snapshot per device and role per hour. Existing documents can be slimmed with `go run ./cmd/slim_telemetry --dry-run` (then `--apply`); data files shrink only after the cluster compacts.
 - **Paged device and user lists** — `/devices` and `/users` accept `?limit=`; the dashboard loads them page by page. Calls without `limit` return the original array, so older dashboards keep working.
 - **Non-root container** — runtime image drops privileges to uid 10001.
 
