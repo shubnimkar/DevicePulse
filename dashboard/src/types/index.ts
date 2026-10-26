@@ -319,6 +319,8 @@ export interface AgentRelease {
   download_url: string;
   checksum_sha256: string;
   published_at?: string;
+  /** Held back from agents until an admin activates it (RELEASES_REQUIRE_ACTIVATION). */
+  pending_activation?: boolean;
 }
 
 export interface AgentRolloutResponse {

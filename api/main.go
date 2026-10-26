@@ -5450,6 +5450,15 @@ type AgentRelease struct {
 	S3Key       string    `bson:"s3_key,omitempty" json:"s3_key,omitempty"`
 	Checksum    string    `bson:"checksum_sha256"  json:"checksum_sha256"`
 	PublishedAt time.Time `bson:"published_at"     json:"published_at"`
+	// PendingActivation holds a new release back from /update/check until an admin
+	// activates it. Rows written before this field existed are treated as active.
+	PendingActivation bool `bson:"pending_activation,omitempty" json:"pending_activation,omitempty"`
+}
+
+// releasesRequireActivation gates new releases behind explicit activation. Off by
+// default so existing deployments keep "publish = live".
+func releasesRequireActivation() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("RELEASES_REQUIRE_ACTIVATION")), "true")
 }
 
 type AgentBuildArtifact struct {
@@ -5536,7 +5545,7 @@ func updateCheckHandler(w http.ResponseWriter, r *http.Request) {
 	// Find the latest release for this OS/arch, sorted by published_at desc.
 	coll := mongoClient.Database(dbName).Collection("agent_releases")
 	opts := options.FindOne().SetSort(bson.D{{Key: "published_at", Value: -1}})
-	filter := bson.M{"os": agentOS, "arch": agentArch}
+	filter := bson.M{"os": agentOS, "arch": agentArch, "pending_activation": bson.M{"$ne": true}}
 
 	var latest AgentRelease
 	if err := coll.FindOne(ctx, filter, opts).Decode(&latest); err != nil {
@@ -5551,7 +5560,10 @@ func updateCheckHandler(w http.ResponseWriter, r *http.Request) {
 	// Only offer an update when the latest release is strictly newer than what
 	// the agent runs. Plain inequality would push older releases onto devices
 	// that are already ahead.
-	if compareAgentVersions(latest.Version, currentVersion) <= 0 {
+	// A device is only moved to an OLDER version when an admin explicitly rolled
+	// it back (rollout of the active release); otherwise downgrades stay blocked.
+	cmp := compareAgentVersions(latest.Version, currentVersion)
+	if cmp == 0 || (cmp < 0 && !deviceTargetsRelease(ctx, checkingDeviceID, latest.Version)) {
 		log.Printf("Update check: device=%s %s/%s current=%s latest=%s update=false", checkingDeviceID, agentOS, agentArch, currentVersion, latest.Version)
 		markAgentUpdateStatus(ctx, r, "up_to_date")
 		w.Header().Set("Content-Type", "application/json")
@@ -5571,6 +5583,24 @@ func updateCheckHandler(w http.ResponseWriter, r *http.Request) {
 		"download_url":     downloadURL,
 		"checksum_sha256":  latest.Checksum,
 	})
+}
+
+// deviceTargetsRelease reports whether a rollout explicitly requested this
+// version for the device (set by releaseRolloutLatestHandler, cleared once the
+// device reports up to date).
+func deviceTargetsRelease(ctx context.Context, deviceID, version string) bool {
+	if deviceID == "" {
+		return false
+	}
+	var d bson.M
+	err := mongoClient.Database(dbName).Collection("devices").FindOne(ctx, bson.M{"device_id": deviceID},
+		options.FindOne().SetProjection(bson.M{"agent_target_version": 1, "agent_update_requested_at": 1})).Decode(&d)
+	if err != nil {
+		return false
+	}
+	target, _ := d["agent_target_version"].(string)
+	_, requested := d["agent_update_requested_at"]
+	return requested && target == version
 }
 
 func markAgentUpdateStatus(ctx context.Context, r *http.Request, status string, targetVersion ...string) {
@@ -5684,6 +5714,7 @@ func releasePublishHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rel.PublishedAt = time.Now()
+	rel.PendingActivation = releasesRequireActivation()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -5732,6 +5763,9 @@ func releaseListHandler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		allReleases = append(allReleases, rel)
+		if rel.PendingActivation {
+			continue // held back: not the active release for its target
+		}
 		key := rel.OS + "/" + rel.Arch
 		if _, exists := latestByTarget[key]; !exists {
 			latestByTarget[key] = rel
@@ -5754,7 +5788,7 @@ func releaseListHandler(w http.ResponseWriter, r *http.Request) {
 	})
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"releases": releases, "all_releases": allReleases})
+	json.NewEncoder(w).Encode(map[string]interface{}{"releases": releases, "all_releases": allReleases, "activation_required": releasesRequireActivation()})
 }
 
 // POST /update/release/activate
@@ -5797,11 +5831,13 @@ func releaseActivateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now()
 	rel.PublishedAt = now
+	rel.PendingActivation = false
 	// Bump published_at on existing rows instead of cloning the document every
-	// activation — the clone path grew agent_releases unboundedly.
+	// activation — the clone path grew agent_releases unboundedly. Activating also
+	// releases a version that was being held back.
 	res, err := coll.UpdateMany(ctx,
 		bson.M{"os": req.OS, "arch": req.Arch, "version": req.Version},
-		bson.M{"$set": bson.M{"published_at": now}},
+		bson.M{"$set": bson.M{"published_at": now}, "$unset": bson.M{"pending_activation": ""}},
 	)
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
@@ -5830,12 +5866,21 @@ func releaseRolloutLatestHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Optional body {"use_active": true}: roll out the currently ACTIVE release
+	// per target (newest activation) instead of the highest version. This is the
+	// rollback path: devices on a newer version are moved back to it. An empty
+	// body keeps the original "latest version" behaviour.
+	var rolloutReq struct {
+		UseActive bool `json:"use_active"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&rolloutReq)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	db := mongoClient.Database(dbName)
 	coll := db.Collection("agent_releases")
-	cur, err := coll.Find(ctx, bson.M{})
+	cur, err := coll.Find(ctx, bson.M{"pending_activation": bson.M{"$ne": true}})
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
@@ -5850,8 +5895,15 @@ func releaseRolloutLatestHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		key := rel.OS + "/" + rel.Arch
 		existing, ok := latestByTarget[key]
-		if !ok || compareAgentVersions(rel.Version, existing.Version) > 0 ||
-			(compareAgentVersions(rel.Version, existing.Version) == 0 && rel.PublishedAt.After(existing.PublishedAt)) {
+		switch {
+		case !ok:
+			latestByTarget[key] = rel
+		case rolloutReq.UseActive:
+			if rel.PublishedAt.After(existing.PublishedAt) {
+				latestByTarget[key] = rel
+			}
+		case compareAgentVersions(rel.Version, existing.Version) > 0 ||
+			(compareAgentVersions(rel.Version, existing.Version) == 0 && rel.PublishedAt.After(existing.PublishedAt)):
 			latestByTarget[key] = rel
 		}
 	}
@@ -5868,19 +5920,21 @@ func releaseRolloutLatestHandler(w http.ResponseWriter, r *http.Request) {
 	activated := make([]AgentRelease, 0, len(latestByTarget))
 	devicesMarked := int64(0)
 	for _, rel := range latestByTarget {
-		rel.PublishedAt = now
-		// Re-activate by bumping published_at on the existing row(s). Inserting
-		// a duplicate copy on every rollout made agent_releases grow forever.
-		res, updErr := coll.UpdateMany(ctx,
-			bson.M{"os": rel.OS, "arch": rel.Arch, "version": rel.Version},
-			bson.M{"$set": bson.M{"published_at": now}},
-		)
-		if updErr != nil {
-			log.Printf("Agent rollout: publish bump failed for %s/%s: %v", rel.OS, rel.Arch, updErr)
-		} else if res.MatchedCount == 0 {
-			if _, err := coll.InsertOne(ctx, rel); err != nil {
-				http.Error(w, "Database error", http.StatusInternalServerError)
-				return
+		if !rolloutReq.UseActive {
+			rel.PublishedAt = now
+			// Re-activate by bumping published_at on the existing row(s). Inserting
+			// a duplicate copy on every rollout made agent_releases grow forever.
+			res, updErr := coll.UpdateMany(ctx,
+				bson.M{"os": rel.OS, "arch": rel.Arch, "version": rel.Version},
+				bson.M{"$set": bson.M{"published_at": now}},
+			)
+			if updErr != nil {
+				log.Printf("Agent rollout: publish bump failed for %s/%s: %v", rel.OS, rel.Arch, updErr)
+			} else if res.MatchedCount == 0 {
+				if _, err := coll.InsertOne(ctx, rel); err != nil {
+					http.Error(w, "Database error", http.StatusInternalServerError)
+					return
+				}
 			}
 		}
 		activated = append(activated, rel)
@@ -5909,7 +5963,7 @@ func releaseRolloutLatestHandler(w http.ResponseWriter, r *http.Request) {
 	})
 
 	log.Printf("Agent rollout: latest rollout requested, activated_targets=%d devices_marked=%d", len(activated), devicesMarked)
-	recordAudit(r, "release.rollout", "fleet", fmt.Sprintf("targets=%d devices=%d", len(activated), devicesMarked))
+	recordAudit(r, "release.rollout", "fleet", fmt.Sprintf("targets=%d devices=%d use_active=%v", len(activated), devicesMarked, rolloutReq.UseActive))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"activated":      activated,
@@ -6273,6 +6327,8 @@ func publishAgentArtifacts(ctx context.Context, version string, artifacts []Agen
 			S3Key:       artifact.S3Key,
 			Checksum:    artifact.Checksum,
 			PublishedAt: now,
+
+			PendingActivation: releasesRequireActivation(),
 		})
 	}
 	if len(docs) == 0 {
