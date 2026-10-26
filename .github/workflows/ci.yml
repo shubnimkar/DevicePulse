@@ -92,6 +92,8 @@ jobs:
         working-directory: dashboard
       - run: node scripts/test-paged-fetch.cjs
         working-directory: dashboard
+      - run: node scripts/test-focus-trust.cjs
+        working-directory: dashboard
       - run: npm run lint
         working-directory: dashboard
       - run: npm run build

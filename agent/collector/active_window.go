@@ -16,7 +16,9 @@ package collector
 
 import (
 	"log"
+	"os"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -28,7 +30,29 @@ const (
 	sampleInterval            = 2 * time.Second
 	foregroundAppTimeout      = 10 * time.Second
 	activeWindowSampleStaleAt = 5 * time.Minute
+
+	// maxSampleGap is the longest silence between two samples that still counts as
+	// one continuous stretch. Anything longer means the machine was suspended or
+	// the sampler stalled, and that time must not be credited to an app.
+	maxSampleGap = 30 * time.Second
 )
+
+// Focus sources reported in telemetry, and what they mean for data quality.
+const (
+	sourceNone      = "none"       // nothing could tell which window has focus
+	sourceProcGuess = "proc-guess" // guessed from CPU activity; NOT the focused window
+)
+
+func focusQuality(source string) string {
+	switch source {
+	case "", sourceNone:
+		return "unavailable"
+	case sourceProcGuess:
+		return "estimated"
+	default:
+		return "accurate"
+	}
+}
 
 // focusSession is a single contiguous focus period for one app.
 type focusSession struct {
@@ -66,6 +90,13 @@ type ActiveWindowTracker struct {
 
 	lastSampleAt time.Time
 
+	// How the foreground app is being determined, and why tracking may be
+	// degraded. Reported in every snapshot so the dashboard can say how far to
+	// trust the numbers.
+	focusSource string
+	focusNote   string
+	idle        bool
+
 	stopCh chan struct{}
 	wg     sync.WaitGroup
 }
@@ -101,16 +132,19 @@ func (a *ActiveWindowTracker) Collect() (map[string]interface{}, error) {
 	now := time.Now()
 	fresh := !a.lastSampleAt.IsZero() && now.Sub(a.lastSampleAt) <= activeWindowSampleStaleAt
 	if a.currentApp != "" && fresh {
-		dur := now.Sub(a.sessionStart).Seconds()
-		if dur > 0 {
+		// Credit time only up to the last sample that actually saw this app, never
+		// up to "now": if the sampler stalled (suspend, hung backend) the gap is
+		// not usage.
+		end := a.lastSampleAt
+		if dur := end.Sub(a.sessionStart).Seconds(); dur > 0 {
 			a.sessions = append(a.sessions, focusSession{
 				AppName:      a.currentApp,
 				StartTime:    a.sessionStart,
-				EndTime:      now,
+				EndTime:      end,
 				DurationS:    dur,
 				Continuation: a.sessionCounted,
 			})
-			a.sessionStart = now
+			a.sessionStart = end
 			a.sessionCounted = true
 		}
 	}
@@ -161,6 +195,10 @@ func (a *ActiveWindowTracker) Collect() (map[string]interface{}, error) {
 		"collected_at":         now,
 		"last_sample_at":       a.lastSampleAt,
 		"tracker_fresh":        fresh,
+		"focus_source":         a.focusSource,
+		"focus_quality":        focusQuality(a.focusSource),
+		"focus_note":           a.focusNote,
+		"idle":                 a.idle,
 		"current_app":          current,
 		"sessions":             sessions,
 		"app_summaries":        cycleSummaries,
@@ -205,60 +243,88 @@ func (a *ActiveWindowTracker) sample() (stopped bool) {
 		case <-a.stopCh:
 			return true
 		case t := <-ticker.C:
-			app, ok := foregroundAppWithTimeout(foregroundAppTimeout)
+			app, source, ok := foregroundAppWithTimeout(foregroundAppTimeout)
 			if !ok {
 				log.Printf("ActiveWindowTracker: active-window sample failed or timed out")
 				continue
 			}
-
+			// Time at the keyboard only: skip it when the screen is locked or the
+			// user has not touched an input device for the idle threshold.
+			idle := false
+			if app != "" {
+				if away, known := userIdle(idleThreshold()); known {
+					idle = away
+				}
+			}
 			a.mu.Lock()
-			a.lastSampleAt = t
-			if app == "" {
-				if a.currentApp != "" {
-					dur := t.Sub(a.sessionStart).Seconds()
-					if dur > 0 {
-						a.sessions = append(a.sessions, focusSession{
-							AppName:      a.currentApp,
-							StartTime:    a.sessionStart,
-							EndTime:      t,
-							DurationS:    dur,
-							Continuation: a.sessionCounted,
-						})
-					}
-					a.currentApp = ""
-					a.sessionStart = time.Time{}
-					a.sessionCounted = false
-				}
-				a.mu.Unlock()
-				continue
-			}
-
-			if app != a.currentApp {
-				if a.currentApp != "" {
-					dur := t.Sub(a.sessionStart).Seconds()
-					if dur > 0 {
-						a.sessions = append(a.sessions, focusSession{
-							AppName:      a.currentApp,
-							StartTime:    a.sessionStart,
-							EndTime:      t,
-							DurationS:    dur,
-							Continuation: a.sessionCounted,
-						})
-					}
-				}
-				a.currentApp = app
-				a.sessionStart = t
-				a.sessionCounted = false
-			}
+			a.observe(t, app, source, idle)
 			a.mu.Unlock()
 		}
 	}
 }
 
-func foregroundAppWithTimeout(timeout time.Duration) (string, bool) {
+// observe folds one sample into the open session. The caller holds a.mu.
+//
+//   - app == "" (nothing identified) or idle: the open session ends here.
+//   - a different app: the open session ends and a new one starts.
+//   - a silence longer than maxSampleGap since the previous sample (suspend,
+//     stalled sampler): the open session ends where it was last seen, so the gap
+//     is never credited to an app.
+func (a *ActiveWindowTracker) observe(t time.Time, app, source string, idle bool) {
+	if a.currentApp != "" && !a.lastSampleAt.IsZero() && t.Sub(a.lastSampleAt) > maxSampleGap {
+		a.endSession(a.lastSampleAt)
+	}
+	a.lastSampleAt = t
+	if source != "" {
+		a.focusSource = source
+	}
+	a.idle = idle
+	if idle {
+		app = ""
+	}
+	switch {
+	case app == "":
+		a.endSession(t)
+	case app != a.currentApp:
+		a.endSession(t)
+		a.currentApp = app
+		a.sessionStart = t
+		a.sessionCounted = false
+	}
+}
+
+// endSession closes the open session at end (no-op when none is open).
+func (a *ActiveWindowTracker) endSession(end time.Time) {
+	if a.currentApp == "" {
+		return
+	}
+	if dur := end.Sub(a.sessionStart).Seconds(); dur > 0 {
+		a.sessions = append(a.sessions, focusSession{
+			AppName:      a.currentApp,
+			StartTime:    a.sessionStart,
+			EndTime:      end,
+			DurationS:    dur,
+			Continuation: a.sessionCounted,
+		})
+	}
+	a.currentApp = ""
+	a.sessionStart = time.Time{}
+	a.sessionCounted = false
+}
+
+// SetFocusNote records why tracking may be degraded (for example that the GNOME
+// extension is installed but needs a re-login). It is reported with every snapshot.
+func (a *ActiveWindowTracker) SetFocusNote(note string) {
+	a.mu.Lock()
+	a.focusNote = note
+	a.mu.Unlock()
+}
+
+func foregroundAppWithTimeout(timeout time.Duration) (string, string, bool) {
 	type foregroundResult struct {
-		app string
-		ok  bool
+		app    string
+		source string
+		ok     bool
 	}
 	result := make(chan foregroundResult, 1)
 	go func() {
@@ -268,30 +334,57 @@ func foregroundAppWithTimeout(timeout time.Duration) (string, bool) {
 				result <- foregroundResult{ok: false}
 			}
 		}()
-		result <- foregroundResult{app: getForegroundApp(), ok: true}
+		app, source := getForegroundApp()
+		result <- foregroundResult{app: app, source: source, ok: true}
 	}()
 
 	select {
 	case res := <-result:
-		return res.app, res.ok
+		return res.app, res.source, res.ok
 	case <-time.After(timeout):
-		return "", false
+		return "", sourceNone, false
 	}
 }
 
-// getForegroundApp returns the name of the currently focused application.
-// Returns an empty string on error or unsupported platform.
-func getForegroundApp() string {
+// getForegroundApp returns the focused application and how it was determined.
+// The app is empty when nothing is focused or it could not be read; the source
+// is empty when it should not change the reported source.
+func getForegroundApp() (app, source string) {
 	switch runtime.GOOS {
 	case "darwin":
-		return getForegroundAppMacOS()
+		return withSource(getForegroundAppMacOS(), "macos")
 	case "linux":
-		return getForegroundAppLinux()
+		return getForegroundAppLinuxDetailed()
 	case "windows":
-		return getForegroundAppWindows()
+		return withSource(getForegroundAppWindows(), "windows")
 	default:
-		return ""
+		return "", sourceNone
 	}
+}
+
+func withSource(app, source string) (string, string) {
+	if app == "" {
+		return "", ""
+	}
+	return app, source
+}
+
+// allowProcGuess re-enables the old behaviour of guessing the focused app from
+// CPU activity when no real source is available. Off by default: a guess is not
+// focus, and reporting it as usage produced wildly wrong totals.
+func allowProcGuess() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("DEVICEPULSE_ALLOW_PROC_GUESS")), "true")
+}
+
+// idleThreshold is how long without input counts as away (DEVICEPULSE_IDLE_SECONDS,
+// default 180; 0 turns idle detection off).
+func idleThreshold() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("DEVICEPULSE_IDLE_SECONDS")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 180 * time.Second
 }
 
 // ─── macOS ───────────────────────────────────────────────────────────────────

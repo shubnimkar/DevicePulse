@@ -1,0 +1,7 @@
+{
+  "uuid": "devicepulse-focus@waybeyond.tech",
+  "name": "DevicePulse Focus Reporter",
+  "description": "Exposes the focused window (WM class + title) over the session bus (org.devicepulse.Shell.GetFocusedWindow) so the DevicePulse agent can track per-app usage on GNOME Wayland, where org.gnome.Shell.Eval is disabled by default since GNOME 41.",
+  "shell-version": ["45", "46", "47", "48", "49"],
+  "url": "https://github.com/waybeyond/DevicePulse"
+}
