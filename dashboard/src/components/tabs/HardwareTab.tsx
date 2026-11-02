@@ -133,7 +133,7 @@ export default function HardwareTab({ hw }: Props) {
         <div className="sub-section">
           <div className="sub-section-title">All Volumes</div>
           <div className="disk-table-wrap">
-            <table className="ports-table">
+            <table className="ports-table" aria-label="Disk volumes">
               <thead>
                 <tr>
                   <th scope="col">Mount</th>
@@ -175,7 +175,7 @@ export default function HardwareTab({ hw }: Props) {
       {hw.network && hw.network.length > 1 && (
         <div className="sub-section">
           <div className="sub-section-title">Network Interfaces</div>
-          <table className="ports-table">
+          <table className="ports-table" aria-label="Network interfaces">
             <thead>
               <tr>
                 <th scope="col">Interface</th>

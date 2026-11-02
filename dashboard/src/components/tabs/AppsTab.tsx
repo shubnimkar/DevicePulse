@@ -31,7 +31,7 @@ export default function AppsTab({ data }: Props) {
       </div>
       <div className="apps-grid">
         {filtered.length ? filtered.map(app => (
-          <div key={app.path || app.name} className="app-item" title={app.path}>
+          <div key={app.path || app.name} className="app-item" title={app.path ? `${app.name} — ${app.path}` : app.name}>
             <div className="app-name">{app.name}</div>
             <div className="app-version">{app.version ?? '—'}</div>
           </div>

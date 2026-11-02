@@ -587,8 +587,11 @@ export default function Home() {
   useEffect(() => {
     if (!authUser) return;
     const t = window.setTimeout(() => { void fetchAll(); void fetchPolicy(); }, 0);
-    const id = setInterval(fetchAll, 5000);
-    return () => { window.clearTimeout(t); clearInterval(id); };
+    // Poll only while the tab is visible; catch up as soon as it is shown again.
+    const tick = () => { if (!document.hidden) void fetchAll(); };
+    const id = setInterval(tick, 5000);
+    document.addEventListener('visibilitychange', tick);
+    return () => { window.clearTimeout(t); clearInterval(id); document.removeEventListener('visibilitychange', tick); };
   }, [authUser, fetchAll, fetchPolicy]);
 
   useEffect(() => {
@@ -614,6 +617,7 @@ export default function Home() {
     const hasActiveJob = agentBuildJobs.some(job => !['published', 'failed'].includes(job.status));
     if (!hasActiveJob) return;
     const id = setInterval(() => {
+      if (document.hidden) return;
       void fetchAgentReleases();
       void fetchAgentBuildJobs();
     }, 3000);
@@ -1317,7 +1321,7 @@ export default function Home() {
           <div className="auth-brand-inner">
             <div className="auth-brand-mark"><IconLogo /></div>
             <div className="auth-brand-name">DevicePulse</div>
-            <h2 className="auth-brand-headline">Your fleet,<br />at a glance.</h2>
+            <p className="auth-brand-headline">Your fleet,<br />at a glance.</p>
             <p className="auth-brand-sub">
               Real-time endpoint telemetry for Linux, Windows and macOS — hardware,
               processes, browser activity and security posture in a single console.
@@ -1850,7 +1854,7 @@ export default function Home() {
                   {roleUpdateStatus && <span className="save-state" role="status">{roleUpdateStatus}</span>}
                 </div>
                 <div className="table-wrap">
-                  <table className="data-table">
+                  <table className="data-table" aria-label="Dashboard users">
                     <thead>
                       <tr>
                         <th scope="col">User</th>
@@ -2379,7 +2383,7 @@ export default function Home() {
                           </div>
                         </div>
                         <div className="table-wrap">
-                          <table className="data-table report-table">
+                          <table className="data-table report-table" aria-label="Highest usage devices">
                             <thead>
                               <tr>
                                 <th scope="col">Device</th>
@@ -2448,7 +2452,7 @@ export default function Home() {
                           </div>
                         </div>
                         <div className="table-wrap">
-                          <table className="data-table report-table">
+                          <table className="data-table report-table" aria-label="Device usage">
                             <thead>
                               <tr>
                                 <th scope="col">Device</th>
@@ -2505,7 +2509,7 @@ export default function Home() {
                           </div>
                         </div>
                         <div className="table-wrap">
-                          <table className="data-table report-table">
+                          <table className="data-table report-table" aria-label="Health breakdown">
                             <thead>
                               <tr>
                                 <th scope="col">Device</th>
@@ -2630,7 +2634,7 @@ export default function Home() {
                 })}
               </div>
               <div className="table-wrap">
-                <table className="data-table">
+                <table className="data-table" aria-label="Devices">
                   <thead>
                     <tr>
                       <th scope="col">Device</th>

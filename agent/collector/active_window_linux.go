@@ -39,6 +39,7 @@ import (
 // through XWayland there, which reports stale focus whenever a native Wayland
 // window (Firefox, for example) is focused, so it is never mixed in.
 func getForegroundAppLinuxDetailed() (string, string) {
+	AdoptSessionEnv()
 	hasDisplay := os.Getenv("DISPLAY") != ""
 	isWayland := os.Getenv("WAYLAND_DISPLAY") != "" || os.Getenv("XDG_SESSION_TYPE") == "wayland"
 
