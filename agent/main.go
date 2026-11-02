@@ -138,6 +138,9 @@ func runAgent() {
 		return
 	}
 
+	// On Linux the root service keeps the per-user window unit installed and running.
+	go maintainWindowService()
+
 	// 1. Initialize SQLite offline queue
 	os.MkdirAll(dataDir, 0755)
 	q, err := queue.NewQueue(filepath.Join(dataDir, "devicepulse.db"))

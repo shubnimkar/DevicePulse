@@ -59,5 +59,7 @@ RestartSec=5s
 NoNewPrivileges=true
 
 [Install]
-# WantedBy=default.target starts it after login for all user sessions.
-WantedBy=default.target
+# Start with the graphical session at every login. default.target is reached only
+# once per user manager, so after a logout (PartOf stops the service) it would
+# never come back while the manager stays alive.
+WantedBy=graphical-session.target
