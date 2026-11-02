@@ -119,6 +119,14 @@ export interface AppFocusSummary {
 
 export interface ActiveWindowData {
   current_app: string;
+  /** How the agent finds the focused window (gnome-extension, x11, proc-guess, none, ...). */
+  focus_source?: string;
+  /** accurate | estimated | unavailable */
+  focus_quality?: 'accurate' | 'estimated' | 'unavailable' | string;
+  /** Why tracking is degraded, for example an extension waiting for a re-login. */
+  focus_note?: string;
+  /** True while the screen is locked or the user is idle (time is not counted). */
+  idle?: boolean;
   collected_at?: string;
   last_sample_at?: string;
   tracker_fresh?: boolean;

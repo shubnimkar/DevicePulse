@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"os"
 	"time"
 
 	"github.com/devicepulse/agent/collector"
@@ -14,6 +15,9 @@ import (
 func maintainFocusExtension(tracker *collector.ActiveWindowTracker) {
 	last := ""
 	for {
+		// Started before the desktop session existed, this process has no
+		// XDG_CURRENT_DESKTOP and would wrongly conclude it is not on GNOME.
+		collector.AdoptSessionEnv()
 		st := gnomeext.Ensure(collector.GnomeExtensionRunning)
 		tracker.SetFocusNote(st.Note)
 		if st.State != last {
@@ -21,7 +25,13 @@ func maintainFocusExtension(tracker *collector.ActiveWindowTracker) {
 			last = st.State
 		}
 		switch st.State {
-		case gnomeext.StateNotGNOME, gnomeext.StateOptedOut:
+		case gnomeext.StateNotGNOME:
+			if os.Getenv("XDG_CURRENT_DESKTOP") == "" {
+				time.Sleep(time.Minute) // no session found yet; look again
+				continue
+			}
+			return
+		case gnomeext.StateOptedOut:
 			return
 		case gnomeext.StateRunning:
 			time.Sleep(time.Hour) // keep the installed copy current
